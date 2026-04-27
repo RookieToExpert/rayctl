@@ -5,7 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"unicode/utf8"
+	"time"
+	"unicode"
 
 	"rayctl/internal/service"
 )
@@ -23,16 +24,17 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 			truncateCell(node.Name, 22),
 			node.Ready,
 			node.Schedulable,
-			formatRepair(node.UsageType),
+			emptyDash(node.ProdRole),
+			formatRepairFlag(node.Repair),
 			truncateCell(node.InternalIP, 15),
 			node.ClusterName,
 		})
 	}
 
 	printBoxTableWithMaxWidths(
-		[]string{"HOST", "RDY", "SCH", "REPAIR", "IP", "CLUSTERNAME"},
+		[]string{"HOST", "RDY", "SCH", "PROD", "REPAIR", "IP", "CLUSTERNAME"},
 		rows,
-		[]int{22, 5, 5, 6, 15, 24},
+		[]int{22, 5, 5, 14, 6, 15, 24},
 	)
 
 	if total == 0 {
@@ -100,17 +102,31 @@ func PrintNodeMutationResult(result *service.NodeMutationResult) {
 	)
 }
 
-func PrintJobDetail(result *service.JobGetResult) {
+func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 	summaryRows := [][]string{
 		{"JOB", result.Name},
 		{"NAMESPACE", result.Namespace},
 		{"UID", result.UID},
 		{"SUBMITTER", result.Submitter},
 		{"PODGROUP", result.PodGroupName},
+		{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
 		{"INSPECT POD", result.InspectPod},
 		{"NODES", joinOrDash(result.Nodes)},
 	}
 	printBoxTable([]string{"FIELD", "VALUE"}, summaryRows)
+
+	if len(result.PersistentVolumeClaims) > 0 {
+		fmt.Fprintln(os.Stdout)
+		pvcRows := make([][]string, 0, len(result.PersistentVolumeClaims))
+		for _, pvc := range result.PersistentVolumeClaims {
+			pvcRows = append(pvcRows, []string{pvc.Name, pvc.ClaimName})
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"VOLUME", "CLAIM"},
+			pvcRows,
+			[]int{48, 48},
+		)
+	}
 
 	fmt.Fprintln(os.Stdout)
 	podRows := make([][]string, 0, len(result.Pods))
@@ -133,17 +149,6 @@ func PrintJobDetail(result *service.JobGetResult) {
 	)
 
 	fmt.Fprintln(os.Stdout)
-	eventRows := make([][]string, 0, len(result.RecentEvents))
-	for _, event := range result.RecentEvents {
-		eventRows = append(eventRows, []string{event.Time, event.Type, event.Reason, event.Message})
-	}
-	printBoxTableWithMaxWidths(
-		[]string{"LATEST EVENT TIME", "TYPE", "REASON", "MESSAGE"},
-		eventRows,
-		[]int{20, 10, 24, 72},
-	)
-
-	fmt.Fprintln(os.Stdout)
 	logRows := make([][]string, 0, len(result.RecentLogLines))
 	for _, line := range result.RecentLogLines {
 		logRows = append(logRows, []string{line})
@@ -153,6 +158,30 @@ func PrintJobDetail(result *service.JobGetResult) {
 		logRows,
 		[]int{110},
 	)
+
+	if strings.TrimSpace(result.PodGroupName) != "" {
+		fmt.Fprintf(os.Stdout, "For PodGroup diagnosis, switch KUBECONFIG to the target vcluster and run: rayctl job get pg %s\n", result.PodGroupName)
+	}
+
+	if debugTiming {
+		fmt.Fprintln(os.Stdout)
+		printBoxTable(
+			[]string{"STEP", "DURATION"},
+			[][]string{
+				{"locate", result.Timings.Locate.String()},
+				{"platform job", formatOptionalDuration(result.Timings.PlatformJob)},
+				{"platform pods", formatOptionalDuration(result.Timings.PlatformPods)},
+				{"platform events", formatOptionalDuration(result.Timings.PlatformEvents)},
+				{"platform logs", formatOptionalDuration(result.Timings.PlatformLogs)},
+				{"kube job", formatOptionalDuration(result.Timings.KubeJob)},
+				{"kube pods", formatOptionalDuration(result.Timings.KubePods)},
+				{"kube events", formatOptionalDuration(result.Timings.KubeEvents)},
+				{"kube logs", formatOptionalDuration(result.Timings.KubeLogs)},
+				{"format", result.Timings.Format.String()},
+				{"total", result.Timings.Total.String()},
+			},
+		)
+	}
 }
 
 func PrintPodGroupDetail(result *service.PodGroupGetResult) {
@@ -167,14 +196,74 @@ func PrintPodGroupDetail(result *service.PodGroupGetResult) {
 	printBoxTable([]string{"FIELD", "VALUE"}, summaryRows)
 
 	fmt.Fprintln(os.Stdout)
-	eventRows := make([][]string, 0, len(result.RecentEvents))
-	for _, event := range result.RecentEvents {
-		eventRows = append(eventRows, []string{event.Time, event.Type, event.Reason, event.Message})
+	statusRows := make([][]string, 0, len(result.StatusMessages))
+	for _, message := range result.StatusMessages {
+		statusRows = append(statusRows, []string{message})
 	}
 	printBoxTableWithMaxWidths(
-		[]string{"LATEST EVENT TIME", "TYPE", "REASON", "MESSAGE"},
-		eventRows,
-		[]int{20, 10, 24, 72},
+		[]string{"PODGROUP STATUS MESSAGE"},
+		statusRows,
+		[]int{120},
+	)
+}
+
+func PrintJobCheckDetail(result *service.JobCheckResult) {
+	rows := [][]string{
+		{"任务", result.Name},
+	}
+
+	for _, line := range result.Diagnosis {
+		rows = append(rows, []string{"结论", line})
+	}
+
+	if strings.TrimSpace(result.Instruction) != "" {
+		rows = append(rows, []string{"下一步", result.Instruction})
+	}
+
+	for _, pvc := range result.PVCs {
+		rows = append(rows, []string{
+			"PVC",
+			fmt.Sprintf("%s -> %s | %s", pvc.Name, pvc.ClaimName, pvc.Message),
+		})
+	}
+
+	for _, pod := range result.Pods {
+		rows = append(rows, []string{
+			"Pod",
+			fmt.Sprintf("%s | phase=%s | ready=%s | node=%s", pod.Name, pod.Phase, pod.Ready, pod.NodeName),
+		})
+	}
+
+	for _, secret := range result.SecretChecks {
+		rows = append(rows, []string{
+			"镜像账号密码",
+			fmt.Sprintf("%s | 账号=%s | 密码=%s", emptyDash(secret.SecretName), emptyDash(secret.Username), emptyDash(secret.Password)),
+		})
+		rows = append(rows, []string{
+			"镜像密钥结果",
+			fmt.Sprintf("%s", emptyDash(secret.Message)),
+		})
+	}
+
+	for _, item := range result.PodGroupEvidence {
+		rows = append(rows, []string{
+			"PodGroup 证据",
+			fmt.Sprintf("%s | %s | %s", emptyDash(item.Source), emptyDash(item.Status), emptyDash(item.Detail)),
+		})
+	}
+
+	resultWidth := terminalWidth() - 16
+	if resultWidth > 92 {
+		resultWidth = 92
+	}
+	if resultWidth < 48 {
+		resultWidth = 48
+	}
+
+	printBoxTableWithMaxWidths(
+		[]string{"项目", "结果"},
+		rows,
+		[]int{12, resultWidth},
 	)
 }
 
@@ -218,7 +307,9 @@ func printBoxTableWithMaxWidths(headers []string, rows [][]string, maxWidths []i
 	fmt.Fprintln(os.Stdout, renderRow(headers, widths))
 	fmt.Fprintln(os.Stdout, borderLine("├", "┼", "┤", widths))
 	for _, row := range rows {
-		fmt.Fprintln(os.Stdout, renderRow(row, widths))
+		for _, rendered := range renderWrappedRows(row, widths) {
+			fmt.Fprintln(os.Stdout, rendered)
+		}
 	}
 	fmt.Fprintln(os.Stdout, borderLine("└", "┴", "┘", widths))
 }
@@ -258,11 +349,104 @@ func renderRow(row []string, widths []int) string {
 	return b.String()
 }
 
+func renderWrappedRows(row []string, widths []int) []string {
+	cellLines := make([][]string, len(widths))
+	maxLines := 1
+	for i, width := range widths {
+		cell := ""
+		if i < len(row) {
+			cell = row[i]
+		}
+		lines := wrapCell(cell, width)
+		cellLines[i] = lines
+		if len(lines) > maxLines {
+			maxLines = len(lines)
+		}
+	}
+
+	rendered := make([]string, 0, maxLines)
+	for lineIdx := 0; lineIdx < maxLines; lineIdx++ {
+		current := make([]string, len(widths))
+		for cellIdx := range widths {
+			if lineIdx < len(cellLines[cellIdx]) {
+				current[cellIdx] = cellLines[cellIdx][lineIdx]
+			}
+		}
+		rendered = append(rendered, renderRow(current, widths))
+	}
+	return rendered
+}
+
+func wrapCell(value string, width int) []string {
+	if width <= 0 {
+		return []string{value}
+	}
+	if value == "" {
+		return []string{""}
+	}
+
+	paragraphs := strings.Split(value, "\n")
+	lines := make([]string, 0, len(paragraphs))
+	for _, paragraph := range paragraphs {
+		paragraph = strings.TrimRight(paragraph, " ")
+		runes := []rune(paragraph)
+		if len(runes) == 0 {
+			lines = append(lines, "")
+			continue
+		}
+		for textWidth(string(runes)) > width {
+			split := bestWrapPosition(runes, width)
+			lines = append(lines, strings.TrimSpace(string(runes[:split])))
+			runes = trimLeadingWrapRunes(runes[split:])
+		}
+		lines = append(lines, string(runes))
+	}
+	return lines
+}
+
+func bestWrapPosition(runes []rune, width int) int {
+	if textWidth(string(runes)) <= width {
+		return len(runes)
+	}
+
+	best := prefixWithinWidth(runes, width)
+	for i := best; i > 0; i-- {
+		if isWrapBoundary(runes[i-1]) {
+			best = i
+			break
+		}
+	}
+	if best <= 0 {
+		best = width
+	}
+	return best
+}
+
+func trimLeadingWrapRunes(runes []rune) []rune {
+	start := 0
+	for start < len(runes) {
+		if runes[start] != ' ' {
+			break
+		}
+		start++
+	}
+	return runes[start:]
+}
+
+func isWrapBoundary(ch rune) bool {
+	switch ch {
+	case ' ', ',', '.', ';', ':', '|', '/', '，', '。', '；', '：', '、', '）', ')', ']', '】', '>':
+		return true
+	default:
+		return false
+	}
+}
+
 func truncateCell(value string, width int) string {
 	if width <= 0 || textWidth(value) <= width {
 		return value
 	}
-	if width == 1 {
+	if width <= 1 {
 		return "."
 	}
 	if width <= 3 {
@@ -270,14 +454,11 @@ func truncateCell(value string, width int) string {
 	}
 
 	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	return string(runes[:width-3]) + "..."
+	return string(runes[:prefixWithinWidth(runes, width-3)]) + "..."
 }
 
-func formatRepair(v string) string {
-	return fmt.Sprintf("%t", strings.TrimSpace(v) == "repair")
+func formatRepairFlag(v bool) string {
+	return fmt.Sprintf("%t", v)
 }
 
 func joinOrDash(values []string) string {
@@ -285,6 +466,13 @@ func joinOrDash(values []string) string {
 		return "-"
 	}
 	return strings.Join(values, ", ")
+}
+
+func formatOptionalDuration(d time.Duration) string {
+	if d <= 0 {
+		return "-"
+	}
+	return d.String()
 }
 
 func terminalWidth() int {
@@ -307,5 +495,68 @@ func textWidth(value string) int {
 	if value == "" {
 		return 0
 	}
-	return utf8.RuneCountInString(value)
+	width := 0
+	for _, r := range value {
+		width += runeDisplayWidth(r)
+	}
+	return width
+}
+
+func prefixWithinWidth(runes []rune, maxWidth int) int {
+	if maxWidth <= 0 {
+		return 0
+	}
+	currentWidth := 0
+	for i, r := range runes {
+		rw := runeDisplayWidth(r)
+		if currentWidth+rw > maxWidth {
+			return i
+		}
+		currentWidth += rw
+	}
+	return len(runes)
+}
+
+func runeDisplayWidth(r rune) int {
+	switch {
+	case r == 0:
+		return 0
+	case r < 32 || (r >= 0x7f && r < 0xa0):
+		return 0
+	case unicode.In(r,
+		unicode.Han,
+		unicode.Hangul,
+		unicode.Hiragana,
+		unicode.Katakana):
+		return 2
+	case isFullWidthRune(r):
+		return 2
+	default:
+		return 1
+	}
+}
+
+func isFullWidthRune(r rune) bool {
+	switch {
+	case r >= 0x1100 && r <= 0x115F:
+		return true
+	case r >= 0x2329 && r <= 0x232A:
+		return true
+	case r >= 0x2E80 && r <= 0xA4CF:
+		return true
+	case r >= 0xAC00 && r <= 0xD7A3:
+		return true
+	case r >= 0xF900 && r <= 0xFAFF:
+		return true
+	case r >= 0xFE10 && r <= 0xFE19:
+		return true
+	case r >= 0xFE30 && r <= 0xFE6F:
+		return true
+	case r >= 0xFF00 && r <= 0xFF60:
+		return true
+	case r >= 0xFFE0 && r <= 0xFFE6:
+		return true
+	default:
+		return false
+	}
 }

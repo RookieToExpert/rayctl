@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -39,6 +40,9 @@ func newNodeGetCmd() *cobra.Command {
 	var labels string
 	var limit int
 	var showAll bool
+	var prod string
+	var role string
+	var repairOnly bool
 
 	// 定义 get 命令的结构和行为
 	cmd := &cobra.Command{
@@ -60,13 +64,37 @@ func newNodeGetCmd() *cobra.Command {
 				target = args[0]
 			}
 
+			effectiveLabels := labels
+			if prod != "" {
+				effectiveLabels = appendLabelSelector(effectiveLabels, "node-role.compute.sensecore.cn/prod="+prod)
+			}
 			// 3. 实例化 NodeService 并调用 List 方法获取符合条件的节点及最终使用的选择器
 			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
 			// nodeService.List 定义于 internal/service/node_service.go
-			nodes, resolvedSelector, err := nodeService.List(context.Background(), target, labels)
+			nodes, resolvedSelector, err := nodeService.List(context.Background(), target, effectiveLabels)
 			if err != nil {
 				return err
+			}
+
+			if repairOnly {
+				filtered := make([]service.NodeListItem, 0, len(nodes))
+				for _, node := range nodes {
+					if node.Repair {
+						filtered = append(filtered, node)
+					}
+				}
+				nodes = filtered
+			}
+
+			if role != "" {
+				filtered := make([]service.NodeListItem, 0, len(nodes))
+				for _, node := range nodes {
+					if strings.Contains(strings.ToLower(node.ProdRole), strings.ToLower(role)) {
+						filtered = append(filtered, node)
+					}
+				}
+				nodes = filtered
 			}
 
 			if vcClient, ok := platform.NewVirtualClusterClientFromEnv(); ok {
@@ -103,10 +131,26 @@ func newNodeGetCmd() *cobra.Command {
 
 	// 为 get 命令绑定 --labels 标志，允许用户在命令行中追加额外的标签过滤条件
 	cmd.Flags().StringVar(&labels, "labels", "", "附加到 profile 选择器上的额外标签选择器")
+	cmd.Flags().StringVar(&prod, "prod", "", "Filter by node-role.compute.sensecore.cn/prod, for example ecp-private or ecs")
+	cmd.Flags().StringVar(&role, "role", "", "Filter by displayed role, including node-role.sensecore.cn/* fallback roles")
+	cmd.Flags().BoolVar(&repairOnly, "repair", false, "Show only cordoned nodes")
 	cmd.Flags().IntVarP(&limit, "limit", "l", 100, "Number of nodes to show; use 0 to show all")
 	cmd.Flags().BoolVarP(&showAll, "all", "A", false, "Show all nodes")
 
 	return cmd
+}
+
+func appendLabelSelector(base string, clause string) string {
+	base = strings.TrimSpace(base)
+	clause = strings.TrimSpace(clause)
+	switch {
+	case base == "":
+		return clause
+	case clause == "":
+		return base
+	default:
+		return base + "," + clause
+	}
 }
 
 func limitNodes(nodes []service.NodeListItem, limit int) ([]service.NodeListItem, int, int) {

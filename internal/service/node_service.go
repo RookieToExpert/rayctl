@@ -20,6 +20,8 @@ import (
 const (
 	repairUsageLabelKey            = "belong-usage-type"
 	repairUsageLabelValue          = "repair"
+	prodRoleLabelKey               = "node-role.compute.sensecore.cn/prod"
+	genericRoleLabelPrefix         = "node-role.sensecore.cn/"
 	nodeVClusterNamespaceLabelKey  = "cluster.x-k8s.io/vcluster-namespace"
 	nsVClusterNamespaceLabelKey    = "vcluster.loft.sh/vcluster-namespace"
 	metaxGPUResourceName           = "metax-tech.com/gpu"
@@ -42,6 +44,8 @@ type NodeListItem struct {
 	Ready       string
 	Schedulable string
 	UsageType   string
+	Repair      bool
+	ProdRole    string
 	InternalIP  string
 	ClusterName string
 	ClusterUID  string
@@ -98,6 +102,8 @@ func (s *NodeService) List(ctx context.Context, target string, extraSelector str
 			Ready:       nodeReadyStatus(node.Status.Conditions),
 			Schedulable: nodeSchedulable(node.Spec.Unschedulable),
 			UsageType:   node.Labels[repairUsageLabelKey],
+			Repair:      node.Spec.Unschedulable,
+			ProdRole:    nodeDisplayRole(node.Labels),
 			InternalIP:  nodeInternalIP(node.Status.Addresses),
 			ClusterName: firstNonEmpty(
 				node.Labels["cluster.x-k8s.io/vcluster-name"],
@@ -110,6 +116,37 @@ func (s *NodeService) List(ctx context.Context, target string, extraSelector str
 	}
 
 	return result, resolvedSelector, nil
+}
+
+func nodeDisplayRole(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if role := strings.TrimSpace(labels[prodRoleLabelKey]); role != "" {
+		return role
+	}
+
+	roles := make([]string, 0, 2)
+	for key, value := range labels {
+		if !strings.HasPrefix(key, genericRoleLabelPrefix) {
+			continue
+		}
+		roleName := strings.TrimPrefix(key, genericRoleLabelPrefix)
+		roleName = strings.TrimSpace(roleName)
+		if roleName == "" {
+			roleName = strings.TrimSpace(value)
+		}
+		if roleName == "" {
+			continue
+		}
+		roles = append(roles, roleName)
+	}
+
+	sort.Strings(roles)
+	if len(roles) == 0 {
+		return ""
+	}
+	return strings.Join(roles, ",")
 }
 
 func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescribe, error) {

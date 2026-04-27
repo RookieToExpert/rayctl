@@ -13,7 +13,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "Path to the kubeconfig file (defaults to KUBECONFIG or the hard-coded path in internal/kube/client.go)")
+	rootCmd.PersistentFlags().StringVarP(&kubeconfig, "kubeconfig", "k", "", "Path to the kubeconfig file (defaults to KUBECONFIG or the hard-coded path in internal/kube/client.go)")
 	rootCmd.AddCommand(newNodeCmd())
 	rootCmd.AddCommand(newJobCmd())
 }

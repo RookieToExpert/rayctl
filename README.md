@@ -1,5 +1,4 @@
 # rayctl
-<<<<<<< HEAD
 强大的 k8s 工具 for 商汤 dcluster
 =======
 
@@ -29,4 +28,3 @@ go get k8s.io/api@latest
 go get k8s.io/apimachinery@latest
 go mod tidy
 ```
->>>>>>> 76d0f4c (4/25 version 1)

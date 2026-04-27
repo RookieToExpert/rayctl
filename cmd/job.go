@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/kube"
+	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -19,6 +20,7 @@ func newJobCmd() *cobra.Command {
 	}
 
 	jobCmd.AddCommand(newJobGetCmd())
+	jobCmd.AddCommand(newJobCheckCmd())
 	return jobCmd
 }
 
@@ -26,6 +28,19 @@ func newJobGetCmd() *cobra.Command {
 	getCmd := &cobra.Command{
 		Use:   "get",
 		Short: "查询 job 或 podgroup",
+	}
+
+	getCmd.AddCommand(newJobGetJobCmd())
+	getCmd.AddCommand(newJobGetPodGroupCmd())
+	return getCmd
+}
+
+func newJobGetJobCmd() *cobra.Command {
+	var debugTiming bool
+
+	cmd := &cobra.Command{
+		Use:   "job <job-name-or-pod-name-or-uid>",
+		Short: "根据任务名、Pod 名或 UID 查询 Job",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientset, dynamicClient, err := newJobClients()
@@ -33,19 +48,20 @@ func newJobGetCmd() *cobra.Command {
 				return err
 			}
 
-			jobService := service.NewJobService(clientset, dynamicClient)
+			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
 			result, err := jobService.GetJob(context.Background(), args[0])
 			if err != nil {
 				return err
 			}
 
-			output.PrintJobDetail(result)
+			output.PrintJobDetail(result, debugTiming)
 			return nil
 		},
 	}
 
-	getCmd.AddCommand(newJobGetPodGroupCmd())
-	return getCmd
+	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
+	return cmd
 }
 
 func newJobGetPodGroupCmd() *cobra.Command {
@@ -60,7 +76,8 @@ func newJobGetPodGroupCmd() *cobra.Command {
 				return err
 			}
 
-			jobService := service.NewJobService(clientset, dynamicClient)
+			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
 			result, err := jobService.GetPodGroup(context.Background(), args[0])
 			if err != nil {
 				return err
@@ -86,4 +103,30 @@ func newJobClients() (kubernetes.Interface, dynamic.Interface, error) {
 	}
 
 	return clientset, dynamicClient, nil
+}
+
+func newJobCheckCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "check <job-name>",
+		Short: "检查 Job 为什么起不来",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientset, dynamicClient, err := newJobClients()
+			if err != nil {
+				return err
+			}
+
+			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
+			result, err := jobService.CheckJob(context.Background(), args[0])
+			if err != nil {
+				return err
+			}
+
+			output.PrintJobCheckDetail(result)
+			return nil
+		},
+	}
+
+	return cmd
 }
