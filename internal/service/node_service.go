@@ -60,6 +60,8 @@ type NodeMutationResult struct {
 
 type NodeDescribe struct {
 	Hostname         string
+	VClusterName     string
+	VClusterUID      string
 	Unschedulable    bool
 	Repair           bool
 	GPUUsage         string
@@ -182,6 +184,13 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 
 	return &NodeDescribe{
 		Hostname:        node.Name,
+		VClusterName:    firstNonEmpty(
+			node.Labels["cluster.x-k8s.io/vcluster-name"],
+			node.Labels["cluster.x-k8s.io/cluster-name"],
+			node.Labels[nodeVClusterNamespaceLabelKey],
+			node.Labels["resource.compute.sensecore.cn/vc-uid"],
+		),
+		VClusterUID:     strings.TrimSpace(node.Labels["resource.compute.sensecore.cn/vc-uid"]),
 		Unschedulable:   node.Spec.Unschedulable,
 		Repair:          node.Labels[repairUsageLabelKey] == repairUsageLabelValue,
 		GPUUsage:        formatGPUUsage(allocatedGPU, totalGPU),

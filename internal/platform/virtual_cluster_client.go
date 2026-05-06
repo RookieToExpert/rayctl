@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,9 +46,24 @@ type VirtualCluster struct {
 	DisplayName string `json:"display_name"`
 }
 
+type StorageVolumeResource struct {
+	ID                       string `json:"id"`
+	RID                      string `json:"rid"`
+	Name                     string `json:"name"`
+	DisplayName              string `json:"display_name"`
+	Zone                     string `json:"zone"`
+	ResourceGroupName        string `json:"resource_group_name"`
+	ResourceGroupDisplayName string `json:"resource_group_display_name"`
+}
+
 type virtualClusterListResponse struct {
 	VirtualClusters []VirtualCluster `json:"virtual_clusters"`
 	NextPageToken   string           `json:"next_page_token"`
+}
+
+type storageVolumePageResponse struct {
+	Resources     []StorageVolumeResource `json:"resources"`
+	NextPageToken string                  `json:"next_page_token"`
 }
 
 type config struct {
@@ -177,7 +193,7 @@ func (c *VirtualClusterClient) ResolveDisplayNames(ctx context.Context, uids []s
 		if _, ok := uniqueUIDs[cluster.UID]; !ok {
 			continue
 		}
-		result[cluster.UID] = firstNonEmpty(cluster.DisplayName, cluster.Name, cluster.UID)
+		result[cluster.UID] = firstNonEmpty(cluster.Name, cluster.DisplayName, cluster.UID)
 	}
 
 	return result, nil
@@ -221,6 +237,142 @@ func (c *VirtualClusterClient) GetPersistentVolumeClaim(ctx context.Context, vcl
 		return nil, err
 	}
 	return &pvc, nil
+}
+
+func (c *VirtualClusterClient) GetPersistentVolume(ctx context.Context, vclusterName string, pvName string) (*corev1.PersistentVolume, error) {
+	reqURL := c.kubernetesResourceURL(vclusterName, fmt.Sprintf("/api/v1/persistentvolumes/%s", pvName), nil)
+	var pv corev1.PersistentVolume
+	if err := c.getJSON(ctx, reqURL, &pv); err != nil {
+		return nil, err
+	}
+	return &pv, nil
+}
+
+func (c *VirtualClusterClient) ListStorageVolumeResources(ctx context.Context, zone string) ([]StorageVolumeResource, error) {
+	pageToken := "1"
+	resources := make([]StorageVolumeResource, 0)
+
+	for {
+		u, _ := url.Parse(c.baseURL)
+		u.Path = "/rmh/v1/resources:page"
+		query := u.Query()
+		query.Set("filter", fmt.Sprintf(`resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume"  AND zone="*%s*"`, zone))
+		query.Set("page_size", "200")
+		query.Set("page_token", pageToken)
+		u.RawQuery = query.Encode()
+
+		var payload storageVolumePageResponse
+		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
+			return nil, err
+		}
+
+		resources = append(resources, payload.Resources...)
+		if strings.TrimSpace(payload.NextPageToken) == "" {
+			break
+		}
+		pageToken = payload.NextPageToken
+	}
+
+	return resources, nil
+}
+
+func (c *VirtualClusterClient) FindStorageVolumeResourceByUID(ctx context.Context, uid string) (*StorageVolumeResource, error) {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return nil, fmt.Errorf("storage volume uid is required")
+	}
+
+	for _, candidate := range uidSearchCandidates(uid) {
+		resource, err := c.findStorageVolumeResourceByFragment(ctx, candidate)
+		if err == nil && resource != nil {
+			return resource, nil
+		}
+	}
+	return nil, fmt.Errorf("storage volume resource with uid %q not found", uid)
+}
+
+func (c *VirtualClusterClient) FindStorageVolumeResource(ctx context.Context, identifier string) (*StorageVolumeResource, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("storage volume identifier is required")
+	}
+
+	if resource, err := c.FindStorageVolumeResourceByUID(ctx, identifier); err == nil && resource != nil {
+		return resource, nil
+	}
+	return c.findStorageVolumeResourceByFieldFragment(ctx, "name", identifier)
+}
+
+func (c *VirtualClusterClient) findStorageVolumeResourceByFragment(ctx context.Context, fragment string) (*StorageVolumeResource, error) {
+	return c.findStorageVolumeResourceByFieldFragment(ctx, "uid", fragment)
+}
+
+func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragment(ctx context.Context, field string, fragment string) (*StorageVolumeResource, error) {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return nil, fmt.Errorf("storage volume fragment is required")
+	}
+
+	u, _ := url.Parse(c.baseURL)
+	u.Path = "/rmh/v1/resources:page"
+	query := u.Query()
+
+	filter := fmt.Sprintf(`resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume"  AND %s="*%s*"`, field, fragment)
+	query.Set("filter", filter)
+	query.Set("page_size", "10")
+	query.Set("page_token", "1")
+	u.RawQuery = query.Encode()
+
+	var payload storageVolumePageResponse
+	if err := c.postJSON(ctx, u.String(), map[string]any{}, &payload); err != nil {
+		return nil, err
+	}
+
+	for i := range payload.Resources {
+		resource := &payload.Resources[i]
+		if field == "name" {
+			if strings.EqualFold(strings.TrimSpace(resource.Name), fragment) || strings.Contains(strings.TrimSpace(resource.Name), fragment) {
+				return resource, nil
+			}
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(resource.ID), fragment) || strings.Contains(strings.TrimSpace(resource.ID), fragment) {
+			return resource, nil
+		}
+	}
+	if len(payload.Resources) > 0 {
+		return &payload.Resources[0], nil
+	}
+	return nil, fmt.Errorf("storage volume resource with fragment %q not found", fragment)
+}
+
+func uidSearchCandidates(uid string) []string {
+	parts := strings.Split(strings.TrimSpace(uid), "-")
+	candidates := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+	appendCandidate := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		candidates = append(candidates, value)
+	}
+
+	appendCandidate(uid)
+	if len(parts) >= 3 {
+		appendCandidate(strings.Join(parts[2:], "-"))
+	}
+	if len(parts) >= 4 {
+		appendCandidate(strings.Join(parts[3:], "-"))
+	}
+	if len(parts) >= 2 {
+		appendCandidate(strings.Join(parts[len(parts)-2:], "-"))
+	}
+	return candidates
 }
 
 func (c *VirtualClusterClient) ListJobPods(ctx context.Context, vclusterName string, namespace string, jobName string) ([]corev1.Pod, error) {
@@ -365,7 +517,23 @@ func (c *VirtualClusterClient) authHeaders(reqURL string, method string) (map[st
 }
 
 func (c *VirtualClusterClient) getJSON(ctx context.Context, reqURL string, out any) error {
-	body, err := c.doRequest(ctx, reqURL)
+	body, err := c.doRequest(ctx, http.MethodGet, reqURL, "", nil)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	return nil
+}
+
+func (c *VirtualClusterClient) postJSON(ctx context.Context, reqURL string, payload any, out any) error {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal request for %s: %w", reqURL, err)
+	}
+
+	body, err := c.doRequest(ctx, http.MethodPost, reqURL, "application/json", bodyBytes)
 	if err != nil {
 		return err
 	}
@@ -376,25 +544,33 @@ func (c *VirtualClusterClient) getJSON(ctx context.Context, reqURL string, out a
 }
 
 func (c *VirtualClusterClient) getText(ctx context.Context, reqURL string) (string, error) {
-	body, err := c.doRequest(ctx, reqURL)
+	body, err := c.doRequest(ctx, http.MethodGet, reqURL, "", nil)
 	if err != nil {
 		return "", err
 	}
 	return string(body), nil
 }
 
-func (c *VirtualClusterClient) doRequest(ctx context.Context, reqURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+func (c *VirtualClusterClient) doRequest(ctx context.Context, method string, reqURL string, contentType string, requestBody []byte) ([]byte, error) {
+	var bodyReader io.Reader
+	if len(requestBody) > 0 {
+		bodyReader = bytes.NewReader(requestBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
-	headers, err := c.authHeaders(reqURL, http.MethodGet)
+	headers, err := c.authHeaders(reqURL, method)
 	if err != nil {
 		return nil, err
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
+	}
+	if strings.TrimSpace(contentType) != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 
 	resp, err := c.httpClient.Do(req)

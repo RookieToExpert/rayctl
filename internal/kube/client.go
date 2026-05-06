@@ -12,6 +12,10 @@ import (
 )
 
 const defaultKubeconfigPath = "/root/kubeconfig"
+const (
+	defaultClientQPS   = 50
+	defaultClientBurst = 100
+)
 
 func NewRestConfig(kubeconfig string) (*rest.Config, error) {
 	configPath := resolveKubeconfigPath(kubeconfig)
@@ -20,6 +24,11 @@ func NewRestConfig(kubeconfig string) (*rest.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build kubeconfig from %q: %w", configPath, err)
 	}
+
+	// Raise client-side throttling limits for read-heavy CLI workflows such as
+	// node/job inspection to avoid noisy throttling logs on large clusters.
+	restConfig.QPS = defaultClientQPS
+	restConfig.Burst = defaultClientBurst
 
 	return restConfig, nil
 }

@@ -49,31 +49,34 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 }
 
 func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}) {
-	lines := details.Pods
-	if len(lines) == 0 {
-		lines = []string{"-"}
-	}
+	printBoxTableWithMaxWidths(
+		[]string{"HOSTNAME", "VC", "UNSCHEDULABLE", "REPAIR", "GPU ALLOCATED/COUNT", "CPU ALLOCATED/COUNT", "MEMORY ALLOCATED/COUNT", "POD COUNT"},
+		[][]string{{
+			details.Hostname,
+			emptyDash(details.VClusterName),
+			fmt.Sprintf("%t", details.Unschedulable),
+			fmt.Sprintf("%t", details.Repair),
+			details.GPUUsage,
+			details.CPUUsage,
+			details.MemoryUsage,
+			fmt.Sprintf("%d", details.MatchedPodCount),
+		}},
+		[]int{24, 24, 13, 6, 20, 20, 24, 10},
+	)
 
-	rows := make([][]string, 0, len(lines))
-	for i, pod := range lines {
-		if i == 0 {
-			rows = append(rows, []string{
-				details.Hostname,
-				fmt.Sprintf("%t", details.Unschedulable),
-				fmt.Sprintf("%t", details.Repair),
-				details.GPUUsage,
-				details.CPUUsage,
-				details.MemoryUsage,
-				pod,
-			})
-		} else {
-			rows = append(rows, []string{"", "", "", "", "", "", pod})
+	fmt.Fprintln(os.Stdout)
+	podRows := make([][]string, 0, maxInt(1, len(details.Pods)))
+	if len(details.Pods) == 0 {
+		podRows = append(podRows, []string{"-"})
+	} else {
+		for _, pod := range details.Pods {
+			podRows = append(podRows, []string{pod})
 		}
 	}
-
-	printBoxTable(
-		[]string{"HOSTNAME", "UNSCHEDULABLE", "REPAIR", "GPU ALLOCATED/COUNT", "CPU ALLOCATED/COUNT", "MEMORY ALLOCATED/COUNT", "PODS"},
-		rows,
+	printBoxTableWithMaxWidths(
+		[]string{"PODS"},
+		podRows,
+		[]int{80},
 	)
 
 	if debugTiming {
@@ -105,6 +108,7 @@ func PrintNodeMutationResult(result *service.NodeMutationResult) {
 func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 	summaryRows := [][]string{
 		{"JOB", result.Name},
+		{"VC", result.VClusterName},
 		{"NAMESPACE", result.Namespace},
 		{"UID", result.UID},
 		{"SUBMITTER", result.Submitter},
@@ -119,12 +123,15 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 		fmt.Fprintln(os.Stdout)
 		pvcRows := make([][]string, 0, len(result.PersistentVolumeClaims))
 		for _, pvc := range result.PersistentVolumeClaims {
-			pvcRows = append(pvcRows, []string{pvc.Name, pvc.ClaimName})
+			pvcRows = append(pvcRows, []string{
+				emptyDash(pvc.ClaimName),
+				emptyDash(pvc.FrontendVolume),
+			})
 		}
 		printBoxTableWithMaxWidths(
-			[]string{"VOLUME", "CLAIM"},
+			[]string{"VIRTUAL PVC", "AFS"},
 			pvcRows,
-			[]int{48, 48},
+			[]int{32, 32},
 		)
 	}
 
@@ -223,14 +230,18 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 	for _, pvc := range result.PVCs {
 		rows = append(rows, []string{
 			"PVC",
-			fmt.Sprintf("%s -> %s | %s", pvc.Name, pvc.ClaimName, pvc.Message),
+			fmt.Sprintf("virtual pvc=%s | afs=%s | %s",
+				emptyDash(pvc.ClaimName),
+				emptyDash(pvc.FrontendVolume),
+				pvc.Message,
+			),
 		})
 	}
 
 	for _, pod := range result.Pods {
 		rows = append(rows, []string{
 			"Pod",
-			fmt.Sprintf("%s | phase=%s | ready=%s | node=%s", pod.Name, pod.Phase, pod.Ready, pod.NodeName),
+			fmt.Sprintf("%s | phase=%s | ready=%s | node=%s | reason=%s", pod.Name, pod.Phase, pod.Ready, pod.NodeName, emptyDash(pod.Reason)),
 		})
 	}
 
@@ -267,11 +278,82 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 	)
 }
 
+func PrintAFSCheckDetail(result *service.AFSCheckResult) {
+	rows := [][]string{
+		{
+			emptyDash(result.AFSName),
+			joinLinesOrDash(result.HostPVCs),
+			joinLinesOrDash(result.HostPVs),
+		},
+	}
+	printBoxTableWithMaxWidths(
+		[]string{"AFS", "HOST PVC", "HOST PV"},
+		rows,
+		[]int{24, 28, 28},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	displayPVCs := result.VirtualPVCs
+	if len(displayPVCs) > 20 {
+		displayPVCs = displayPVCs[:20]
+	}
+	pvcRows := make([][]string, 0, maxInt(1, len(displayPVCs)))
+	if len(displayPVCs) == 0 {
+		pvcRows = append(pvcRows, []string{"-"})
+	} else {
+		for _, pvc := range displayPVCs {
+			pvcRows = append(pvcRows, []string{
+				emptyDash(pvc),
+			})
+		}
+	}
+	printBoxTableWithMaxWidths(
+		[]string{"VIRTUAL PVC"},
+		pvcRows,
+		[]int{24},
+	)
+	fmt.Fprintf(os.Stdout, "总共关联的 Virtual PVC 数量: %d\n", len(result.VirtualPVCs))
+	if len(result.VirtualPVCs) > len(displayPVCs) {
+		fmt.Fprintf(os.Stdout, "默认仅展示前 %d 个 Virtual PVC。\n", len(displayPVCs))
+	}
+}
+
+func PrintPVCCheckDetail(result *service.PVCCheckResult) {
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	if len(result.Items) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-"})
+	} else {
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.PVCName),
+				emptyDash(item.AFSName),
+				emptyDash(item.Partition),
+				joinOrDash(item.JobNames),
+			})
+		}
+	}
+
+	printBoxTableWithMaxWidths(
+		[]string{"PVC", "AFS", "分区", "任务"},
+		rows,
+		[]int{24, 24, 20, 40},
+	)
+}
+
 func emptyDash(v string) string {
 	if strings.TrimSpace(v) == "" {
 		return "-"
 	}
 	return v
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func printBoxTable(headers []string, rows [][]string) {
@@ -303,6 +385,8 @@ func printBoxTableWithMaxWidths(headers []string, rows [][]string, maxWidths []i
 		}
 	}
 
+	fitWidthsToTerminal(widths, headers)
+
 	fmt.Fprintln(os.Stdout, borderLine("┌", "┬", "┐", widths))
 	fmt.Fprintln(os.Stdout, renderRow(headers, widths))
 	fmt.Fprintln(os.Stdout, borderLine("├", "┼", "┤", widths))
@@ -312,6 +396,62 @@ func printBoxTableWithMaxWidths(headers []string, rows [][]string, maxWidths []i
 		}
 	}
 	fmt.Fprintln(os.Stdout, borderLine("└", "┴", "┘", widths))
+}
+
+func fitWidthsToTerminal(widths []int, headers []string) {
+	if len(widths) == 0 {
+		return
+	}
+
+	maxTotal := terminalWidth() - 1
+	if maxTotal < 40 {
+		maxTotal = 40
+	}
+
+	currentTotal := tableDisplayWidth(widths)
+	if currentTotal <= maxTotal {
+		return
+	}
+
+	minWidths := make([]int, len(widths))
+	for i := range widths {
+		minWidth := 8
+		if i < len(headers) {
+			headerWidth := textWidth(headers[i])
+			if headerWidth > minWidth {
+				minWidth = headerWidth
+			}
+		}
+		if len(widths) == 1 {
+			minWidth = 20
+		}
+		minWidths[i] = minWidth
+	}
+
+	for currentTotal > maxTotal {
+		widest := -1
+		widestSpare := 0
+		for i := range widths {
+			spare := widths[i] - minWidths[i]
+			if spare > widestSpare {
+				widest = i
+				widestSpare = spare
+			}
+		}
+		if widest == -1 || widestSpare <= 0 {
+			break
+		}
+		widths[widest]--
+		currentTotal = tableDisplayWidth(widths)
+	}
+}
+
+func tableDisplayWidth(widths []int) int {
+	total := 1
+	for _, width := range widths {
+		total += width + 3
+	}
+	return total
 }
 
 func borderLine(left string, middle string, right string, widths []int) string {
@@ -468,6 +608,14 @@ func joinOrDash(values []string) string {
 	return strings.Join(values, ", ")
 }
 
+func joinLinesOrDash(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, "\n")
+}
+
+
 func formatOptionalDuration(d time.Duration) string {
 	if d <= 0 {
 		return "-"
@@ -482,6 +630,13 @@ func terminalWidth() int {
 		}
 	}
 	return 120
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func truncateForWidth(value string, width int) string {

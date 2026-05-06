@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -174,33 +175,38 @@ func newNodeDescribeCmd() *cobra.Command {
 
 	// 定义 describe 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:     "describe <node-name>",
+		Use:     "describe <node-name> [node-name...]",
 		Aliases: []string{"check"},
 		Short:   "快速检查节点上的 vcluster Pod 和资源占用",
-		// 强制要求必须提供且仅提供 1 个位置参数，即需要查询的节点名称
-		Args:  cobra.ExactArgs(1),
+		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 1. 初始化 Kubernetes 客户端
 			clientBegin := time.Now()
-			// kube.NewClientset 定义于 internal/kube/client.go
 			clientset, err := kube.NewClientset(kubeconfig)
 			if err != nil {
 				return err
 			}
 			clientDuration := time.Since(clientBegin)
 
-			// 2. 实例化 NodeService，传入用户指定的节点名称 (args[0]) 查询详细信息
-			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
-			// nodeService.Describe 定义于 internal/service/node_service.go
-			details, err := nodeService.Describe(context.Background(), args[0])
-			if err != nil {
-				return err
-			}
 
-			// 3. 调用 output 包，格式化并打印节点资源的详细描述信息
-			// output.PrintNodeDescribe 定义于 pkg/output/table.go
-			output.PrintNodeDescribe(details, debugTiming, clientDuration)
+			for i, nodeName := range args {
+				details, err := nodeService.Describe(context.Background(), nodeName)
+				if err != nil {
+					return fmt.Errorf("node %q: %w", nodeName, err)
+				}
+				if vcClient, ok := platform.NewVirtualClusterClientFromEnv(); ok && strings.TrimSpace(details.VClusterUID) != "" {
+					displayNames, err := vcClient.ResolveDisplayNames(context.Background(), []string{details.VClusterUID})
+					if err == nil {
+						if displayName, ok := displayNames[details.VClusterUID]; ok {
+							details.VClusterName = displayName
+						}
+					}
+				}
+				if i > 0 {
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
+				output.PrintNodeDescribe(details, debugTiming, clientDuration)
+			}
 			return nil
 		},
 	}

@@ -64,6 +64,7 @@ type JobGetResult struct {
 	Name          string
 	Namespace     string
 	UID           string
+	VClusterName  string
 	Submitter     string
 	PodGroupName  string
 	ImagePullSecrets []string
@@ -91,15 +92,27 @@ type JobCheckResult struct {
 }
 
 type VolumeClaimRef struct {
-	Name      string
-	ClaimName string
+	Name             string
+	ClaimName        string
+	PVName           string
+	BackendPV        string
+	DisplayPV        string
+	HostPVCName      string
+	HostPVCNamespace string
+	FrontendVolume   string
 }
 
 type PVCCheckItem struct {
-	Name      string
-	ClaimName string
-	Status    string
-	Message   string
+	Name             string
+	ClaimName        string
+	PVName           string
+	BackendPV        string
+	DisplayPV        string
+	HostPVCName      string
+	HostPVCNamespace string
+	FrontendVolume   string
+	Status           string
+	Message          string
 }
 
 type SecretCheckItem struct {
@@ -145,6 +158,7 @@ type JobPodCheckItem struct {
 	Phase     string
 	Ready     string
 	NodeName  string
+	Reason    string
 }
 
 type PodGroupGetResult struct {
@@ -246,12 +260,14 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 	}
 	formatDuration := time.Since(formatBegin)
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
+	pvcRefs = s.resolveVolumeClaimRefs(ctx, identity, pvcRefs)
 	imagePullSecrets = s.resolveImagePullSecretsFromKube(ctx, firstNonEmpty(identity.HostNamespace, identity.Namespace), imagePullSecrets)
 
 	return &JobGetResult{
 		Name:           identity.Name,
 		Namespace:      identity.Namespace,
 		UID:            identity.UID,
+		VClusterName:   dashIfEmpty(identity.VClusterName),
 		Submitter:      identity.Submitter,
 		PodGroupName:   dashIfEmpty(identity.PodGroupName),
 		ImagePullSecrets: imagePullSecrets,
@@ -301,37 +317,67 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 	podChecks := make([]JobPodCheckItem, 0, len(pods))
 	readyPodCount := 0
 	assignedPodCount := 0
+	runningPodCount := 0
+	failedPods := make([]JobPodCheckItem, 0)
 	for _, pod := range pods {
 		ready := isPodReady(pod)
 		if ready {
 			readyPodCount++
 		}
+		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodSucceeded {
+			runningPodCount++
+		}
 		if strings.TrimSpace(pod.Spec.NodeName) != "" {
 			assignedPodCount++
 		}
-		podChecks = append(podChecks, JobPodCheckItem{
+		reason := podFailureReason(pod)
+		item := JobPodCheckItem{
 			Name:     pod.Name,
 			Phase:    dashIfEmpty(string(pod.Status.Phase)),
 			Ready:    boolToYesNo(ready),
 			NodeName: dashIfEmpty(pod.Spec.NodeName),
-		})
+			Reason:   dashIfEmpty(reason),
+		}
+		podChecks = append(podChecks, item)
+		if isFailedPod(pod) {
+			failedPods = append(failedPods, item)
+		}
 	}
 	sort.Slice(podChecks, func(i, j int) bool {
 		return podChecks[i].Name < podChecks[j].Name
 	})
 
 	_, pvcRefs := extractJobSpecDetails(job)
+	pvcRefs = s.resolveVolumeClaimRefs(ctx, identity, pvcRefs)
 	failedPVCChecks := make([]PVCCheckItem, 0, len(pvcRefs))
 	pendingPVCs := 0
+	duplicatePVRefs := duplicatePVRefs(pvcRefs)
 	for _, pvcRef := range pvcRefs {
 		status := "-"
 		message := "-"
-		pvc, pvcErr := s.vcClient.GetPersistentVolumeClaim(ctx, identity.VClusterName, identity.Namespace, pvcRef.ClaimName)
-		if pvcErr != nil {
+		if pvcRef.PVName != "" {
+			status = "Bound"
+			message = pvcRef.PVName
+		}
+		if hostNamespace := strings.TrimSpace(identity.HostNamespace); hostNamespace != "" {
+			pvc, pvcErr := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, pvcRef.ClaimName, metav1.GetOptions{})
+			if pvcErr != nil {
+				message = classifyPVCErrorMessage(pvcErr)
+			} else {
+				status = dashIfEmpty(string(pvc.Status.Phase))
+				pvcRef.PVName = firstNonEmpty(strings.TrimSpace(pvc.Spec.VolumeName), pvcRef.PVName)
+				message = dashIfEmpty(firstNonEmpty(firstPVCConditionMessage(pvc), pvcRef.PVName))
+				if pvc.Status.Phase == corev1.ClaimPending {
+					pendingPVCs++
+					message = "PVC 的 AKSK 错误"
+				}
+			}
+		} else if pvc, pvcErr := s.vcClient.GetPersistentVolumeClaim(ctx, identity.VClusterName, identity.Namespace, pvcRef.ClaimName); pvcErr != nil {
 			message = classifyPVCErrorMessage(pvcErr)
 		} else {
 			status = dashIfEmpty(string(pvc.Status.Phase))
-			message = dashIfEmpty(firstPVCConditionMessage(pvc))
+			pvcRef.PVName = firstNonEmpty(strings.TrimSpace(pvc.Spec.VolumeName), pvcRef.PVName)
+			message = dashIfEmpty(firstNonEmpty(firstPVCConditionMessage(pvc), pvcRef.PVName))
 			if pvc.Status.Phase == corev1.ClaimPending {
 				pendingPVCs++
 				message = "PVC 的 AKSK 错误"
@@ -339,10 +385,16 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 		}
 		if status != "Bound" {
 			failedPVCChecks = append(failedPVCChecks, PVCCheckItem{
-				Name:      pvcRef.Name,
-				ClaimName: pvcRef.ClaimName,
-				Status:    status,
-				Message:   message,
+				Name:             pvcRef.Name,
+				ClaimName:        pvcRef.ClaimName,
+				PVName:           pvcRef.PVName,
+				BackendPV:        pvcRef.BackendPV,
+				DisplayPV:        pvcRef.DisplayPV,
+				HostPVCName:      pvcRef.HostPVCName,
+				HostPVCNamespace: pvcRef.HostPVCNamespace,
+				FrontendVolume:   pvcRef.FrontendVolume,
+				Status:           status,
+				Message:          message,
 			})
 		}
 	}
@@ -356,7 +408,19 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 			missingPVCs++
 		}
 	}
-	if len(pods) == 0 || assignedPodCount == 0 {
+	imagePullSecrets, _ := extractJobSpecDetails(job)
+	secretChecks = s.checkImagePullSecrets(ctx, identity, imagePullSecrets)
+	displaySecrets := make([]SecretCheckItem, 0, len(secretChecks))
+	for _, secret := range secretChecks {
+		if !strings.EqualFold(secret.Status, "OK") {
+			displaySecrets = append(displaySecrets, secret)
+		}
+	}
+
+	if len(failedPods) > 0 {
+		stage = "failed"
+		diagnosis = append(diagnosis, fmt.Sprintf("任务已经失败，不是还未拉起。失败 Pod: %s。", failedPods[0].Name))
+	} else if len(pods) == 0 || assignedPodCount == 0 {
 		stage = "scheduling"
 		if missingPVCs > 0 {
 			diagnosis = append(diagnosis, "存在 PVC 不在当前分区，任务因此无法继续调度。")
@@ -365,11 +429,14 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 		} else {
 			diagnosis = append(diagnosis, "任务还没有调度到任何 host。")
 		}
+	} else if runningPodCount > 0 && hasFailedSecretCheck(secretChecks) {
+		stage = "running"
+		diagnosis = append(diagnosis, "imagePullSecret 错误，但任务当前已经在运行。")
 	} else if readyPodCount == 0 {
 		stage = "startup"
-		imagePullSecrets, _ := extractJobSpecDetails(job)
-		secretChecks = s.checkImagePullSecrets(ctx, identity, imagePullSecrets)
-		if len(secretChecks) == 0 {
+		if len(duplicatePVRefs) > 0 {
+			diagnosis = append(diagnosis, "存在重复的 PV 挂载，当前任务可能卡在 PodInitiating。")
+		} else if len(secretChecks) == 0 {
 			diagnosis = append(diagnosis, "Pod 已经分配到 host，但还没有 Ready，且任务里没有配置 imagePullSecret。")
 		} else if hasFailedSecretCheck(secretChecks) {
 			diagnosis = append(diagnosis, "Pod 已经分配到 host，但还没有 Ready，当前 imagePullSecret 看起来是错误的。")
@@ -382,16 +449,21 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 		diagnosis = append(diagnosis, "至少有一个 Pod 已经 Ready，当前任务不属于常见的“起不来”问题。")
 	}
 
-	displaySecrets := make([]SecretCheckItem, 0, len(secretChecks))
-	for _, secret := range secretChecks {
-		if !strings.EqualFold(secret.Status, "OK") {
-			displaySecrets = append(displaySecrets, secret)
-		}
-	}
-
 	displayPods := make([]JobPodCheckItem, 0, len(podChecks))
-	if stage == "startup" {
+	if stage == "startup" || stage == "failed" || (stage == "running" && len(displaySecrets) > 0) {
 		for _, pod := range podChecks {
+			if stage == "failed" {
+				if pod.Reason != "-" || strings.EqualFold(pod.Phase, "Failed") {
+					displayPods = append(displayPods, pod)
+				}
+				continue
+			}
+			if stage == "running" && len(displaySecrets) > 0 {
+				if strings.EqualFold(pod.Phase, "Running") || pod.Ready == "Yes" {
+					displayPods = append(displayPods, pod)
+				}
+				continue
+			}
 			if pod.Ready != "Yes" {
 				displayPods = append(displayPods, pod)
 			}
@@ -414,7 +486,7 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 		Stage:            stage,
 		Instruction:      instruction,
 		Pods:             displayPods,
-		PVCs:             failedPVCChecks,
+		PVCs:             append(failedPVCChecks, pvcRefsToChecks(duplicatePVRefs)...),
 		SecretChecks:     displaySecrets,
 		PodGroupEvidence: nil,
 		Diagnosis:        diagnosis,
@@ -514,12 +586,14 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 	}
 	formatDuration := time.Since(formatBegin)
 	imagePullSecrets, pvcRefs := extractJobSpecDetails(job)
+	pvcRefs = s.resolveVolumeClaimRefs(ctx, identity, pvcRefs)
 	imagePullSecrets = s.resolveImagePullSecrets(ctx, identity, imagePullSecrets)
 
 	return &JobGetResult{
 		Name:           identity.Name,
 		Namespace:      identity.Namespace,
 		UID:            identity.UID,
+		VClusterName:   dashIfEmpty(identity.VClusterName),
 		Submitter:      identity.Submitter,
 		PodGroupName:   dashIfEmpty(identity.PodGroupName),
 		ImagePullSecrets: imagePullSecrets,
@@ -1488,6 +1562,64 @@ func podHasRunnableLogs(pod corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodSucceeded
 }
 
+func isFailedPod(pod corev1.Pod) bool {
+	if pod.Status.Phase == corev1.PodFailed {
+		return true
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if isFailedContainerStatus(status) {
+			return true
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if isFailedContainerStatus(status) {
+			return true
+		}
+	}
+	return false
+}
+
+func podFailureReason(pod corev1.Pod) string {
+	if pod.Status.Phase == corev1.PodFailed {
+		if strings.TrimSpace(pod.Status.Message) != "" {
+			return pod.Status.Message
+		}
+		if strings.TrimSpace(pod.Status.Reason) != "" {
+			return pod.Status.Reason
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if reason := containerFailureReason(status); reason != "" {
+			return reason
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if reason := containerFailureReason(status); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func isFailedContainerStatus(status corev1.ContainerStatus) bool {
+	return containerFailureReason(status) != ""
+}
+
+func containerFailureReason(status corev1.ContainerStatus) string {
+	if status.State.Terminated == nil {
+		return ""
+	}
+	terminated := status.State.Terminated
+	if terminated.ExitCode == 0 {
+		return ""
+	}
+	return firstNonEmpty(
+		strings.TrimSpace(terminated.Message),
+		strings.TrimSpace(terminated.Reason),
+		fmt.Sprintf("exit code %d", terminated.ExitCode),
+	)
+}
+
 func isPodReady(pod corev1.Pod) bool {
 	for _, condition := range pod.Status.Conditions {
 		if condition.Type == corev1.PodReady {
@@ -1632,6 +1764,143 @@ func normalizeSpecDetails(secretSet map[string]struct{}, claimSet map[string]Vol
 	})
 
 	return secrets, claims
+}
+
+func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobIdentity, refs []VolumeClaimRef) []VolumeClaimRef {
+	if len(refs) == 0 {
+		return refs
+	}
+
+	resolved := make([]VolumeClaimRef, 0, len(refs))
+	hostNamespace := ""
+	vclusterName := ""
+	namespace := ""
+	if identity != nil {
+		hostNamespace = strings.TrimSpace(identity.HostNamespace)
+		vclusterName = strings.TrimSpace(identity.VClusterName)
+		namespace = strings.TrimSpace(identity.Namespace)
+	}
+
+	for _, ref := range refs {
+		current := ref
+		switch {
+		case s.vcClient != nil && vclusterName != "" && namespace != "":
+			pvc, err := s.vcClient.GetPersistentVolumeClaim(ctx, vclusterName, namespace, ref.ClaimName)
+			if err == nil {
+				current.PVName = strings.TrimSpace(pvc.Spec.VolumeName)
+				if current.PVName != "" {
+					if pv, pvErr := s.clientset.CoreV1().PersistentVolumes().Get(ctx, current.PVName, metav1.GetOptions{}); pvErr == nil {
+						current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
+					} else if pv, pvErr := s.vcClient.GetPersistentVolume(ctx, vclusterName, current.PVName); pvErr == nil {
+						current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
+					}
+					if current.BackendPV == "" {
+						current.BackendPV = strings.TrimSpace(current.PVName)
+					}
+				}
+			}
+		case hostNamespace != "":
+			pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, ref.ClaimName, metav1.GetOptions{})
+			if err == nil {
+				current.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
+			}
+		}
+		s.enrichHostVolumeClaimRef(ctx, &current)
+		current.DisplayPV = firstNonEmpty(current.BackendPV, current.PVName)
+		resolved = append(resolved, current)
+	}
+
+	return resolved
+}
+
+func (s *JobService) enrichHostVolumeClaimRef(ctx context.Context, ref *VolumeClaimRef) {
+	if ref == nil {
+		return
+	}
+
+	hostPVName := strings.TrimSpace(ref.BackendPV)
+	if hostPVName == "" {
+		return
+	}
+
+	pv, err := s.clientset.CoreV1().PersistentVolumes().Get(ctx, hostPVName, metav1.GetOptions{})
+	if err != nil {
+		return
+	}
+
+	if pv.Spec.ClaimRef != nil {
+		ref.HostPVCName = strings.TrimSpace(pv.Spec.ClaimRef.Name)
+		ref.HostPVCNamespace = strings.TrimSpace(pv.Spec.ClaimRef.Namespace)
+	}
+
+	if s.vcClient == nil || strings.TrimSpace(ref.HostPVCName) == "" {
+		return
+	}
+
+	resourceUID := extractResourceUIDFromName(ref.HostPVCName)
+	if resourceUID == "" {
+		return
+	}
+
+	resource, err := s.vcClient.FindStorageVolumeResourceByUID(ctx, resourceUID)
+	if err != nil || resource == nil {
+		return
+	}
+	ref.FrontendVolume = firstNonEmpty(resource.Name, resource.DisplayName, resource.ID)
+}
+
+func duplicatePVRefs(refs []VolumeClaimRef) []VolumeClaimRef {
+	byPV := make(map[string][]VolumeClaimRef)
+	for _, ref := range refs {
+		pvName := strings.TrimSpace(firstNonEmpty(ref.BackendPV, ref.PVName))
+		if pvName == "" {
+			continue
+		}
+		byPV[pvName] = append(byPV[pvName], ref)
+	}
+
+	duplicates := make([]VolumeClaimRef, 0)
+	for _, group := range byPV {
+		if len(group) < 2 {
+			continue
+		}
+		duplicates = append(duplicates, group...)
+	}
+
+	sort.Slice(duplicates, func(i, j int) bool {
+		leftPV := firstNonEmpty(duplicates[i].BackendPV, duplicates[i].PVName)
+		rightPV := firstNonEmpty(duplicates[j].BackendPV, duplicates[j].PVName)
+		if leftPV == rightPV {
+			if duplicates[i].ClaimName == duplicates[j].ClaimName {
+				return duplicates[i].Name < duplicates[j].Name
+			}
+			return duplicates[i].ClaimName < duplicates[j].ClaimName
+		}
+		return leftPV < rightPV
+	})
+	return duplicates
+}
+
+func pvcRefsToChecks(refs []VolumeClaimRef) []PVCCheckItem {
+	if len(refs) == 0 {
+		return nil
+	}
+	items := make([]PVCCheckItem, 0, len(refs))
+	for _, ref := range refs {
+		items = append(items, PVCCheckItem{
+			Name:             ref.Name,
+			ClaimName:        ref.ClaimName,
+			PVName:           ref.PVName,
+			BackendPV:        ref.BackendPV,
+			DisplayPV:        firstNonEmpty(ref.DisplayPV, ref.BackendPV, ref.PVName),
+			HostPVCName:      ref.HostPVCName,
+			HostPVCNamespace: ref.HostPVCNamespace,
+			FrontendVolume:   ref.FrontendVolume,
+			Status:           "Bound",
+			Message:          "重复的 PV 挂载有冲突",
+		})
+	}
+	return items
 }
 
 func (s *JobService) resolveImagePullSecretsFromPlatform(ctx context.Context, vclusterName string, namespace string, secretNames []string) []string {
@@ -1866,6 +2135,23 @@ func classifyPVCErrorMessage(err error) string {
 		return "pvc 不存在于当前分区"
 	}
 	return message
+}
+
+func extractResourceUIDFromName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if looksLikeUUID(value) {
+		return value
+	}
+	for start := 0; start+36 <= len(value); start++ {
+		candidate := value[start : start+36]
+		if looksLikeUUID(candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func hasFailedSecretCheck(items []SecretCheckItem) bool {
