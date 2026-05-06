@@ -279,17 +279,14 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 }
 
 func PrintAFSCheckDetail(result *service.AFSCheckResult) {
-	rows := [][]string{
-		{
-			emptyDash(result.AFSName),
-			joinLinesOrDash(result.HostPVCs),
-			joinLinesOrDash(result.HostPVs),
-		},
-	}
 	printBoxTableWithMaxWidths(
-		[]string{"AFS", "HOST PVC", "HOST PV"},
-		rows,
-		[]int{24, 28, 28},
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"AFS", emptyDash(result.AFSName)},
+			{"HOST PVC", joinOrDash(result.HostPVCs)},
+			{"HOST PV", joinOrDash(result.HostPVs)},
+		},
+		[]int{12, 120},
 	)
 
 	fmt.Fprintln(os.Stdout)
@@ -319,25 +316,35 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult) {
 }
 
 func PrintPVCCheckDetail(result *service.PVCCheckResult) {
-	rows := make([][]string, 0, maxInt(1, len(result.Items)))
 	if len(result.Items) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-"})
-	} else {
-		for _, item := range result.Items {
-			rows = append(rows, []string{
-				emptyDash(item.PVCName),
-				emptyDash(item.AFSName),
-				emptyDash(item.Partition),
-				joinOrDash(item.JobNames),
-			})
-		}
+		printBoxTableWithMaxWidths(
+			[]string{"FIELD", "VALUE"},
+			[][]string{
+				{"PVC", "-"},
+				{"AFS", "-"},
+				{"分区", "-"},
+				{"任务", "-"},
+			},
+			[]int{12, 120},
+		)
+		return
 	}
 
-	printBoxTableWithMaxWidths(
-		[]string{"PVC", "AFS", "分区", "任务"},
-		rows,
-		[]int{24, 24, 20, 40},
-	)
+	for i, item := range result.Items {
+		if i > 0 {
+			fmt.Fprintln(os.Stdout)
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"FIELD", "VALUE"},
+			[][]string{
+				{"PVC", emptyDash(item.PVCName)},
+				{"AFS", emptyDash(item.AFSName)},
+				{"分区", emptyDash(item.Partition)},
+				{"任务", joinOrDash(item.JobNames)},
+			},
+			[]int{12, 120},
+		)
+	}
 }
 
 func emptyDash(v string) string {
