@@ -1908,6 +1908,7 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 				current.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
 			}
 		}
+		s.enrichObjectStorageVolumeClaimRef(ctx, hostNamespace, &current)
 		s.enrichHostVolumeClaimRef(ctx, &current)
 		current.DisplayPV = firstNonEmpty(current.BackendPV, current.PVName)
 		resolved = append(resolved, current)
@@ -1950,6 +1951,111 @@ func (s *JobService) enrichHostVolumeClaimRef(ctx context.Context, ref *VolumeCl
 		return
 	}
 	ref.FrontendVolume = firstNonEmpty(resource.Name, resource.DisplayName, resource.ID)
+}
+
+func (s *JobService) enrichObjectStorageVolumeClaimRef(ctx context.Context, hostNamespace string, ref *VolumeClaimRef) {
+	if ref == nil || strings.TrimSpace(ref.FrontendVolume) != "" {
+		return
+	}
+	hostNamespace = strings.TrimSpace(hostNamespace)
+	if hostNamespace == "" || strings.TrimSpace(ref.ClaimName) == "" {
+		return
+	}
+
+	pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, ref.ClaimName, metav1.GetOptions{})
+	if err != nil || pvc == nil {
+		return
+	}
+
+	storageClassName := ""
+	if pvc.Spec.StorageClassName != nil {
+		storageClassName = strings.TrimSpace(*pvc.Spec.StorageClassName)
+	}
+	storageClass := strings.TrimSpace(firstNonEmpty(storageClassName, pvc.Annotations["volume.kubernetes.io/storage-provisioner"], pvc.Annotations["volume.beta.kubernetes.io/storage-provisioner"]))
+	if !looksLikeObjectStoragePVC(storageClass, pvc.Annotations) {
+		return
+	}
+
+	secretName := strings.TrimSpace(pvc.Annotations["secretName"])
+	if secretName == "" {
+		return
+	}
+
+	secret, err := s.clientset.CoreV1().Secrets(hostNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil || secret == nil {
+		return
+	}
+
+	if endpoint := decodeObjectStorageEndpoint(secret); endpoint != "" {
+		ref.FrontendVolume = endpoint
+	}
+}
+
+func looksLikeObjectStoragePVC(storageClass string, annotations map[string]string) bool {
+	storageClass = strings.ToLower(strings.TrimSpace(storageClass))
+	if strings.Contains(storageClass, "aoss") || strings.Contains(storageClass, "s3") {
+		return true
+	}
+	for key, value := range annotations {
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.ToLower(strings.TrimSpace(value))
+		if strings.Contains(key, "bucket") || strings.Contains(key, "secretname") || strings.Contains(value, "aoss") || strings.Contains(value, "s3") {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeObjectStorageEndpoint(secret *corev1.Secret) string {
+	if secret == nil {
+		return ""
+	}
+
+	preferredKeys := []string{"endpoint", "ENDPOINT", "Endpoint", "domain", "DOMAIN", "host", "HOST", "url", "URL"}
+	for _, key := range preferredKeys {
+		if value, ok := secret.Data[key]; ok {
+			endpoint := normalizeEndpointString(string(value))
+			if endpoint != "" {
+				return endpoint
+			}
+		}
+	}
+
+	for key, value := range secret.Data {
+		lowerKey := strings.ToLower(strings.TrimSpace(key))
+		if strings.Contains(lowerKey, "endpoint") || strings.Contains(lowerKey, "domain") || strings.Contains(lowerKey, "host") || strings.Contains(lowerKey, "url") {
+			endpoint := normalizeEndpointString(string(value))
+			if endpoint != "" {
+				return endpoint
+			}
+		}
+	}
+
+	for _, value := range secret.Data {
+		endpoint := normalizeEndpointString(string(value))
+		if endpoint != "" {
+			return endpoint
+		}
+	}
+
+	return ""
+}
+
+func normalizeEndpointString(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.TrimPrefix(value, "http://")
+	value = strings.TrimPrefix(value, "https://")
+	value = strings.TrimSuffix(value, "/")
+	if strings.Contains(value, " ") {
+		return ""
+	}
+	if strings.Contains(value, ".") || strings.Contains(value, ":") {
+		return value
+	}
+	return ""
 }
 
 func duplicatePVRefs(refs []VolumeClaimRef) []VolumeClaimRef {

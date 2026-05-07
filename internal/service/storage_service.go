@@ -190,40 +190,84 @@ func (s *StorageService) resolvePVCFrontendInfo(ctx context.Context, pvc *corev1
 		return "-", "-"
 	}
 
+	partitionName := firstNonEmpty(s.resolvePVCVirtualClusterName(ctx, pvc), "-")
 	hostPVName := strings.TrimSpace(pvc.Spec.VolumeName)
 	if hostPVName == "" {
-		return "-", "-"
+		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
+			return endpoint, partitionName
+		}
+		return "-", partitionName
 	}
 
 	pv, err := s.clientset.CoreV1().PersistentVolumes().Get(ctx, hostPVName, metav1.GetOptions{})
 	if err != nil {
-		return "-", "-"
+		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
+			return endpoint, partitionName
+		}
+		return "-", partitionName
 	}
 
 	if sourcePV := strings.TrimSpace(pv.Labels["source-pv"]); sourcePV != "" {
 		hostPVName = sourcePV
 		pv, err = s.clientset.CoreV1().PersistentVolumes().Get(ctx, hostPVName, metav1.GetOptions{})
 		if err != nil {
-			return "-", "-"
+			if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
+				return endpoint, partitionName
+			}
+			return "-", partitionName
 		}
 	}
 
 	if pv.Spec.ClaimRef == nil {
-		return "-", "-"
+		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
+			return endpoint, partitionName
+		}
+		return "-", partitionName
 	}
 
 	resourceUID := extractResourceUIDFromName(strings.TrimSpace(pv.Spec.ClaimRef.Name))
 	if resourceUID == "" || s.vcClient == nil {
-		return "-", "-"
+		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
+			return endpoint, partitionName
+		}
+		return "-", partitionName
 	}
 
 	resource, err := s.vcClient.FindStorageVolumeResource(ctx, resourceUID)
 	if err != nil || resource == nil {
-		return "-", "-"
+		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
+			return endpoint, partitionName
+		}
+		return "-", partitionName
 	}
 
-	vclusterName := s.resolvePVCVirtualClusterName(ctx, pvc)
-	return firstNonEmpty(resource.Name, resource.DisplayName, resource.ID), firstNonEmpty(vclusterName, "-")
+	return firstNonEmpty(resource.Name, resource.DisplayName, resource.ID), partitionName
+}
+
+func (s *StorageService) resolveObjectStorageEndpointForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) string {
+	if pvc == nil {
+		return ""
+	}
+
+	storageClassName := ""
+	if pvc.Spec.StorageClassName != nil {
+		storageClassName = strings.TrimSpace(*pvc.Spec.StorageClassName)
+	}
+	storageClass := strings.TrimSpace(firstNonEmpty(storageClassName, pvc.Annotations["volume.kubernetes.io/storage-provisioner"], pvc.Annotations["volume.beta.kubernetes.io/storage-provisioner"]))
+	if !looksLikeObjectStoragePVC(storageClass, pvc.Annotations) {
+		return ""
+	}
+
+	secretName := strings.TrimSpace(pvc.Annotations["secretName"])
+	if secretName == "" {
+		return ""
+	}
+
+	secret, err := s.clientset.CoreV1().Secrets(pvc.Namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil || secret == nil {
+		return ""
+	}
+	return decodeObjectStorageEndpoint(secret)
 }
 
 func (s *StorageService) resolvePVCVirtualClusterName(ctx context.Context, pvc *corev1.PersistentVolumeClaim) string {

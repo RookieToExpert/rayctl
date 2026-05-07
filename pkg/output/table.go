@@ -129,7 +129,7 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 			})
 		}
 		printBoxTableWithMaxWidths(
-			[]string{"VIRTUAL PVC", "AFS"},
+			[]string{"VIRTUAL PVC", "AFS/AOSS ENDPOINT"},
 			pvcRows,
 			[]int{32, 32},
 		)
@@ -230,7 +230,7 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 	for _, pvc := range result.PVCs {
 		rows = append(rows, []string{
 			"PVC",
-			fmt.Sprintf("virtual pvc=%s | afs=%s | %s",
+			fmt.Sprintf("virtual pvc=%s | afs/aoss endpoint=%s | %s",
 				emptyDash(pvc.ClaimName),
 				emptyDash(pvc.FrontendVolume),
 				pvc.Message,
@@ -328,11 +328,11 @@ func PrintPVCCheckDetail(result *service.PVCCheckResult) {
 			[]string{"FIELD", "VALUE"},
 			[][]string{
 				{"PVC", "-"},
-				{"AFS", "-"},
+				{"AFS/AOSS ENDPOINT", "-"},
 				{"分区", "-"},
 				{"任务", "-"},
 			},
-			[]int{12, 120},
+			[]int{20, 120},
 		)
 		return
 	}
@@ -345,11 +345,11 @@ func PrintPVCCheckDetail(result *service.PVCCheckResult) {
 			[]string{"FIELD", "VALUE"},
 			[][]string{
 				{"PVC", emptyDash(item.PVCName)},
-				{"AFS", emptyDash(item.AFSName)},
+				{"AFS/AOSS ENDPOINT", emptyDash(item.AFSName)},
 				{"分区", emptyDash(item.Partition)},
 				{"任务", joinOrDash(item.JobNames)},
 			},
-			[]int{12, 120},
+			[]int{20, 120},
 		)
 	}
 }
