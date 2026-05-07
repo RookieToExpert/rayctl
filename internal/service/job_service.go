@@ -87,6 +87,7 @@ type JobCheckResult struct {
 	Pods                []JobPodCheckItem
 	PVCs                []PVCCheckItem
 	SecretChecks        []SecretCheckItem
+	PodEvidence         []CheckEvidenceItem
 	PodGroupEvidence    []CheckEvidenceItem
 	Diagnosis           []string
 }
@@ -478,6 +479,58 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 		instruction = fmt.Sprintf("当前任务还没调度成功，请带上目标 vcluster 的 kubeconfig 重新执行：rayctl job check %s -k <vcluster-kubeconfig-path>", identity.Name)
 	}
 
+	podEvidence := make([]CheckEvidenceItem, 0)
+	if stage == "startup" || stage == "failed" {
+		eventNamespace := firstNonEmpty(identity.HostNamespace, identity.Namespace)
+		if strings.TrimSpace(eventNamespace) != "" {
+			for _, pod := range pods {
+				if stage == "startup" && isPodReady(pod) {
+					continue
+				}
+				eventUID := string(pod.UID)
+				if strings.TrimSpace(identity.HostNamespace) != "" {
+					hostPod, hostPodErr := s.findPodByNameInNamespace(ctx, identity.HostNamespace, pod.Name)
+					if hostPodErr == nil && hostPod != nil {
+						eventUID = string(hostPod.UID)
+					}
+				}
+				events, eventErr := s.listEventsForObject(ctx, eventNamespace, "Pod", pod.Name, eventUID, 5)
+				if eventErr != nil {
+					continue
+				}
+				for _, event := range events {
+					if strings.EqualFold(event.Message, "no events") {
+						continue
+					}
+					podEvidence = append(podEvidence, CheckEvidenceItem{
+						Source: pod.Name,
+						Status: firstNonEmpty(event.Reason, event.Type, "-"),
+						Detail: event.Message,
+					})
+				}
+			}
+		}
+		if len(podEvidence) == 0 && s.vcClient != nil && strings.TrimSpace(identity.VClusterName) != "" && strings.TrimSpace(identity.Namespace) != "" {
+			jobEvents, eventErr := s.vcClient.ListEvents(ctx, identity.VClusterName, identity.Namespace, identity.Name, "")
+			if eventErr == nil {
+				formatted := formatEventItems(jobEvents, 5)
+				for _, event := range formatted {
+					if strings.EqualFold(event.Message, "no events") {
+						continue
+					}
+					podEvidence = append(podEvidence, CheckEvidenceItem{
+						Source: "job",
+						Status: firstNonEmpty(event.Reason, event.Type, "-"),
+						Detail: event.Message,
+					})
+				}
+			}
+		}
+	}
+	if stage == "startup" && len(podEvidence) > 0 && len(diagnosis) > 0 {
+		diagnosis[0] = diagnosis[0] + " 请进一步看下方 event 部分判断任务启动失败原因。"
+	}
+
 	return &JobCheckResult{
 		Name:             identity.Name,
 		Namespace:        identity.Namespace,
@@ -488,9 +541,24 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 		Pods:             displayPods,
 		PVCs:             append(failedPVCChecks, pvcRefsToChecks(duplicatePVRefs)...),
 		SecretChecks:     displaySecrets,
+		PodEvidence:      podEvidence,
 		PodGroupEvidence: nil,
 		Diagnosis:        diagnosis,
 	}, nil
+}
+
+func (s *JobService) findPodByNameInNamespace(ctx context.Context, namespace string, podName string) (*corev1.Pod, error) {
+	namespace = strings.TrimSpace(namespace)
+	podName = strings.TrimSpace(podName)
+	if namespace == "" || podName == "" {
+		return nil, fmt.Errorf("namespace and pod name are required")
+	}
+
+	pod, err := s.clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return pod, nil
 }
 
 func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (*JobGetResult, error) {
@@ -644,14 +712,49 @@ func (s *JobService) checkJobInCurrentCluster(ctx context.Context, identifier st
 	}
 
 	if len(pods) > 0 && assignedPodCount > 0 {
+		podChecks := make([]JobPodCheckItem, 0, len(pods))
+		podEvidence := make([]CheckEvidenceItem, 0)
+		for _, pod := range pods {
+			ready := isPodReady(pod)
+			podChecks = append(podChecks, JobPodCheckItem{
+				Name:     pod.Name,
+				Phase:    dashIfEmpty(string(pod.Status.Phase)),
+				Ready:    boolToYesNo(ready),
+				NodeName: dashIfEmpty(pod.Spec.NodeName),
+				Reason:   dashIfEmpty(podFailureReason(pod)),
+			})
+			if ready {
+				continue
+			}
+			events, eventErr := s.listEventsForObject(ctx, namespace, "Pod", pod.Name, string(pod.UID), 5)
+			if eventErr != nil {
+				continue
+			}
+			for _, event := range events {
+				if strings.EqualFold(event.Message, "no events") {
+					continue
+				}
+				podEvidence = append(podEvidence, CheckEvidenceItem{
+					Source: pod.Name,
+					Status: firstNonEmpty(event.Reason, event.Type, "-"),
+					Detail: event.Message,
+				})
+			}
+		}
+		sort.Slice(podChecks, func(i, j int) bool {
+			return podChecks[i].Name < podChecks[j].Name
+		})
+
 		return &JobCheckResult{
 			Name:         identity.Name,
 			Namespace:    identity.Namespace,
 			UID:          identity.UID,
 			PodGroupName: dashIfEmpty(identity.PodGroupName),
 			Stage:        "startup",
+			Pods:         podChecks,
+			PodEvidence:  podEvidence,
 			Diagnosis: []string{
-				"Pod 已经分配到 host。请切回 host-cluster kubeconfig 重新执行 job check，继续排查 imagePullSecret 等启动问题。",
+				"Pod 已经分配到 host，但还没有 Ready。下面附上 Pod 当前状态和最近事件，供你继续排查启动问题。",
 			},
 		}, nil
 	}

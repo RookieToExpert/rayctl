@@ -240,7 +240,7 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 
 	for _, pod := range result.Pods {
 		rows = append(rows, []string{
-			"Pod",
+			"Pod 状况",
 			fmt.Sprintf("%s | phase=%s | ready=%s | node=%s | reason=%s", pod.Name, pod.Phase, pod.Ready, pod.NodeName, emptyDash(pod.Reason)),
 		})
 	}
@@ -253,6 +253,13 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 		rows = append(rows, []string{
 			"镜像密钥结果",
 			fmt.Sprintf("%s", emptyDash(secret.Message)),
+		})
+	}
+
+	for _, item := range result.PodEvidence {
+		rows = append(rows, []string{
+			"Pod 事件",
+			fmt.Sprintf("%s | %s | %s", emptyDash(item.Source), emptyDash(item.Status), emptyDash(item.Detail)),
 		})
 	}
 
