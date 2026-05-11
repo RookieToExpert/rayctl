@@ -2046,8 +2046,6 @@ func normalizeEndpointString(value string) string {
 	if value == "" {
 		return ""
 	}
-	value = strings.TrimPrefix(value, "http://")
-	value = strings.TrimPrefix(value, "https://")
 	value = strings.TrimSuffix(value, "/")
 	if strings.Contains(value, " ") {
 		return ""
