@@ -125,7 +125,12 @@ func newNodeGetCmd() *cobra.Command {
 
 			// 4. 调用 output 包将节点列表以表格等形式打印到终端
 			// output.PrintNodeList 定义于 pkg/output/table.go
-			output.PrintNodeList(displayNodes, resolvedSelector, len(nodes), start, end, displayLimit)
+			showProdRole := true
+			switch strings.ToLower(strings.TrimSpace(target)) {
+			case "ecp", "ecs":
+				showProdRole = false
+			}
+			output.PrintNodeList(displayNodes, resolvedSelector, len(nodes), start, end, displayLimit, showProdRole)
 			return nil
 		},
 	}

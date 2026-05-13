@@ -148,7 +148,7 @@ func nodeDisplayRole(labels map[string]string) string {
 	if len(roles) == 0 {
 		return ""
 	}
-	return strings.Join(roles, ",")
+	return roles[0]
 }
 
 func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescribe, error) {

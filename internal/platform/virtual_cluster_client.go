@@ -21,12 +21,17 @@ import (
 )
 
 const (
-	defaultAPIBaseURL        = "https://management.d.pjlab.org.cn"
-	defaultKubernetesBaseURL = "https://compute.d.pjlab.org.cn"
-	defaultResourceGroup     = "default"
-	defaultRegion            = "cn-pj-01"
-	defaultPageLimit         = 100
-	defaultConfigPath        = "/root/.rayctl/platform.json"
+	ClusterD                      = "d"
+	ClusterDCloud                 = "dcloud"
+	defaultSubscriptionDCloud     = "019a575c-9a53-71ab-8028-2b0383d7a02f"
+	defaultAPIBaseURL             = "https://management.d.pjlab.org.cn"
+	defaultKubernetesBaseURL      = "https://compute.d.pjlab.org.cn"
+	defaultCloudAPIBaseURL        = "https://management-cloud.d.pjlab.org.cn"
+	defaultCloudKubernetesBaseURL = "https://compute-cloud.d.pjlab.org.cn"
+	defaultResourceGroup          = "default"
+	defaultRegion                 = "cn-pj-01"
+	defaultPageLimit              = 100
+	defaultConfigPath             = "/root/.rayctl/platform.json"
 )
 
 type VirtualClusterClient struct {
@@ -58,6 +63,7 @@ type StorageVolumeResource struct {
 
 type virtualClusterListResponse struct {
 	VirtualClusters []VirtualCluster `json:"virtual_clusters"`
+	Items           []VirtualCluster `json:"items"`
 	NextPageToken   string           `json:"next_page_token"`
 }
 
@@ -70,6 +76,18 @@ type config struct {
 	AccessKey         string `json:"access_key"`
 	SecretKey         string `json:"secret_key"`
 	Subscription      string `json:"subscription_id"`
+	Cluster           string `json:"cluster"`
+	BaseURL           string `json:"base_url"`
+	KubernetesBaseURL string `json:"kubernetes_base_url"`
+	ResourceGroup     string `json:"resource_group"`
+	Region            string `json:"region"`
+}
+
+type ConfigSnapshot struct {
+	AccessKey         string `json:"access_key"`
+	SecretKey         string `json:"secret_key"`
+	Subscription      string `json:"subscription_id"`
+	Cluster           string `json:"cluster"`
 	BaseURL           string `json:"base_url"`
 	KubernetesBaseURL string `json:"kubernetes_base_url"`
 	ResourceGroup     string `json:"resource_group"`
@@ -83,19 +101,21 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 
 	accessKey := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_ACCESS_KEY"))
 	secretKey := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_SECRET_KEY"))
+	cluster := normalizeClusterName(os.Getenv("RAYCTL_PLATFORM_CLUSTER"))
 	subscription := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_SUBSCRIPTION_ID"))
+	if subscription == "" {
+		subscription = defaultSubscriptionForCluster(cluster)
+	}
 	if accessKey == "" || secretKey == "" || subscription == "" {
 		return nil, false
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_BASE_URL")), "/")
-	if baseURL == "" {
-		baseURL = defaultAPIBaseURL
+	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
+	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_BASE_URL")), "/"); override != "" {
+		baseURL = override
 	}
-
-	kubernetesBaseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_KUBERNETES_BASE_URL")), "/")
-	if kubernetesBaseURL == "" {
-		kubernetesBaseURL = defaultKubernetesBaseURL
+	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_KUBERNETES_BASE_URL")), "/"); override != "" {
+		kubernetesBaseURL = override
 	}
 
 	resourceGroup := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_RESOURCE_GROUP"))
@@ -133,19 +153,21 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 
 	accessKey := strings.TrimSpace(cfg.AccessKey)
 	secretKey := strings.TrimSpace(cfg.SecretKey)
+	cluster := normalizeClusterName(cfg.Cluster)
 	subscription := strings.TrimSpace(cfg.Subscription)
+	if subscription == "" {
+		subscription = defaultSubscriptionForCluster(cluster)
+	}
 	if accessKey == "" || secretKey == "" || subscription == "" {
 		return nil, false
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if baseURL == "" {
-		baseURL = defaultAPIBaseURL
+	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
+	if override := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"); override != "" {
+		baseURL = override
 	}
-
-	kubernetesBaseURL := strings.TrimRight(strings.TrimSpace(cfg.KubernetesBaseURL), "/")
-	if kubernetesBaseURL == "" {
-		kubernetesBaseURL = defaultKubernetesBaseURL
+	if override := strings.TrimRight(strings.TrimSpace(cfg.KubernetesBaseURL), "/"); override != "" {
+		kubernetesBaseURL = override
 	}
 
 	resourceGroup := strings.TrimSpace(cfg.ResourceGroup)
@@ -168,6 +190,93 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		region:            region,
 		httpClient:        &http.Client{Timeout: 10 * time.Second},
 	}, true
+}
+
+func DefaultConfigPath() string {
+	return defaultConfigPath
+}
+
+func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
+	content, err := os.ReadFile(filepath.Clean(configPath))
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg ConfigSnapshot
+	if err := json.Unmarshal(content, &cfg); err != nil {
+		return nil, err
+	}
+	cfg.Cluster = normalizeClusterName(cfg.Cluster)
+	if strings.TrimSpace(cfg.Subscription) == "" {
+		cfg.Subscription = defaultSubscriptionForCluster(cfg.Cluster)
+	}
+	if strings.TrimSpace(cfg.BaseURL) == "" || strings.TrimSpace(cfg.KubernetesBaseURL) == "" {
+		baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cfg.Cluster)
+		if strings.TrimSpace(cfg.BaseURL) == "" {
+			cfg.BaseURL = baseURL
+		}
+		if strings.TrimSpace(cfg.KubernetesBaseURL) == "" {
+			cfg.KubernetesBaseURL = kubernetesBaseURL
+		}
+	}
+	return &cfg, nil
+}
+
+func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
+	if cfg == nil {
+		return fmt.Errorf("platform config is required")
+	}
+	cfg.Cluster = normalizeClusterName(cfg.Cluster)
+	if strings.TrimSpace(cfg.Subscription) == "" {
+		cfg.Subscription = defaultSubscriptionForCluster(cfg.Cluster)
+	}
+	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cfg.Cluster)
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		cfg.BaseURL = baseURL
+	}
+	if strings.TrimSpace(cfg.KubernetesBaseURL) == "" {
+		cfg.KubernetesBaseURL = kubernetesBaseURL
+	}
+
+	content, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(configPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Clean(configPath), append(content, '\n'), 0o600)
+}
+
+func normalizeClusterName(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", ClusterD:
+		return ClusterD
+	case ClusterDCloud, "cloud":
+		return ClusterDCloud
+	default:
+		return ClusterD
+	}
+}
+
+func defaultBaseURLsForCluster(cluster string) (string, string) {
+	switch normalizeClusterName(cluster) {
+	case ClusterDCloud:
+		return defaultCloudAPIBaseURL, defaultCloudKubernetesBaseURL
+	default:
+		return defaultAPIBaseURL, defaultKubernetesBaseURL
+	}
+}
+
+func defaultSubscriptionForCluster(cluster string) string {
+	switch normalizeClusterName(cluster) {
+	case ClusterDCloud:
+		return defaultSubscriptionDCloud
+	default:
+		return ""
+	}
 }
 
 func (c *VirtualClusterClient) ResolveDisplayNames(ctx context.Context, uids []string) (map[string]string, error) {
@@ -430,11 +539,11 @@ func (c *VirtualClusterClient) GetPodLogs(ctx context.Context, vclusterName stri
 }
 
 func (c *VirtualClusterClient) listVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
-	pageToken := ""
+	skip := 0
 	clusters := make([]VirtualCluster, 0)
 
 	for {
-		reqURL := c.listURL(pageToken)
+		reqURL := c.listURL(skip)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("build virtual cluster request: %w", err)
@@ -467,25 +576,30 @@ func (c *VirtualClusterClient) listVirtualClusters(ctx context.Context) ([]Virtu
 			return nil, fmt.Errorf("decode virtual cluster response: %w", err)
 		}
 
-		clusters = append(clusters, payload.VirtualClusters...)
-		if strings.TrimSpace(payload.NextPageToken) == "" {
+		items := payload.VirtualClusters
+		if len(items) == 0 {
+			items = payload.Items
+		}
+		if len(items) == 0 {
 			break
 		}
-		pageToken = payload.NextPageToken
+		clusters = append(clusters, items...)
+		if len(items) < defaultPageLimit {
+			break
+		}
+		skip += len(items)
 	}
 
 	return clusters, nil
 }
 
-func (c *VirtualClusterClient) listURL(pageToken string) string {
+func (c *VirtualClusterClient) listURL(skip int) string {
 	u, _ := url.Parse(c.baseURL)
-	u.Path = fmt.Sprintf("/compute/ecp/v1/subscriptions/%s/resourceGroups/%s/regions/%s/virtualClusters", c.subscription, c.resourceGroup, c.region)
+	u.Path = "/compute/ecp/v1/subscriptions/-/resourceGroups/-/regions/-/virtualClusters"
 
 	query := u.Query()
-	query.Set("limit", fmt.Sprintf("%d", defaultPageLimit))
-	if strings.TrimSpace(pageToken) != "" {
-		query.Set("page_token", pageToken)
-	}
+	query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+	query.Set("skip", fmt.Sprintf("%d", skip))
 	u.RawQuery = query.Encode()
 	return u.String()
 }

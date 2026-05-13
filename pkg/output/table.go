@@ -11,7 +11,26 @@ import (
 	"rayctl/internal/service"
 )
 
-func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total int, start int, end int, limit int) {
+type tableOptions struct {
+	noWrapCells map[string]struct{}
+}
+
+func cellKey(row int, col int) string {
+	return fmt.Sprintf("%d:%d", row, col)
+}
+
+func makeNoWrapCells(cells ...[2]int) map[string]struct{} {
+	if len(cells) == 0 {
+		return nil
+	}
+	result := make(map[string]struct{}, len(cells))
+	for _, cell := range cells {
+		result[cellKey(cell[0], cell[1])] = struct{}{}
+	}
+	return result
+}
+
+func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total int, start int, end int, limit int, showProdRole bool) {
 	if resolvedSelector == "" {
 		fmt.Fprintln(os.Stdout, "Selector: <all nodes>")
 	} else {
@@ -19,22 +38,47 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 	}
 
 	rows := make([][]string, 0, len(nodes))
-	for _, node := range nodes {
-		rows = append(rows, []string{
-			truncateCell(node.Name, 22),
+	noWrapCells := make([][2]int, 0, len(nodes)*3)
+	for rowIdx, node := range nodes {
+		row := []string{
+			node.Name,
 			node.Ready,
 			node.Schedulable,
-			emptyDash(node.ProdRole),
+		}
+		if showProdRole {
+			row = append(row, emptyDash(node.ProdRole))
+		}
+		row = append(row,
 			formatRepairFlag(node.Repair),
-			truncateCell(node.InternalIP, 15),
+			node.InternalIP,
 			node.ClusterName,
-		})
+		)
+		rows = append(rows, row)
+		noWrapCells = append(noWrapCells, [2]int{rowIdx, 0})
+		if showProdRole {
+			noWrapCells = append(noWrapCells, [2]int{rowIdx, 3})
+			noWrapCells = append(noWrapCells, [2]int{rowIdx, 6})
+		} else {
+			noWrapCells = append(noWrapCells, [2]int{rowIdx, 5})
+		}
 	}
 
-	printBoxTableWithMaxWidths(
-		[]string{"HOST", "RDY", "SCH", "PROD", "REPAIR", "IP", "CLUSTERNAME"},
+	headers := []string{"HOST", "RDY", "SCH"}
+	maxWidths := []int{22, 5, 5}
+	if showProdRole {
+		headers = append(headers, "PROD")
+		maxWidths = append(maxWidths, 18)
+	}
+	headers = append(headers, "REPAIR", "IP", "CLUSTERNAME")
+	maxWidths = append(maxWidths, 6, 15, 48)
+
+	printBoxTableWithOptions(
+		headers,
 		rows,
-		[]int{22, 5, 5, 14, 6, 15, 24},
+		maxWidths,
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+		},
 	)
 
 	if total == 0 {
@@ -49,8 +93,8 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 }
 
 func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}) {
-	printBoxTableWithMaxWidths(
-		[]string{"HOSTNAME", "VC", "UNSCHEDULABLE", "REPAIR", "GPU ALLOCATED/COUNT", "CPU ALLOCATED/COUNT", "MEMORY ALLOCATED/COUNT", "POD COUNT"},
+	printBoxTableWithOptions(
+		[]string{"HOST", "VC", "UNSCH", "RPR", "GPU", "CPU", "MEM", "PODS"},
 		[][]string{{
 			details.Hostname,
 			emptyDash(details.VClusterName),
@@ -61,7 +105,13 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 			details.MemoryUsage,
 			fmt.Sprintf("%d", details.MatchedPodCount),
 		}},
-		[]int{24, 24, 13, 6, 20, 20, 24, 10},
+		[]int{24, 20, 5, 5, 8, 12, 12, 5},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 0},
+				[2]int{0, 1},
+			),
+		},
 	)
 
 	fmt.Fprintln(os.Stdout)
@@ -117,7 +167,22 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 		{"INSPECT POD", result.InspectPod},
 		{"NODES", joinOrDash(result.Nodes)},
 	}
-	printBoxTable([]string{"FIELD", "VALUE"}, summaryRows)
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		summaryRows,
+		nil,
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+				[2]int{7, 1},
+			),
+		},
+	)
 
 	if len(result.PersistentVolumeClaims) > 0 {
 		fmt.Fprintln(os.Stdout)
@@ -200,7 +265,21 @@ func PrintPodGroupDetail(result *service.PodGroupGetResult) {
 		{"QUEUE", result.Queue},
 		{"CREATED AT", result.CreatedAt},
 	}
-	printBoxTable([]string{"FIELD", "VALUE"}, summaryRows)
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		summaryRows,
+		nil,
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+			),
+		},
+	)
 
 	fmt.Fprintln(os.Stdout)
 	statusRows := make([][]string, 0, len(result.StatusMessages))
@@ -278,15 +357,20 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 		resultWidth = 48
 	}
 
-	printBoxTableWithMaxWidths(
+	printBoxTableWithOptions(
 		[]string{"项目", "结果"},
 		rows,
 		[]int{12, resultWidth},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+			),
+		},
 	)
 }
 
 func PrintAFSCheckDetail(result *service.AFSCheckResult) {
-	printBoxTableWithMaxWidths(
+	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
 		[][]string{
 			{"AFS", emptyDash(result.AFSName)},
@@ -294,6 +378,13 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult) {
 			{"HOST PV", joinOrDash(result.HostPVs)},
 		},
 		[]int{12, 120},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+			),
+		},
 	)
 
 	fmt.Fprintln(os.Stdout)
@@ -324,7 +415,7 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult) {
 
 func PrintPVCCheckDetail(result *service.PVCCheckResult) {
 	if len(result.Items) == 0 {
-		printBoxTableWithMaxWidths(
+		printBoxTableWithOptions(
 			[]string{"FIELD", "VALUE"},
 			[][]string{
 				{"PVC", "-"},
@@ -333,6 +424,13 @@ func PrintPVCCheckDetail(result *service.PVCCheckResult) {
 				{"任务", "-"},
 			},
 			[]int{20, 120},
+			tableOptions{
+				noWrapCells: makeNoWrapCells(
+					[2]int{0, 1},
+					[2]int{2, 1},
+					[2]int{3, 1},
+				),
+			},
 		)
 		return
 	}
@@ -341,7 +439,7 @@ func PrintPVCCheckDetail(result *service.PVCCheckResult) {
 		if i > 0 {
 			fmt.Fprintln(os.Stdout)
 		}
-		printBoxTableWithMaxWidths(
+		printBoxTableWithOptions(
 			[]string{"FIELD", "VALUE"},
 			[][]string{
 				{"PVC", emptyDash(item.PVCName)},
@@ -350,6 +448,14 @@ func PrintPVCCheckDetail(result *service.PVCCheckResult) {
 				{"任务", joinOrDash(item.JobNames)},
 			},
 			[]int{20, 120},
+			tableOptions{
+				noWrapCells: makeNoWrapCells(
+					[2]int{0, 1},
+					[2]int{1, 1},
+					[2]int{2, 1},
+					[2]int{3, 1},
+				),
+			},
 		)
 	}
 }
@@ -371,10 +477,14 @@ func firstNonEmpty(values ...string) string {
 }
 
 func printBoxTable(headers []string, rows [][]string) {
-	printBoxTableWithMaxWidths(headers, rows, nil)
+	printBoxTableWithOptions(headers, rows, nil, tableOptions{})
 }
 
 func printBoxTableWithMaxWidths(headers []string, rows [][]string, maxWidths []int) {
+	printBoxTableWithOptions(headers, rows, maxWidths, tableOptions{})
+}
+
+func printBoxTableWithOptions(headers []string, rows [][]string, maxWidths []int, options tableOptions) {
 	widths := make([]int, len(headers))
 	for i, header := range headers {
 		widths[i] = textWidth(header)
@@ -404,8 +514,8 @@ func printBoxTableWithMaxWidths(headers []string, rows [][]string, maxWidths []i
 	fmt.Fprintln(os.Stdout, borderLine("┌", "┬", "┐", widths))
 	fmt.Fprintln(os.Stdout, renderRow(headers, widths))
 	fmt.Fprintln(os.Stdout, borderLine("├", "┼", "┤", widths))
-	for _, row := range rows {
-		for _, rendered := range renderWrappedRows(row, widths) {
+	for rowIdx, row := range rows {
+		for _, rendered := range renderWrappedRows(rowIdx, row, widths, options) {
 			fmt.Fprintln(os.Stdout, rendered)
 		}
 	}
@@ -503,7 +613,7 @@ func renderRow(row []string, widths []int) string {
 	return b.String()
 }
 
-func renderWrappedRows(row []string, widths []int) []string {
+func renderWrappedRows(rowIdx int, row []string, widths []int, options tableOptions) []string {
 	cellLines := make([][]string, len(widths))
 	maxLines := 1
 	for i, width := range widths {
@@ -511,7 +621,7 @@ func renderWrappedRows(row []string, widths []int) []string {
 		if i < len(row) {
 			cell = row[i]
 		}
-		lines := wrapCell(cell, width)
+		lines := wrapCell(cell, width, noWrapCell(options, rowIdx, i))
 		cellLines[i] = lines
 		if len(lines) > maxLines {
 			maxLines = len(lines)
@@ -531,12 +641,23 @@ func renderWrappedRows(row []string, widths []int) []string {
 	return rendered
 }
 
-func wrapCell(value string, width int) []string {
+func noWrapCell(options tableOptions, row int, col int) bool {
+	if len(options.noWrapCells) == 0 {
+		return false
+	}
+	_, ok := options.noWrapCells[cellKey(row, col)]
+	return ok
+}
+
+func wrapCell(value string, width int, noWrap bool) []string {
 	if width <= 0 {
 		return []string{value}
 	}
 	if value == "" {
 		return []string{""}
+	}
+	if noWrap {
+		return []string{truncateCell(value, width)}
 	}
 
 	paragraphs := strings.Split(value, "\n")
