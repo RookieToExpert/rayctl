@@ -26,8 +26,10 @@ const (
 	defaultSubscriptionDCloud     = "019a575c-9a53-71ab-8028-2b0383d7a02f"
 	defaultAPIBaseURL             = "https://management.d.pjlab.org.cn"
 	defaultKubernetesBaseURL      = "https://compute.d.pjlab.org.cn"
+	defaultIAMBaseURL             = "https://iam.d.pjlab.org.cn"
 	defaultCloudAPIBaseURL        = "https://management-cloud.d.pjlab.org.cn"
 	defaultCloudKubernetesBaseURL = "https://compute-cloud.d.pjlab.org.cn"
+	defaultCloudIAMBaseURL        = "https://iam-cloud.d.pjlab.org.cn"
 	defaultResourceGroup          = "default"
 	defaultRegion                 = "cn-pj-01"
 	defaultPageLimit              = 100
@@ -39,6 +41,7 @@ type VirtualClusterClient struct {
 	secretKey         string
 	baseURL           string
 	kubernetesBaseURL string
+	iamBaseURL        string
 	subscription      string
 	resourceGroup     string
 	region            string
@@ -61,10 +64,86 @@ type StorageVolumeResource struct {
 	ResourceGroupDisplayName string `json:"resource_group_display_name"`
 }
 
+type ECSVirtualMachine struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	DisplayName string `json:"display_name"`
+	CreatorID  string `json:"creator_id"`
+	State      string `json:"state"`
+	Properties struct {
+		Hostname          string `json:"hostname"`
+		MachineType       string `json:"machine_type"`
+		VirtualMachineType string `json:"virtual_machine_type"`
+		ImageID           string `json:"image_id"`
+		Metadata          struct {
+			Items []struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			} `json:"items"`
+		} `json:"metadata"`
+		NetworkInterfaces []struct {
+			Properties struct {
+				IPv4Addr string `json:"ip_v4_addr"`
+				VPCInfo  struct {
+					UID         string `json:"uid"`
+					Name        string `json:"name"`
+					DisplayName string `json:"display_name"`
+				} `json:"vpc_info"`
+			} `json:"properties"`
+		} `json:"network_interfaces"`
+	} `json:"properties"`
+}
+
+type AISpace struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	UID         string `json:"uid"`
+	DisplayName string `json:"display_name"`
+	CreatorID   string `json:"creator_id"`
+	State       string `json:"state"`
+	Properties  struct {
+		Type      string `json:"type"`
+		ImagePath string `json:"image_path"`
+		HostIP    string `json:"host_ip"`
+		VirtualMachineProperties struct {
+			MachineType       string `json:"machine_type"`
+			NetworkInterfaces []struct {
+				Properties struct {
+					IPv4Addr string `json:"ip_v4_addr"`
+					VPCInfo  struct {
+						UID         string `json:"uid"`
+						Name        string `json:"name"`
+						DisplayName string `json:"display_name"`
+					} `json:"vpc_info"`
+				} `json:"properties"`
+			} `json:"network_interfaces"`
+		} `json:"virtual_machine_properties"`
+	} `json:"properties"`
+}
+
+type IAMUser struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Username string `json:"username"`
+}
+
 type virtualClusterListResponse struct {
 	VirtualClusters []VirtualCluster `json:"virtual_clusters"`
 	Items           []VirtualCluster `json:"items"`
 	NextPageToken   string           `json:"next_page_token"`
+}
+
+type ecsVirtualMachineListResponse struct {
+	VirtualMachines []ECSVirtualMachine `json:"virtual_machines"`
+}
+
+type aiSpaceListResponse struct {
+	AISpaces []AISpace `json:"ai_spaces"`
+}
+
+type iamUserListResponse struct {
+	Users []IAMUser `json:"users"`
 }
 
 type storageVolumePageResponse struct {
@@ -79,6 +158,7 @@ type config struct {
 	Cluster           string `json:"cluster"`
 	BaseURL           string `json:"base_url"`
 	KubernetesBaseURL string `json:"kubernetes_base_url"`
+	IAMBaseURL        string `json:"iam_base_url"`
 	ResourceGroup     string `json:"resource_group"`
 	Region            string `json:"region"`
 }
@@ -90,6 +170,7 @@ type ConfigSnapshot struct {
 	Cluster           string `json:"cluster"`
 	BaseURL           string `json:"base_url"`
 	KubernetesBaseURL string `json:"kubernetes_base_url"`
+	IAMBaseURL        string `json:"iam_base_url"`
 	ResourceGroup     string `json:"resource_group"`
 	Region            string `json:"region"`
 }
@@ -111,11 +192,15 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 	}
 
 	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
+	iamBaseURL := defaultIAMBaseURLForCluster(cluster)
 	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_BASE_URL")), "/"); override != "" {
 		baseURL = override
 	}
 	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_KUBERNETES_BASE_URL")), "/"); override != "" {
 		kubernetesBaseURL = override
+	}
+	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_IAM_BASE_URL")), "/"); override != "" {
+		iamBaseURL = override
 	}
 
 	resourceGroup := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_RESOURCE_GROUP"))
@@ -133,6 +218,7 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 		secretKey:         secretKey,
 		baseURL:           baseURL,
 		kubernetesBaseURL: kubernetesBaseURL,
+		iamBaseURL:        iamBaseURL,
 		subscription:      subscription,
 		resourceGroup:     resourceGroup,
 		region:            region,
@@ -163,11 +249,15 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 	}
 
 	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
+	iamBaseURL := defaultIAMBaseURLForCluster(cluster)
 	if override := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"); override != "" {
 		baseURL = override
 	}
 	if override := strings.TrimRight(strings.TrimSpace(cfg.KubernetesBaseURL), "/"); override != "" {
 		kubernetesBaseURL = override
+	}
+	if override := strings.TrimRight(strings.TrimSpace(cfg.IAMBaseURL), "/"); override != "" {
+		iamBaseURL = override
 	}
 
 	resourceGroup := strings.TrimSpace(cfg.ResourceGroup)
@@ -185,6 +275,7 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		secretKey:         secretKey,
 		baseURL:           baseURL,
 		kubernetesBaseURL: kubernetesBaseURL,
+		iamBaseURL:        iamBaseURL,
 		subscription:      subscription,
 		resourceGroup:     resourceGroup,
 		region:            region,
@@ -219,6 +310,9 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 			cfg.KubernetesBaseURL = kubernetesBaseURL
 		}
 	}
+	if strings.TrimSpace(cfg.IAMBaseURL) == "" {
+		cfg.IAMBaseURL = defaultIAMBaseURLForCluster(cfg.Cluster)
+	}
 	return &cfg, nil
 }
 
@@ -236,6 +330,9 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 	}
 	if strings.TrimSpace(cfg.KubernetesBaseURL) == "" {
 		cfg.KubernetesBaseURL = kubernetesBaseURL
+	}
+	if strings.TrimSpace(cfg.IAMBaseURL) == "" {
+		cfg.IAMBaseURL = defaultIAMBaseURLForCluster(cfg.Cluster)
 	}
 
 	content, err := json.MarshalIndent(cfg, "", "  ")
@@ -267,6 +364,15 @@ func defaultBaseURLsForCluster(cluster string) (string, string) {
 		return defaultCloudAPIBaseURL, defaultCloudKubernetesBaseURL
 	default:
 		return defaultAPIBaseURL, defaultKubernetesBaseURL
+	}
+}
+
+func defaultIAMBaseURLForCluster(cluster string) string {
+	switch normalizeClusterName(cluster) {
+	case ClusterDCloud:
+		return defaultCloudIAMBaseURL
+	default:
+		return defaultIAMBaseURL
 	}
 }
 
@@ -310,6 +416,118 @@ func (c *VirtualClusterClient) ResolveDisplayNames(ctx context.Context, uids []s
 
 func (c *VirtualClusterClient) ListVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
 	return c.listVirtualClusters(ctx)
+}
+
+func (c *VirtualClusterClient) ListECSVirtualMachines(ctx context.Context) ([]ECSVirtualMachine, error) {
+	skip := 0
+	result := make([]ECSVirtualMachine, 0)
+	for {
+		u, _ := url.Parse(c.baseURL)
+		u.Path = "/compute/ecs/v2/subscriptions/-/resourceGroups/-/zones/-/virtualMachines"
+		query := u.Query()
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("skip", fmt.Sprintf("%d", skip))
+		query.Set("page_token", "")
+		query.Set("order_by", "created_at desc")
+		u.RawQuery = query.Encode()
+
+		var payload ecsVirtualMachineListResponse
+		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.VirtualMachines) == 0 {
+			break
+		}
+		result = append(result, payload.VirtualMachines...)
+		if len(payload.VirtualMachines) < defaultPageLimit {
+			break
+		}
+		skip += len(payload.VirtualMachines)
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) ListAISpaces(ctx context.Context) ([]AISpace, error) {
+	skip := 0
+	result := make([]AISpace, 0)
+	for {
+		u, _ := url.Parse(c.baseURL)
+		u.Path = "/compute/ais/v1/subscriptions/-/resourceGroups/-/zones/-/aiSpaces"
+		query := u.Query()
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("skip", fmt.Sprintf("%d", skip))
+		query.Set("page_token", "")
+		query.Set("order_by", "created_at desc")
+		query.Set("filter", "")
+		u.RawQuery = query.Encode()
+
+		var payload aiSpaceListResponse
+		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.AISpaces) == 0 {
+			break
+		}
+		result = append(result, payload.AISpaces...)
+		if len(payload.AISpaces) < defaultPageLimit {
+			break
+		}
+		skip += len(payload.AISpaces)
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) ResolveUsernames(ctx context.Context, ids []string) (map[string]string, error) {
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return map[string]string{}, nil
+	}
+
+	result := make(map[string]string, len(unique))
+	for start := 0; start < len(unique); start += defaultPageLimit {
+		end := start + defaultPageLimit
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+
+		filters := make([]string, 0, len(chunk))
+		for _, id := range chunk {
+			filters = append(filters, fmt.Sprintf(`id="%s"`, id))
+		}
+
+		u, _ := url.Parse(c.iamBaseURL)
+		u.Path = "/iam/idp/v1/getUsers"
+		query := u.Query()
+		query.Set("includeAdmin", "true")
+		query.Set("page_token", "1")
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("order_by", "create_time desc")
+		query.Set("filter", strings.Join(filters, " OR "))
+		u.RawQuery = query.Encode()
+
+		var payload iamUserListResponse
+		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		for _, user := range payload.Users {
+			result[user.ID] = firstNonEmpty(user.Username, user.Name, user.ID)
+		}
+	}
+
+	return result, nil
 }
 
 func (c *VirtualClusterClient) GetVolcanoJob(ctx context.Context, vclusterName string, namespace string, jobName string) (*unstructured.Unstructured, error) {
