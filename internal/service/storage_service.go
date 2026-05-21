@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
@@ -37,11 +38,82 @@ type PVCCheckResult struct {
 	Items []PVCCheckItemResult
 }
 
+type PVCCreateRequest struct {
+	Name       string
+	Namespace  string
+	AFSUUID    string
+	SecretName string
+	Size       string
+}
+
 func NewStorageService(clientset kubernetes.Interface, vcClient *platform.VirtualClusterClient) *StorageService {
 	return &StorageService{
 		clientset: clientset,
 		vcClient:  vcClient,
 	}
+}
+
+func (s *StorageService) CreatePVC(ctx context.Context, req PVCCreateRequest) (*corev1.PersistentVolumeClaim, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, fmt.Errorf("pvc name is required")
+	}
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	afsUUID := strings.TrimSpace(req.AFSUUID)
+	if afsUUID == "" {
+		return nil, fmt.Errorf("afs uuid is required")
+	}
+	if !strings.HasPrefix(afsUUID, "csi://") {
+		afsUUID = "csi://" + afsUUID
+	}
+
+	secretName := strings.TrimSpace(req.SecretName)
+	if secretName == "" {
+		return nil, fmt.Errorf("afs secret name is required")
+	}
+
+	size := strings.TrimSpace(req.Size)
+	if size == "" {
+		size = "1000Mi"
+	}
+	quantity, err := resource.ParseQuantity(size)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pvc size %q: %w", size, err)
+	}
+
+	storageClassName := "quark-vcproxy-sc"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				"afs.endpoint":   afsUUID,
+				"afs.secretName": secretName,
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteMany,
+			},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: quantity,
+				},
+			},
+			StorageClassName: &storageClassName,
+		},
+	}
+
+	created, err := s.clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("create pvc %s/%s: %w", namespace, name, err)
+	}
+	return created, nil
 }
 
 func (s *StorageService) CheckAFS(ctx context.Context, identifier string) (*AFSCheckResult, error) {

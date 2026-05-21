@@ -61,6 +61,10 @@ func NewDynamicClient(kubeconfig string) (dynamic.Interface, error) {
 	return client, nil
 }
 
+func ResolvedKubeconfigPath(kubeconfig string) string {
+	return resolveKubeconfigPath(kubeconfig)
+}
+
 func resolveKubeconfigPath(kubeconfig string) string {
 	if path := strings.TrimSpace(kubeconfig); path != "" {
 		return path
