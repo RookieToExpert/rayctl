@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,13 +46,28 @@ type VirtualClusterClient struct {
 	subscription      string
 	resourceGroup     string
 	region            string
+	currentProfile    string
+	profiles          map[string]clientProfile
 	httpClient        *http.Client
+}
+
+type clientProfile struct {
+	Name              string
+	AccessKey         string
+	SecretKey         string
+	BaseURL           string
+	KubernetesBaseURL string
+	IAMBaseURL        string
+	Subscription      string
+	ResourceGroup     string
+	Region            string
 }
 
 type VirtualCluster struct {
 	UID         string `json:"uid"`
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
+	ProfileName string `json:"-"`
 }
 
 type StorageVolumeResource struct {
@@ -62,21 +78,23 @@ type StorageVolumeResource struct {
 	Zone                     string `json:"zone"`
 	ResourceGroupName        string `json:"resource_group_name"`
 	ResourceGroupDisplayName string `json:"resource_group_display_name"`
+	ProfileName              string `json:"-"`
 }
 
 type ECSVirtualMachine struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	UID        string `json:"uid"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	UID         string `json:"uid"`
 	DisplayName string `json:"display_name"`
-	CreatorID  string `json:"creator_id"`
-	State      string `json:"state"`
+	CreatorID   string `json:"creator_id"`
+	State       string `json:"state"`
+	ProfileName string `json:"-"`
 	Properties struct {
-		Hostname          string `json:"hostname"`
-		MachineType       string `json:"machine_type"`
+		Hostname           string `json:"hostname"`
+		MachineType        string `json:"machine_type"`
 		VirtualMachineType string `json:"virtual_machine_type"`
-		ImageID           string `json:"image_id"`
-		Metadata          struct {
+		ImageID            string `json:"image_id"`
+		Metadata           struct {
 			Items []struct {
 				Key   string `json:"key"`
 				Value string `json:"value"`
@@ -102,6 +120,7 @@ type AISpace struct {
 	DisplayName string `json:"display_name"`
 	CreatorID   string `json:"creator_id"`
 	State       string `json:"state"`
+	ProfileName string `json:"-"`
 	Properties  struct {
 		Type      string `json:"type"`
 		ImagePath string `json:"image_path"`
@@ -128,6 +147,22 @@ type IAMUser struct {
 	Username string `json:"username"`
 }
 
+type AIComputeNode struct {
+	ID          string `json:"id"`
+	UID         string `json:"uid"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	TenantID    string `json:"tenant_id"`
+	State       string `json:"state"`
+	Properties  struct {
+		MachineType        string `json:"machine_type"`
+		VirtualClusterName string `json:"virtual_cluster_name"`
+		HostIP             string `json:"host_ip"`
+		HostName           string `json:"host_name"`
+	} `json:"properties"`
+	ProfileName string `json:"-"`
+}
+
 type virtualClusterListResponse struct {
 	VirtualClusters []VirtualCluster `json:"virtual_clusters"`
 	Items           []VirtualCluster `json:"items"`
@@ -144,6 +179,10 @@ type aiSpaceListResponse struct {
 
 type iamUserListResponse struct {
 	Users []IAMUser `json:"users"`
+}
+
+type aiComputeNodeListResponse struct {
+	AIComputeNodes []AIComputeNode `json:"ai_compute_nodes"`
 }
 
 type storageVolumePageResponse struct {
@@ -163,7 +202,26 @@ type config struct {
 	Region            string `json:"region"`
 }
 
+type multiProfileConfig struct {
+	CurrentProfile string            `json:"current_profile"`
+	Profiles       map[string]config `json:"profiles"`
+}
+
+type ConfigProfile struct {
+	AccessKey         string `json:"access_key"`
+	SecretKey         string `json:"secret_key"`
+	Subscription      string `json:"subscription_id"`
+	Cluster           string `json:"cluster"`
+	BaseURL           string `json:"base_url"`
+	KubernetesBaseURL string `json:"kubernetes_base_url"`
+	IAMBaseURL        string `json:"iam_base_url"`
+	ResourceGroup     string `json:"resource_group"`
+	Region            string `json:"region"`
+}
+
 type ConfigSnapshot struct {
+	CurrentProfile    string                   `json:"current_profile,omitempty"`
+	Profiles          map[string]ConfigProfile `json:"profiles,omitempty"`
 	AccessKey         string `json:"access_key"`
 	SecretKey         string `json:"secret_key"`
 	Subscription      string `json:"subscription_id"`
@@ -222,6 +280,20 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 		subscription:      subscription,
 		resourceGroup:     resourceGroup,
 		region:            region,
+		currentProfile:    "env",
+		profiles: map[string]clientProfile{
+			"env": {
+				Name:              "env",
+				AccessKey:         accessKey,
+				SecretKey:         secretKey,
+				BaseURL:           baseURL,
+				KubernetesBaseURL: kubernetesBaseURL,
+				IAMBaseURL:        iamBaseURL,
+				Subscription:      subscription,
+				ResourceGroup:     resourceGroup,
+				Region:            region,
+			},
+		},
 		httpClient:        &http.Client{Timeout: 10 * time.Second},
 	}, true
 }
@@ -232,53 +304,64 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		return nil, false
 	}
 
+	var multiCfg multiProfileConfig
+	if err := json.Unmarshal(content, &multiCfg); err == nil && len(multiCfg.Profiles) > 0 {
+		currentProfile := normalizeCurrentProfileName(multiCfg.CurrentProfile, multiCfg.Profiles)
+		profiles := make(map[string]clientProfile, len(multiCfg.Profiles))
+		for name, raw := range multiCfg.Profiles {
+			profile, ok := makeClientProfile(name, raw)
+			if !ok {
+				continue
+			}
+			profiles[name] = profile
+		}
+		current, ok := profiles[currentProfile]
+		if !ok {
+			for name, profile := range profiles {
+				currentProfile = name
+				current = profile
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, false
+		}
+		return &VirtualClusterClient{
+			accessKey:         current.AccessKey,
+			secretKey:         current.SecretKey,
+			baseURL:           current.BaseURL,
+			kubernetesBaseURL: current.KubernetesBaseURL,
+			iamBaseURL:        current.IAMBaseURL,
+			subscription:      current.Subscription,
+			resourceGroup:     current.ResourceGroup,
+			region:            current.Region,
+			currentProfile:    currentProfile,
+			profiles:          profiles,
+			httpClient:        &http.Client{Timeout: 10 * time.Second},
+		}, true
+	}
+
 	var cfg config
 	if err := json.Unmarshal(content, &cfg); err != nil {
 		return nil, false
 	}
-
-	accessKey := strings.TrimSpace(cfg.AccessKey)
-	secretKey := strings.TrimSpace(cfg.SecretKey)
-	cluster := normalizeClusterName(cfg.Cluster)
-	subscription := strings.TrimSpace(cfg.Subscription)
-	if subscription == "" {
-		subscription = defaultSubscriptionForCluster(cluster)
-	}
-	if accessKey == "" || secretKey == "" || subscription == "" {
+	profile, ok := makeClientProfile("default", cfg)
+	if !ok {
 		return nil, false
 	}
 
-	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
-	iamBaseURL := defaultIAMBaseURLForCluster(cluster)
-	if override := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"); override != "" {
-		baseURL = override
-	}
-	if override := strings.TrimRight(strings.TrimSpace(cfg.KubernetesBaseURL), "/"); override != "" {
-		kubernetesBaseURL = override
-	}
-	if override := strings.TrimRight(strings.TrimSpace(cfg.IAMBaseURL), "/"); override != "" {
-		iamBaseURL = override
-	}
-
-	resourceGroup := strings.TrimSpace(cfg.ResourceGroup)
-	if resourceGroup == "" {
-		resourceGroup = defaultResourceGroup
-	}
-
-	region := strings.TrimSpace(cfg.Region)
-	if region == "" {
-		region = defaultRegion
-	}
-
 	return &VirtualClusterClient{
-		accessKey:         accessKey,
-		secretKey:         secretKey,
-		baseURL:           baseURL,
-		kubernetesBaseURL: kubernetesBaseURL,
-		iamBaseURL:        iamBaseURL,
-		subscription:      subscription,
-		resourceGroup:     resourceGroup,
-		region:            region,
+		accessKey:         profile.AccessKey,
+		secretKey:         profile.SecretKey,
+		baseURL:           profile.BaseURL,
+		kubernetesBaseURL: profile.KubernetesBaseURL,
+		iamBaseURL:        profile.IAMBaseURL,
+		subscription:      profile.Subscription,
+		resourceGroup:     profile.ResourceGroup,
+		region:            profile.Region,
+		currentProfile:    profile.Name,
+		profiles:          map[string]clientProfile{profile.Name: profile},
 		httpClient:        &http.Client{Timeout: 10 * time.Second},
 	}, true
 }
@@ -291,6 +374,42 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 	content, err := os.ReadFile(filepath.Clean(configPath))
 	if err != nil {
 		return nil, err
+	}
+
+	var multiCfg multiProfileConfig
+	if err := json.Unmarshal(content, &multiCfg); err == nil && len(multiCfg.Profiles) > 0 {
+		currentProfile := normalizeCurrentProfileName(multiCfg.CurrentProfile, multiCfg.Profiles)
+		snapshot := &ConfigSnapshot{
+			CurrentProfile: currentProfile,
+			Profiles:       make(map[string]ConfigProfile, len(multiCfg.Profiles)),
+		}
+		for name, raw := range multiCfg.Profiles {
+			profile := ConfigProfile{
+				AccessKey:         raw.AccessKey,
+				SecretKey:         raw.SecretKey,
+				Subscription:      raw.Subscription,
+				Cluster:           normalizeClusterName(raw.Cluster),
+				BaseURL:           strings.TrimRight(strings.TrimSpace(raw.BaseURL), "/"),
+				KubernetesBaseURL: strings.TrimRight(strings.TrimSpace(raw.KubernetesBaseURL), "/"),
+				IAMBaseURL:        strings.TrimRight(strings.TrimSpace(raw.IAMBaseURL), "/"),
+				ResourceGroup:     strings.TrimSpace(raw.ResourceGroup),
+				Region:            strings.TrimSpace(raw.Region),
+			}
+			applyConfigProfileDefaults(&profile)
+			snapshot.Profiles[name] = profile
+		}
+		if current, ok := snapshot.Profiles[currentProfile]; ok {
+			snapshot.AccessKey = current.AccessKey
+			snapshot.SecretKey = current.SecretKey
+			snapshot.Subscription = current.Subscription
+			snapshot.Cluster = current.Cluster
+			snapshot.BaseURL = current.BaseURL
+			snapshot.KubernetesBaseURL = current.KubernetesBaseURL
+			snapshot.IAMBaseURL = current.IAMBaseURL
+			snapshot.ResourceGroup = current.ResourceGroup
+			snapshot.Region = current.Region
+		}
+		return snapshot, nil
 	}
 
 	var cfg ConfigSnapshot
@@ -320,6 +439,72 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 	if cfg == nil {
 		return fmt.Errorf("platform config is required")
 	}
+	if len(cfg.Profiles) > 0 {
+		currentProfile := normalizeCurrentProfileName(cfg.CurrentProfile, configProfileMapToConfig(cfg.Profiles))
+		if currentProfile == "" {
+			currentProfile = cfg.CurrentProfile
+		}
+		profiles := cloneConfigProfiles(cfg.Profiles)
+		current := profiles[currentProfile]
+		if strings.TrimSpace(cfg.AccessKey) != "" {
+			current.AccessKey = cfg.AccessKey
+		}
+		if strings.TrimSpace(cfg.SecretKey) != "" {
+			current.SecretKey = cfg.SecretKey
+		}
+		if strings.TrimSpace(cfg.Subscription) != "" || strings.TrimSpace(cfg.Cluster) != "" {
+			current.Subscription = cfg.Subscription
+		}
+		if strings.TrimSpace(cfg.Cluster) != "" {
+			current.Cluster = cfg.Cluster
+		}
+		if strings.TrimSpace(cfg.BaseURL) != "" || strings.TrimSpace(cfg.Cluster) != "" {
+			current.BaseURL = cfg.BaseURL
+		}
+		if strings.TrimSpace(cfg.KubernetesBaseURL) != "" || strings.TrimSpace(cfg.Cluster) != "" {
+			current.KubernetesBaseURL = cfg.KubernetesBaseURL
+		}
+		if strings.TrimSpace(cfg.IAMBaseURL) != "" || strings.TrimSpace(cfg.Cluster) != "" {
+			current.IAMBaseURL = cfg.IAMBaseURL
+		}
+		if strings.TrimSpace(cfg.ResourceGroup) != "" {
+			current.ResourceGroup = cfg.ResourceGroup
+		}
+		if strings.TrimSpace(cfg.Region) != "" {
+			current.Region = cfg.Region
+		}
+		applyConfigProfileDefaults(&current)
+		profiles[currentProfile] = current
+
+		output := multiProfileConfig{
+			CurrentProfile: currentProfile,
+			Profiles:       make(map[string]config, len(profiles)),
+		}
+		for name, profile := range profiles {
+			output.Profiles[name] = config{
+				AccessKey:         profile.AccessKey,
+				SecretKey:         profile.SecretKey,
+				Subscription:      profile.Subscription,
+				Cluster:           profile.Cluster,
+				BaseURL:           profile.BaseURL,
+				KubernetesBaseURL: profile.KubernetesBaseURL,
+				IAMBaseURL:        profile.IAMBaseURL,
+				ResourceGroup:     profile.ResourceGroup,
+				Region:            profile.Region,
+			}
+		}
+
+		content, err := json.MarshalIndent(output, "", "  ")
+		if err != nil {
+			return err
+		}
+		dir := filepath.Dir(configPath)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Clean(configPath), append(content, '\n'), 0o600)
+	}
+
 	cfg.Cluster = normalizeClusterName(cfg.Cluster)
 	if strings.TrimSpace(cfg.Subscription) == "" {
 		cfg.Subscription = defaultSubscriptionForCluster(cfg.Cluster)
@@ -385,44 +570,159 @@ func defaultSubscriptionForCluster(cluster string) string {
 	}
 }
 
-func (c *VirtualClusterClient) ResolveDisplayNames(ctx context.Context, uids []string) (map[string]string, error) {
-	uniqueUIDs := make(map[string]struct{}, len(uids))
-	for _, uid := range uids {
-		uid = strings.TrimSpace(uid)
-		if uid == "" {
-			continue
-		}
-		uniqueUIDs[uid] = struct{}{}
+func makeClientProfile(name string, cfg config) (clientProfile, bool) {
+	cluster := normalizeClusterName(cfg.Cluster)
+	accessKey := strings.TrimSpace(cfg.AccessKey)
+	secretKey := strings.TrimSpace(cfg.SecretKey)
+	subscription := strings.TrimSpace(cfg.Subscription)
+	if subscription == "" {
+		subscription = defaultSubscriptionForCluster(cluster)
 	}
-	if len(uniqueUIDs) == 0 {
-		return map[string]string{}, nil
+	if accessKey == "" || secretKey == "" || subscription == "" {
+		return clientProfile{}, false
 	}
-
-	clusters, err := c.listVirtualClusters(ctx)
-	if err != nil {
-		return nil, err
+	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
+	iamBaseURL := defaultIAMBaseURLForCluster(cluster)
+	if override := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"); override != "" {
+		baseURL = override
 	}
-
-	result := make(map[string]string, len(uniqueUIDs))
-	for _, cluster := range clusters {
-		if _, ok := uniqueUIDs[cluster.UID]; !ok {
-			continue
-		}
-		result[cluster.UID] = firstNonEmpty(cluster.Name, cluster.DisplayName, cluster.UID)
+	if override := strings.TrimRight(strings.TrimSpace(cfg.KubernetesBaseURL), "/"); override != "" {
+		kubernetesBaseURL = override
 	}
-
-	return result, nil
+	if override := strings.TrimRight(strings.TrimSpace(cfg.IAMBaseURL), "/"); override != "" {
+		iamBaseURL = override
+	}
+	resourceGroup := strings.TrimSpace(cfg.ResourceGroup)
+	if resourceGroup == "" {
+		resourceGroup = defaultResourceGroup
+	}
+	region := strings.TrimSpace(cfg.Region)
+	if region == "" {
+		region = defaultRegion
+	}
+	return clientProfile{
+		Name:              strings.TrimSpace(name),
+		AccessKey:         accessKey,
+		SecretKey:         secretKey,
+		BaseURL:           baseURL,
+		KubernetesBaseURL: kubernetesBaseURL,
+		IAMBaseURL:        iamBaseURL,
+		Subscription:      subscription,
+		ResourceGroup:     resourceGroup,
+		Region:            region,
+	}, true
 }
 
-func (c *VirtualClusterClient) ListVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
-	return c.listVirtualClusters(ctx)
+func normalizeCurrentProfileName(current string, profiles map[string]config) string {
+	current = strings.TrimSpace(current)
+	if current != "" {
+		if _, ok := profiles[current]; ok {
+			return current
+		}
+	}
+	if _, ok := profiles["ailabdev"]; ok {
+		return "ailabdev"
+	}
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
 }
 
-func (c *VirtualClusterClient) ListECSVirtualMachines(ctx context.Context) ([]ECSVirtualMachine, error) {
+func configProfileMapToConfig(values map[string]ConfigProfile) map[string]config {
+	result := make(map[string]config, len(values))
+	for name, value := range values {
+		result[name] = config{
+			AccessKey:         value.AccessKey,
+			SecretKey:         value.SecretKey,
+			Subscription:      value.Subscription,
+			Cluster:           value.Cluster,
+			BaseURL:           value.BaseURL,
+			KubernetesBaseURL: value.KubernetesBaseURL,
+			IAMBaseURL:        value.IAMBaseURL,
+			ResourceGroup:     value.ResourceGroup,
+			Region:            value.Region,
+		}
+	}
+	return result
+}
+
+func applyConfigProfileDefaults(profile *ConfigProfile) {
+	if profile == nil {
+		return
+	}
+	profile.Cluster = normalizeClusterName(profile.Cluster)
+	if strings.TrimSpace(profile.Subscription) == "" {
+		profile.Subscription = defaultSubscriptionForCluster(profile.Cluster)
+	}
+	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(profile.Cluster)
+	if strings.TrimSpace(profile.BaseURL) == "" {
+		profile.BaseURL = baseURL
+	}
+	if strings.TrimSpace(profile.KubernetesBaseURL) == "" {
+		profile.KubernetesBaseURL = kubernetesBaseURL
+	}
+	if strings.TrimSpace(profile.IAMBaseURL) == "" {
+		profile.IAMBaseURL = defaultIAMBaseURLForCluster(profile.Cluster)
+	}
+	if strings.TrimSpace(profile.ResourceGroup) == "" {
+		profile.ResourceGroup = defaultResourceGroup
+	}
+	if strings.TrimSpace(profile.Region) == "" {
+		profile.Region = defaultRegion
+	}
+}
+
+func cloneConfigProfiles(values map[string]ConfigProfile) map[string]ConfigProfile {
+	result := make(map[string]ConfigProfile, len(values))
+	for name, value := range values {
+		result[name] = value
+	}
+	return result
+}
+
+func (c *VirtualClusterClient) orderedProfiles() []clientProfile {
+	if len(c.profiles) == 0 {
+		return []clientProfile{{
+			Name:              firstNonEmpty(c.currentProfile, "default"),
+			AccessKey:         c.accessKey,
+			SecretKey:         c.secretKey,
+			BaseURL:           c.baseURL,
+			KubernetesBaseURL: c.kubernetesBaseURL,
+			IAMBaseURL:        c.iamBaseURL,
+			Subscription:      c.subscription,
+			ResourceGroup:     c.resourceGroup,
+			Region:            c.region,
+		}}
+	}
+	profiles := make([]clientProfile, 0, len(c.profiles))
+	if current, ok := c.profiles[c.currentProfile]; ok {
+		profiles = append(profiles, current)
+	}
+	names := make([]string, 0, len(c.profiles))
+	for name := range c.profiles {
+		if name == c.currentProfile {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		profiles = append(profiles, c.profiles[name])
+	}
+	return profiles
+}
+
+func (c *VirtualClusterClient) listECSVirtualMachinesWithProfile(ctx context.Context, profile clientProfile) ([]ECSVirtualMachine, error) {
 	skip := 0
 	result := make([]ECSVirtualMachine, 0)
 	for {
-		u, _ := url.Parse(c.baseURL)
+		u, _ := url.Parse(profile.BaseURL)
 		u.Path = "/compute/ecs/v2/subscriptions/-/resourceGroups/-/zones/-/virtualMachines"
 		query := u.Query()
 		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
@@ -432,7 +732,7 @@ func (c *VirtualClusterClient) ListECSVirtualMachines(ctx context.Context) ([]EC
 		u.RawQuery = query.Encode()
 
 		var payload ecsVirtualMachineListResponse
-		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
 			return nil, err
 		}
 		if len(payload.VirtualMachines) == 0 {
@@ -447,11 +747,11 @@ func (c *VirtualClusterClient) ListECSVirtualMachines(ctx context.Context) ([]EC
 	return result, nil
 }
 
-func (c *VirtualClusterClient) ListAISpaces(ctx context.Context) ([]AISpace, error) {
+func (c *VirtualClusterClient) listAISpacesWithProfile(ctx context.Context, profile clientProfile) ([]AISpace, error) {
 	skip := 0
 	result := make([]AISpace, 0)
 	for {
-		u, _ := url.Parse(c.baseURL)
+		u, _ := url.Parse(profile.BaseURL)
 		u.Path = "/compute/ais/v1/subscriptions/-/resourceGroups/-/zones/-/aiSpaces"
 		query := u.Query()
 		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
@@ -462,7 +762,7 @@ func (c *VirtualClusterClient) ListAISpaces(ctx context.Context) ([]AISpace, err
 		u.RawQuery = query.Encode()
 
 		var payload aiSpaceListResponse
-		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
 			return nil, err
 		}
 		if len(payload.AISpaces) == 0 {
@@ -475,6 +775,204 @@ func (c *VirtualClusterClient) ListAISpaces(ctx context.Context) ([]AISpace, err
 		skip += len(payload.AISpaces)
 	}
 	return result, nil
+}
+
+func (c *VirtualClusterClient) resolveUsernamesWithProfile(ctx context.Context, profile clientProfile, ids []string) (map[string]string, error) {
+	result := make(map[string]string, len(ids))
+	for start := 0; start < len(ids); start += defaultPageLimit {
+		end := start + defaultPageLimit
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		filters := make([]string, 0, len(chunk))
+		for _, id := range chunk {
+			filters = append(filters, fmt.Sprintf(`id="%s"`, id))
+		}
+
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/idp/v1/getUsers"
+		query := u.Query()
+		query.Set("includeAdmin", "true")
+		query.Set("page_token", "1")
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("order_by", "create_time desc")
+		query.Set("filter", strings.Join(filters, " OR "))
+		u.RawQuery = query.Encode()
+
+		var payload iamUserListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		for _, user := range payload.Users {
+			result[user.ID] = firstNonEmpty(user.Username, user.Name, user.ID)
+		}
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) listStorageVolumeResourcesWithProfile(ctx context.Context, profile clientProfile, zone string) ([]StorageVolumeResource, error) {
+	pageToken := "1"
+	resources := make([]StorageVolumeResource, 0)
+	for {
+		u, _ := url.Parse(profile.BaseURL)
+		u.Path = "/rmh/v1/resources:page"
+		query := u.Query()
+		query.Set("filter", fmt.Sprintf(`resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume"  AND zone="*%s*"`, zone))
+		query.Set("page_size", "200")
+		query.Set("page_token", pageToken)
+		u.RawQuery = query.Encode()
+
+		var payload storageVolumePageResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		resources = append(resources, payload.Resources...)
+		if strings.TrimSpace(payload.NextPageToken) == "" {
+			break
+		}
+		pageToken = payload.NextPageToken
+	}
+	return resources, nil
+}
+
+func (c *VirtualClusterClient) listAIComputeNodesWithProfile(ctx context.Context, profile clientProfile) ([]AIComputeNode, error) {
+	skip := 0
+	result := make([]AIComputeNode, 0)
+	for {
+		u, _ := url.Parse(profile.BaseURL)
+		u.Path = "/compute/ecp/v1/subscriptions/-/resourceGroups/-/zones/-/aiComputeNodes"
+		query := u.Query()
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("skip", fmt.Sprintf("%d", skip))
+		u.RawQuery = query.Encode()
+
+		var payload aiComputeNodeListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.AIComputeNodes) == 0 {
+			break
+		}
+		for i := range payload.AIComputeNodes {
+			payload.AIComputeNodes[i].ProfileName = profile.Name
+		}
+		result = append(result, payload.AIComputeNodes...)
+		if len(payload.AIComputeNodes) < defaultPageLimit {
+			break
+		}
+		skip += len(payload.AIComputeNodes)
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) ResolveDisplayNames(ctx context.Context, uids []string) (map[string]string, error) {
+	names, _, err := c.ResolveDisplayNamesWithProfiles(ctx, uids)
+	return names, err
+}
+
+func (c *VirtualClusterClient) ResolveDisplayNamesWithProfiles(ctx context.Context, uids []string) (map[string]string, map[string]string, error) {
+	uniqueUIDs := make(map[string]struct{}, len(uids))
+	for _, uid := range uids {
+		uid = strings.TrimSpace(uid)
+		if uid == "" {
+			continue
+		}
+		uniqueUIDs[uid] = struct{}{}
+	}
+	if len(uniqueUIDs) == 0 {
+		return map[string]string{}, map[string]string{}, nil
+	}
+
+	clusters, err := c.listVirtualClusters(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	result := make(map[string]string, len(uniqueUIDs))
+	profiles := make(map[string]string, len(uniqueUIDs))
+	for _, cluster := range clusters {
+		if _, ok := uniqueUIDs[cluster.UID]; !ok {
+			continue
+		}
+		result[cluster.UID] = firstNonEmpty(cluster.Name, cluster.DisplayName, cluster.UID)
+		if strings.TrimSpace(cluster.ProfileName) != "" {
+			profiles[cluster.UID] = strings.TrimSpace(cluster.ProfileName)
+		}
+	}
+
+	return result, profiles, nil
+}
+
+func (c *VirtualClusterClient) ListVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
+	return c.listVirtualClusters(ctx)
+}
+
+func (c *VirtualClusterClient) ListECSVirtualMachines(ctx context.Context) ([]ECSVirtualMachine, error) {
+	result := make([]ECSVirtualMachine, 0)
+	seen := make(map[string]struct{})
+	var lastErr error
+	success := false
+	for _, profile := range c.orderedProfiles() {
+		items, err := c.listECSVirtualMachinesWithProfile(ctx, profile)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		success = true
+		for _, item := range items {
+			item.ProfileName = profile.Name
+			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.ID), strings.TrimSpace(item.Name))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, item)
+		}
+	}
+	if success {
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no platform profile available")
+}
+
+func (c *VirtualClusterClient) ListAISpaces(ctx context.Context) ([]AISpace, error) {
+	result := make([]AISpace, 0)
+	seen := make(map[string]struct{})
+	var lastErr error
+	success := false
+	for _, profile := range c.orderedProfiles() {
+		items, err := c.listAISpacesWithProfile(ctx, profile)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		success = true
+		for _, item := range items {
+			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.ID), strings.TrimSpace(item.Name))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, item)
+		}
+	}
+	if success {
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no platform profile available")
 }
 
 func (c *VirtualClusterClient) ResolveUsernames(ctx context.Context, ids []string) (map[string]string, error) {
@@ -496,111 +994,170 @@ func (c *VirtualClusterClient) ResolveUsernames(ctx context.Context, ids []strin
 	}
 
 	result := make(map[string]string, len(unique))
-	for start := 0; start < len(unique); start += defaultPageLimit {
-		end := start + defaultPageLimit
-		if end > len(unique) {
-			end = len(unique)
+	var lastErr error
+	success := false
+	remaining := append([]string(nil), unique...)
+	for _, profile := range c.orderedProfiles() {
+		if len(remaining) == 0 {
+			break
 		}
-		chunk := unique[start:end]
-
-		filters := make([]string, 0, len(chunk))
-		for _, id := range chunk {
-			filters = append(filters, fmt.Sprintf(`id="%s"`, id))
+		resolved, err := c.resolveUsernamesWithProfile(ctx, profile, remaining)
+		if err != nil {
+			lastErr = err
+			continue
 		}
-
-		u, _ := url.Parse(c.iamBaseURL)
-		u.Path = "/iam/idp/v1/getUsers"
-		query := u.Query()
-		query.Set("includeAdmin", "true")
-		query.Set("page_token", "1")
-		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
-		query.Set("order_by", "create_time desc")
-		query.Set("filter", strings.Join(filters, " OR "))
-		u.RawQuery = query.Encode()
-
-		var payload iamUserListResponse
-		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
-			return nil, err
+		success = true
+		nextRemaining := make([]string, 0, len(remaining))
+		for _, id := range remaining {
+			if value, ok := resolved[id]; ok && strings.TrimSpace(value) != "" {
+				result[id] = value
+				continue
+			}
+			nextRemaining = append(nextRemaining, id)
 		}
-		for _, user := range payload.Users {
-			result[user.ID] = firstNonEmpty(user.Username, user.Name, user.ID)
+		remaining = nextRemaining
+	}
+	if len(result) > 0 || success {
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return map[string]string{}, nil
+}
+
+func (c *VirtualClusterClient) ListAIComputeNodes(ctx context.Context) ([]AIComputeNode, error) {
+	result := make([]AIComputeNode, 0)
+	seen := make(map[string]struct{})
+	var lastErr error
+	success := false
+	for _, profile := range c.orderedProfiles() {
+		items, err := c.listAIComputeNodesWithProfile(ctx, profile)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		success = true
+		for _, item := range items {
+			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.ID), strings.TrimSpace(item.Properties.HostName), strings.TrimSpace(item.Properties.HostIP))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, item)
 		}
 	}
-
-	return result, nil
+	if success {
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no platform profile available")
 }
 
 func (c *VirtualClusterClient) GetVolcanoJob(ctx context.Context, vclusterName string, namespace string, jobName string) (*unstructured.Unstructured, error) {
-	reqURL := c.kubernetesResourceURL(vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs/%s", namespace, jobName), nil)
-	var obj unstructured.Unstructured
-	if err := c.getJSON(ctx, reqURL, &obj); err != nil {
-		return nil, err
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs/%s", namespace, jobName), nil)
+		var obj unstructured.Unstructured
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &obj); err != nil {
+			lastErr = err
+			continue
+		}
+		return &obj, nil
 	}
-	return &obj, nil
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) GetPodGroup(ctx context.Context, vclusterName string, namespace string, podGroupName string) (*unstructured.Unstructured, error) {
-	reqURL := c.kubernetesResourceURL(vclusterName, fmt.Sprintf("/apis/scheduling.volcano.sh/v1beta1/namespaces/%s/podgroups/%s", namespace, podGroupName), nil)
-	var obj unstructured.Unstructured
-	if err := c.getJSON(ctx, reqURL, &obj); err != nil {
-		return nil, err
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/scheduling.volcano.sh/v1beta1/namespaces/%s/podgroups/%s", namespace, podGroupName), nil)
+		var obj unstructured.Unstructured
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &obj); err != nil {
+			lastErr = err
+			continue
+		}
+		return &obj, nil
 	}
-	return &obj, nil
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) GetSecret(ctx context.Context, vclusterName string, namespace string, secretName string) (*corev1.Secret, error) {
-	reqURL := c.kubernetesResourceURL(vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", namespace, secretName), nil)
-	var secret corev1.Secret
-	if err := c.getJSON(ctx, reqURL, &secret); err != nil {
-		return nil, err
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", namespace, secretName), nil)
+		var secret corev1.Secret
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &secret); err != nil {
+			lastErr = err
+			continue
+		}
+		return &secret, nil
 	}
-	return &secret, nil
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) GetPersistentVolumeClaim(ctx context.Context, vclusterName string, namespace string, claimName string) (*corev1.PersistentVolumeClaim, error) {
-	reqURL := c.kubernetesResourceURL(vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/persistentvolumeclaims/%s", namespace, claimName), nil)
-	var pvc corev1.PersistentVolumeClaim
-	if err := c.getJSON(ctx, reqURL, &pvc); err != nil {
-		return nil, err
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/persistentvolumeclaims/%s", namespace, claimName), nil)
+		var pvc corev1.PersistentVolumeClaim
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &pvc); err != nil {
+			lastErr = err
+			continue
+		}
+		return &pvc, nil
 	}
-	return &pvc, nil
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) GetPersistentVolume(ctx context.Context, vclusterName string, pvName string) (*corev1.PersistentVolume, error) {
-	reqURL := c.kubernetesResourceURL(vclusterName, fmt.Sprintf("/api/v1/persistentvolumes/%s", pvName), nil)
-	var pv corev1.PersistentVolume
-	if err := c.getJSON(ctx, reqURL, &pv); err != nil {
-		return nil, err
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/persistentvolumes/%s", pvName), nil)
+		var pv corev1.PersistentVolume
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &pv); err != nil {
+			lastErr = err
+			continue
+		}
+		return &pv, nil
 	}
-	return &pv, nil
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) ListStorageVolumeResources(ctx context.Context, zone string) ([]StorageVolumeResource, error) {
-	pageToken := "1"
 	resources := make([]StorageVolumeResource, 0)
-
-	for {
-		u, _ := url.Parse(c.baseURL)
-		u.Path = "/rmh/v1/resources:page"
-		query := u.Query()
-		query.Set("filter", fmt.Sprintf(`resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume"  AND zone="*%s*"`, zone))
-		query.Set("page_size", "200")
-		query.Set("page_token", pageToken)
-		u.RawQuery = query.Encode()
-
-		var payload storageVolumePageResponse
-		if err := c.getJSON(ctx, u.String(), &payload); err != nil {
-			return nil, err
+	seen := make(map[string]struct{})
+	var lastErr error
+	success := false
+	for _, profile := range c.orderedProfiles() {
+		items, err := c.listStorageVolumeResourcesWithProfile(ctx, profile, zone)
+		if err != nil {
+			lastErr = err
+			continue
 		}
-
-		resources = append(resources, payload.Resources...)
-		if strings.TrimSpace(payload.NextPageToken) == "" {
-			break
+		success = true
+		for _, item := range items {
+			item.ProfileName = profile.Name
+			key := firstNonEmpty(strings.TrimSpace(item.ID), strings.TrimSpace(item.RID), strings.TrimSpace(item.Name))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			resources = append(resources, item)
 		}
-		pageToken = payload.NextPageToken
 	}
-
-	return resources, nil
+	if success {
+		return resources, nil
+	}
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) FindStorageVolumeResourceByUID(ctx context.Context, uid string) (*StorageVolumeResource, error) {
@@ -640,35 +1197,43 @@ func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragment(ctx cont
 		return nil, fmt.Errorf("storage volume fragment is required")
 	}
 
-	u, _ := url.Parse(c.baseURL)
-	u.Path = "/rmh/v1/resources:page"
-	query := u.Query()
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		u, _ := url.Parse(profile.BaseURL)
+		u.Path = "/rmh/v1/resources:page"
+		query := u.Query()
 
-	filter := fmt.Sprintf(`resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume"  AND %s="*%s*"`, field, fragment)
-	query.Set("filter", filter)
-	query.Set("page_size", "10")
-	query.Set("page_token", "1")
-	u.RawQuery = query.Encode()
+		filter := fmt.Sprintf(`resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume"  AND %s="*%s*"`, field, fragment)
+		query.Set("filter", filter)
+		query.Set("page_size", "10")
+		query.Set("page_token", "1")
+		u.RawQuery = query.Encode()
 
-	var payload storageVolumePageResponse
-	if err := c.postJSON(ctx, u.String(), map[string]any{}, &payload); err != nil {
-		return nil, err
-	}
-
-	for i := range payload.Resources {
-		resource := &payload.Resources[i]
-		if field == "name" {
-			if strings.EqualFold(strings.TrimSpace(resource.Name), fragment) || strings.Contains(strings.TrimSpace(resource.Name), fragment) {
-				return resource, nil
-			}
+		var payload storageVolumePageResponse
+		if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
+			lastErr = err
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(resource.ID), fragment) || strings.Contains(strings.TrimSpace(resource.ID), fragment) {
-			return resource, nil
+
+		for i := range payload.Resources {
+			resource := &payload.Resources[i]
+			resource.ProfileName = profile.Name
+			if field == "name" {
+				if strings.EqualFold(strings.TrimSpace(resource.Name), fragment) || strings.Contains(strings.TrimSpace(resource.Name), fragment) {
+					return resource, nil
+				}
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(resource.ID), fragment) || strings.Contains(strings.TrimSpace(resource.ID), fragment) {
+				return resource, nil
+			}
+		}
+		if len(payload.Resources) > 0 {
+			return &payload.Resources[0], nil
 		}
 	}
-	if len(payload.Resources) > 0 {
-		return &payload.Resources[0], nil
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	return nil, fmt.Errorf("storage volume resource with fragment %q not found", fragment)
 }
@@ -708,12 +1273,17 @@ func (c *VirtualClusterClient) ListJobPods(ctx context.Context, vclusterName str
 	query.Set("filter", fmt.Sprintf("namespace=%q", namespace))
 	query.Set("order", "name asc")
 
-	reqURL := c.kubernetesResourceURL(vclusterName, "/api/v1/pods", query)
-	var podList corev1.PodList
-	if err := c.getJSON(ctx, reqURL, &podList); err != nil {
-		return nil, err
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/api/v1/pods", query)
+		var podList corev1.PodList
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &podList); err != nil {
+			lastErr = err
+			continue
+		}
+		return podList.Items, nil
 	}
-	return podList.Items, nil
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) ListEvents(ctx context.Context, vclusterName string, namespace string, name string, kind string) ([]corev1.Event, error) {
@@ -724,20 +1294,34 @@ func (c *VirtualClusterClient) ListEvents(ctx context.Context, vclusterName stri
 	}
 	query.Set("fieldSelector", strings.Join(fieldSelector, ","))
 
-	reqURL := c.kubernetesClusterURL(vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/events", namespace), query)
-	var eventList corev1.EventList
-	if err := c.getJSON(ctx, reqURL, &eventList); err != nil {
-		return nil, err
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/events", namespace), query)
+		var eventList corev1.EventList
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &eventList); err != nil {
+			lastErr = err
+			continue
+		}
+		return eventList.Items, nil
 	}
-	return eventList.Items, nil
+	return nil, lastErr
 }
 
 func (c *VirtualClusterClient) GetPodLogs(ctx context.Context, vclusterName string, namespace string, podName string, tailLines int64) ([]string, error) {
 	query := url.Values{}
 	query.Set("tailLines", fmt.Sprintf("%d", tailLines))
 
-	reqURL := c.kubernetesClusterURL(vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log", namespace, podName), query)
-	body, err := c.getText(ctx, reqURL)
+	var (
+		body string
+		err  error
+	)
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log", namespace, podName), query)
+		body, err = c.getTextWithProfile(ctx, profile, reqURL)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -757,17 +1341,48 @@ func (c *VirtualClusterClient) GetPodLogs(ctx context.Context, vclusterName stri
 }
 
 func (c *VirtualClusterClient) listVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
+	result := make([]VirtualCluster, 0)
+	seen := make(map[string]struct{})
+	var lastErr error
+	success := false
+	for _, profile := range c.orderedProfiles() {
+		items, err := c.listVirtualClustersForProfile(ctx, profile)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		success = true
+		for _, item := range items {
+			item.ProfileName = profile.Name
+			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.Name), strings.TrimSpace(item.DisplayName))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, item)
+		}
+	}
+	if success {
+		return result, nil
+	}
+	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) listVirtualClustersForProfile(ctx context.Context, profile clientProfile) ([]VirtualCluster, error) {
 	skip := 0
 	clusters := make([]VirtualCluster, 0)
 
 	for {
-		reqURL := c.listURL(skip)
+		reqURL := c.listURLForProfile(profile, skip)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("build virtual cluster request: %w", err)
 		}
 
-		headers, err := c.authHeaders(reqURL, http.MethodGet)
+		headers, err := c.authHeadersForProfile(profile, reqURL, http.MethodGet)
 		if err != nil {
 			return nil, err
 		}
@@ -811,8 +1426,8 @@ func (c *VirtualClusterClient) listVirtualClusters(ctx context.Context) ([]Virtu
 	return clusters, nil
 }
 
-func (c *VirtualClusterClient) listURL(skip int) string {
-	u, _ := url.Parse(c.baseURL)
+func (c *VirtualClusterClient) listURLForProfile(profile clientProfile, skip int) string {
+	u, _ := url.Parse(profile.BaseURL)
 	u.Path = "/compute/ecp/v1/subscriptions/-/resourceGroups/-/regions/-/virtualClusters"
 
 	query := u.Query()
@@ -822,7 +1437,7 @@ func (c *VirtualClusterClient) listURL(skip int) string {
 	return u.String()
 }
 
-func (c *VirtualClusterClient) authHeaders(reqURL string, method string) (map[string]string, error) {
+func (c *VirtualClusterClient) authHeadersForProfile(profile clientProfile, reqURL string, method string) (map[string]string, error) {
 	parsedURL, err := url.Parse(reqURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse auth url: %w", err)
@@ -836,7 +1451,7 @@ func (c *VirtualClusterClient) authHeaders(reqURL string, method string) (map[st
 
 	signContent := fmt.Sprintf("date: %s\nhost: %s\n@request-target: %s %s", dateHeader, parsedURL.Host, strings.ToLower(method), requestTarget)
 
-	mac := hmac.New(sha256.New, []byte(c.secretKey))
+	mac := hmac.New(sha256.New, []byte(profile.SecretKey))
 	_, _ = mac.Write([]byte(signContent))
 	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
@@ -844,12 +1459,12 @@ func (c *VirtualClusterClient) authHeaders(reqURL string, method string) (map[st
 		"Date":          dateHeader,
 		"Host":          parsedURL.Host,
 		"Accept":        "application/json",
-		"Authorization": fmt.Sprintf(`hmac accesskey="%s", algorithm="hmac-sha256", headers="date host @request-target", signature="%s"`, c.accessKey, signature),
+		"Authorization": fmt.Sprintf(`hmac accesskey="%s", algorithm="hmac-sha256", headers="date host @request-target", signature="%s"`, profile.AccessKey, signature),
 	}, nil
 }
 
-func (c *VirtualClusterClient) getJSON(ctx context.Context, reqURL string, out any) error {
-	body, err := c.doRequest(ctx, http.MethodGet, reqURL, "", nil)
+func (c *VirtualClusterClient) getJSONWithProfile(ctx context.Context, profile clientProfile, reqURL string, out any) error {
+	body, err := c.doRequestWithProfile(ctx, profile, http.MethodGet, reqURL, "", nil)
 	if err != nil {
 		return err
 	}
@@ -859,13 +1474,13 @@ func (c *VirtualClusterClient) getJSON(ctx context.Context, reqURL string, out a
 	return nil
 }
 
-func (c *VirtualClusterClient) postJSON(ctx context.Context, reqURL string, payload any, out any) error {
+func (c *VirtualClusterClient) postJSONWithProfile(ctx context.Context, profile clientProfile, reqURL string, payload any, out any) error {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal request for %s: %w", reqURL, err)
 	}
 
-	body, err := c.doRequest(ctx, http.MethodPost, reqURL, "application/json", bodyBytes)
+	body, err := c.doRequestWithProfile(ctx, profile, http.MethodPost, reqURL, "application/json", bodyBytes)
 	if err != nil {
 		return err
 	}
@@ -875,15 +1490,15 @@ func (c *VirtualClusterClient) postJSON(ctx context.Context, reqURL string, payl
 	return nil
 }
 
-func (c *VirtualClusterClient) getText(ctx context.Context, reqURL string) (string, error) {
-	body, err := c.doRequest(ctx, http.MethodGet, reqURL, "", nil)
+func (c *VirtualClusterClient) getTextWithProfile(ctx context.Context, profile clientProfile, reqURL string) (string, error) {
+	body, err := c.doRequestWithProfile(ctx, profile, http.MethodGet, reqURL, "", nil)
 	if err != nil {
 		return "", err
 	}
 	return string(body), nil
 }
 
-func (c *VirtualClusterClient) doRequest(ctx context.Context, method string, reqURL string, contentType string, requestBody []byte) ([]byte, error) {
+func (c *VirtualClusterClient) doRequestWithProfile(ctx context.Context, profile clientProfile, method string, reqURL string, contentType string, requestBody []byte) ([]byte, error) {
 	var bodyReader io.Reader
 	if len(requestBody) > 0 {
 		bodyReader = bytes.NewReader(requestBody)
@@ -894,7 +1509,7 @@ func (c *VirtualClusterClient) doRequest(ctx context.Context, method string, req
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
-	headers, err := c.authHeaders(reqURL, method)
+	headers, err := c.authHeadersForProfile(profile, reqURL, method)
 	if err != nil {
 		return nil, err
 	}
@@ -921,8 +1536,8 @@ func (c *VirtualClusterClient) doRequest(ctx context.Context, method string, req
 	return body, nil
 }
 
-func (c *VirtualClusterClient) kubernetesResourceURL(vclusterName string, path string, query url.Values) string {
-	u, _ := url.Parse(c.kubernetesBaseURL)
+func (c *VirtualClusterClient) kubernetesResourceURLForProfile(profile clientProfile, vclusterName string, path string, query url.Values) string {
+	u, _ := url.Parse(profile.KubernetesBaseURL)
 	u.Path = fmt.Sprintf("/ecp/v1/kubernetes/virtualClusters/%s%s", vclusterName, path)
 	if query != nil {
 		u.RawQuery = query.Encode()
@@ -930,8 +1545,8 @@ func (c *VirtualClusterClient) kubernetesResourceURL(vclusterName string, path s
 	return u.String()
 }
 
-func (c *VirtualClusterClient) kubernetesClusterURL(vclusterName string, path string, query url.Values) string {
-	u, _ := url.Parse(c.kubernetesBaseURL)
+func (c *VirtualClusterClient) kubernetesClusterURLForProfile(profile clientProfile, vclusterName string, path string, query url.Values) string {
+	u, _ := url.Parse(profile.KubernetesBaseURL)
 	u.Path = fmt.Sprintf("/ecp/v1/clusters/%s%s", vclusterName, path)
 	if query != nil {
 		u.RawQuery = query.Encode()

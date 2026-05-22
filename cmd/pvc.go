@@ -26,6 +26,7 @@ func newPVCCmd() *cobra.Command {
 }
 
 func newPVCCheckCmd() *cobra.Command {
+	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "check <pvc-name> [pvc-name...]",
 		Short: "根据 PVC 名称查询对应的 AFS 前端名称",
@@ -46,12 +47,13 @@ func newPVCCheckCmd() *cobra.Command {
 				if i > 0 {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
-				output.PrintPVCCheckDetail(result)
+				output.PrintPVCCheckDetail(result, longOutput)
 			}
 			return nil
 		},
 	}
 
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail rows such as tenant")
 	return cmd
 }
 

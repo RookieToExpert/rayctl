@@ -13,6 +13,7 @@ import (
 
 type tableOptions struct {
 	noWrapCells map[string]struct{}
+	minWidths   []int
 }
 
 func cellKey(row int, col int) string {
@@ -30,7 +31,18 @@ func makeNoWrapCells(cells ...[2]int) map[string]struct{} {
 	return result
 }
 
-func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total int, start int, end int, limit int, showProdRole bool) {
+func noWrapCellsForSingleColumn(rowCount int, col int) [][2]int {
+	if rowCount <= 0 {
+		return nil
+	}
+	result := make([][2]int, 0, rowCount)
+	for i := 0; i < rowCount; i++ {
+		result = append(result, [2]int{i, col})
+	}
+	return result
+}
+
+func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total int, start int, end int, limit int, showProdRole bool, longOutput bool) {
 	if resolvedSelector == "" {
 		fmt.Fprintln(os.Stdout, "Selector: <all nodes>")
 	} else {
@@ -38,39 +50,63 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 	}
 
 	rows := make([][]string, 0, len(nodes))
-	noWrapCells := make([][2]int, 0, len(nodes)*3)
+	noWrapCells := make([][2]int, 0, len(nodes)*8)
 	for rowIdx, node := range nodes {
 		row := []string{
 			node.Name,
-			node.Ready,
-			node.Schedulable,
+			yesNoFromReady(node.Ready),
+			yesNo(node.Schedulable == "Yes"),
 		}
 		if showProdRole {
 			row = append(row, emptyDash(node.ProdRole))
 		}
 		row = append(row,
-			formatRepairFlag(node.Repair),
+			yesNo(node.Repair),
 			node.InternalIP,
 			node.ClusterName,
 		)
+		if longOutput {
+			row = append(row, emptyDash(node.Tenant))
+		}
 		rows = append(rows, row)
-		noWrapCells = append(noWrapCells, [2]int{rowIdx, 0})
-		if showProdRole {
-			noWrapCells = append(noWrapCells, [2]int{rowIdx, 3})
-			noWrapCells = append(noWrapCells, [2]int{rowIdx, 6})
-		} else {
-			noWrapCells = append(noWrapCells, [2]int{rowIdx, 5})
+		for colIdx := range row {
+			noWrapCells = append(noWrapCells, [2]int{rowIdx, colIdx})
 		}
 	}
 
 	headers := []string{"HOST", "RDY", "SCH"}
 	maxWidths := []int{22, 5, 5}
+	minWidths := []int{19, 5, 5}
 	if showProdRole {
 		headers = append(headers, "PROD")
 		maxWidths = append(maxWidths, 18)
+		minWidths = append(minWidths, 11)
 	}
-	headers = append(headers, "REPAIR", "IP", "CLUSTERNAME")
-	maxWidths = append(maxWidths, 6, 15, 48)
+	headers = append(headers, "RPR", "IP", "CLUSTERNAME")
+	maxWidths = append(maxWidths, 3, 16, 48)
+	minWidths = append(minWidths, 3, 14, 16)
+	if longOutput {
+		if showProdRole {
+			maxWidths[0] = 19
+			minWidths[0] = 19
+			maxWidths[3] = 11
+			minWidths[3] = 11
+			maxWidths[5] = 14
+			minWidths[5] = 14
+			maxWidths[6] = 18
+			minWidths[6] = 12
+		} else {
+			maxWidths[0] = 19
+			minWidths[0] = 19
+			maxWidths[4] = 14
+			minWidths[4] = 14
+			maxWidths[5] = 18
+			minWidths[5] = 12
+		}
+		headers = append(headers, "TENANT")
+		maxWidths = append(maxWidths, 12)
+		minWidths = append(minWidths, 8)
+	}
 
 	printBoxTableWithOptions(
 		headers,
@@ -78,6 +114,7 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 		maxWidths,
 		tableOptions{
 			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   minWidths,
 		},
 	)
 
@@ -86,7 +123,7 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 	}
 
 	if limit > 0 {
-		fmt.Fprintf(os.Stdout, "Showing %d-%d of %d nodes. Use -A to show all or -l N to change the limit.\n", start, end, total)
+		fmt.Fprintf(os.Stdout, "Showing %d-%d of %d nodes. Use -A to show all.\n", start, end, total)
 	} else {
 		fmt.Fprintf(os.Stdout, "Showing all %d nodes.\n", total)
 	}
@@ -369,21 +406,21 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 	)
 }
 
-func PrintAFSCheckDetail(result *service.AFSCheckResult) {
+func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
+	rows := [][]string{
+		{"AFS", emptyDash(result.AFSName)},
+		{"HOST PVC", joinOrDash(result.HostPVCs)},
+		{"HOST PV", joinOrDash(result.HostPVs)},
+	}
+	if longOutput {
+		rows = append(rows, []string{"租户", emptyDash(result.Tenant)})
+	}
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
-		[][]string{
-			{"AFS", emptyDash(result.AFSName)},
-			{"HOST PVC", joinOrDash(result.HostPVCs)},
-			{"HOST PV", joinOrDash(result.HostPVs)},
-		},
+		rows,
 		[]int{12, 120},
 		tableOptions{
-			noWrapCells: makeNoWrapCells(
-				[2]int{0, 1},
-				[2]int{1, 1},
-				[2]int{2, 1},
-			),
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
 		},
 	)
 
@@ -413,25 +450,26 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult) {
 	}
 }
 
-func PrintPVCCheckDetail(result *service.PVCCheckResult) {
+func PrintPVCCheckDetail(result *service.PVCCheckResult, longOutput bool) {
 	if len(result.Items) == 0 {
+		rows := [][]string{
+			{"PVC", "-"},
+			{"AFS/AOSS ENDPOINT", "-"},
+			{"分区", "-"},
+			{"任务", "-"},
+		}
+		if longOutput {
+			rows = append(rows, []string{"租户", "-"})
+		}
 		printBoxTableWithOptions(
 			[]string{"FIELD", "VALUE"},
-			[][]string{
-				{"PVC", "-"},
-				{"AFS/AOSS ENDPOINT", "-"},
-				{"分区", "-"},
-				{"任务", "-"},
-			},
+			rows,
 			[]int{20, 120},
 			tableOptions{
-				noWrapCells: makeNoWrapCells(
-					[2]int{0, 1},
-					[2]int{2, 1},
-					[2]int{3, 1},
-				),
+				noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
 			},
 		)
+		fmt.Fprintln(os.Stdout, "提醒: 查询 PVC 建议使用 HC kubeconfig；VC kubeconfig 下通常无法完整反查 AFS/AOSS、分区和任务。")
 		return
 	}
 
@@ -439,25 +477,25 @@ func PrintPVCCheckDetail(result *service.PVCCheckResult) {
 		if i > 0 {
 			fmt.Fprintln(os.Stdout)
 		}
+		rows := [][]string{
+			{"PVC", emptyDash(item.PVCName)},
+			{"AFS/AOSS ENDPOINT", emptyDash(item.AFSName)},
+			{"分区", emptyDash(item.Partition)},
+			{"任务", joinOrDash(item.JobNames)},
+		}
+		if longOutput {
+			rows = append(rows, []string{"租户", emptyDash(item.Tenant)})
+		}
 		printBoxTableWithOptions(
 			[]string{"FIELD", "VALUE"},
-			[][]string{
-				{"PVC", emptyDash(item.PVCName)},
-				{"AFS/AOSS ENDPOINT", emptyDash(item.AFSName)},
-				{"分区", emptyDash(item.Partition)},
-				{"任务", joinOrDash(item.JobNames)},
-			},
+			rows,
 			[]int{20, 120},
 			tableOptions{
-				noWrapCells: makeNoWrapCells(
-					[2]int{0, 1},
-					[2]int{1, 1},
-					[2]int{2, 1},
-					[2]int{3, 1},
-				),
+				noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
 			},
 		)
 	}
+	fmt.Fprintln(os.Stdout, "提醒: 查询 PVC 建议使用 HC kubeconfig；VC kubeconfig 下通常无法完整反查 AFS/AOSS、分区和任务。")
 }
 
 func PrintECSCheckDetail(result *service.ECSCheckResult) {
@@ -566,11 +604,50 @@ func PrintECSCheckDetail(result *service.ECSCheckResult) {
 	}
 }
 
+func PrintJobCreatePreview(rows [][]string) {
+	printBoxTableWithOptions(
+		[]string{"项目", "值"},
+		rows,
+		[]int{18, 120},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+				[2]int{6, 1},
+				[2]int{7, 1},
+				[2]int{8, 1},
+				[2]int{9, 1},
+				[2]int{10, 1},
+			),
+		},
+	)
+}
+
 func emptyDash(v string) string {
 	if strings.TrimSpace(v) == "" {
 		return "-"
 	}
 	return v
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "Y"
+	}
+	return "N"
+}
+
+func yesNoFromReady(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "ready", "true", "yes", "y":
+		return "Y"
+	default:
+		return "N"
+	}
 }
 
 func firstNonEmpty(values ...string) string {
@@ -615,7 +692,7 @@ func printBoxTableWithOptions(headers []string, rows [][]string, maxWidths []int
 		}
 	}
 
-	fitWidthsToTerminal(widths, headers)
+	fitWidthsToTerminal(widths, headers, options)
 
 	fmt.Fprintln(os.Stdout, borderLine("┌", "┬", "┐", widths))
 	fmt.Fprintln(os.Stdout, renderRow(headers, widths))
@@ -628,7 +705,7 @@ func printBoxTableWithOptions(headers []string, rows [][]string, maxWidths []int
 	fmt.Fprintln(os.Stdout, borderLine("└", "┴", "┘", widths))
 }
 
-func fitWidthsToTerminal(widths []int, headers []string) {
+func fitWidthsToTerminal(widths []int, headers []string, options tableOptions) {
 	if len(widths) == 0 {
 		return
 	}
@@ -654,6 +731,9 @@ func fitWidthsToTerminal(widths []int, headers []string) {
 		}
 		if len(widths) == 1 {
 			minWidth = 20
+		}
+		if i < len(options.minWidths) && options.minWidths[i] > minWidth {
+			minWidth = options.minWidths[i]
 		}
 		minWidths[i] = minWidth
 	}

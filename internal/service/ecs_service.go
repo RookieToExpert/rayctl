@@ -55,6 +55,11 @@ type ECSCheckItem struct {
 	VPC          string
 }
 
+type nodeOwnershipHint struct {
+	Tenant      string
+	ClusterName string
+}
+
 type vmResourceContext struct {
 	VMName       string
 	Namespace    string
@@ -200,6 +205,75 @@ func (s *ECSService) ResolveSingle(ctx context.Context, keyword string) (*ECSChe
 		return nil, fmt.Errorf("multiple ecs/ais resources matched %q: %s", keyword, strings.Join(candidates, ", "))
 	}
 	return &result.Items[0], nil
+}
+
+func (s *ECSService) ResolveNodeOwnership(ctx context.Context) (map[string]nodeOwnershipHint, error) {
+	if s.vcClient == nil {
+		return nil, fmt.Errorf("ecs/ais 查询需要平台配置")
+	}
+
+	vmList, err := s.dynamicClient.Resource(kubevirtVMGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list virtualmachines: %w", err)
+	}
+	vmiList, err := s.dynamicClient.Resource(kubevirtVMIGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list virtualmachineinstances: %w", err)
+	}
+
+	contexts := buildVMResourceContexts(vmList.Items, vmiList.Items)
+	ecsResources, err := s.vcClient.ListECSVirtualMachines(ctx)
+	if err != nil {
+		return nil, err
+	}
+	aisResources, err := s.vcClient.ListAISpaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]nodeOwnershipHint)
+	setHint := func(nodeName string, hint nodeOwnershipHint) {
+		nodeName = strings.TrimSpace(nodeName)
+		if nodeName == "" {
+			return
+		}
+		existing, ok := result[nodeName]
+		if !ok {
+			result[nodeName] = hint
+			return
+		}
+		if strings.TrimSpace(existing.Tenant) == "" && strings.TrimSpace(hint.Tenant) != "" {
+			existing.Tenant = hint.Tenant
+		}
+		if (strings.TrimSpace(existing.ClusterName) == "" || strings.TrimSpace(existing.ClusterName) == "-") && strings.TrimSpace(hint.ClusterName) != "" {
+			existing.ClusterName = hint.ClusterName
+		}
+		result[nodeName] = existing
+	}
+
+	for _, resource := range ecsResources {
+		matches := matchVMContextsForECS(contexts, resource, firstNonEmpty(strings.TrimSpace(resource.UID), strings.TrimSpace(resource.Name), strings.TrimSpace(resource.DisplayName)))
+		hint := nodeOwnershipHint{
+			Tenant:      strings.TrimSpace(resource.ProfileName),
+			ClusterName: firstNonEmpty(strings.TrimSpace(resource.DisplayName), strings.TrimSpace(resource.Name), "ecs"),
+		}
+		for _, match := range matches {
+			setHint(match.Node, hint)
+		}
+	}
+
+	for _, resource := range aisResources {
+		matches := matchVMContextsForAIS(contexts, resource)
+		hint := nodeOwnershipHint{
+			Tenant:      strings.TrimSpace(resource.ProfileName),
+			ClusterName: firstNonEmpty(strings.TrimSpace(resource.DisplayName), strings.TrimSpace(resource.Name), "ais"),
+		}
+		for _, match := range matches {
+			setHint(match.Node, hint)
+		}
+	}
+
+	return result, nil
 }
 
 func buildVMResourceContexts(vms []unstructured.Unstructured, vmis []unstructured.Unstructured) []vmResourceContext {

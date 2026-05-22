@@ -3,6 +3,7 @@ package kube
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"k8s.io/client-go/dynamic"
@@ -16,6 +17,13 @@ const (
 	defaultClientQPS   = 50
 	defaultClientBurst = 100
 )
+
+type KubeconfigIdentity struct {
+	Path           string
+	CurrentContext string
+	User           string
+	Cluster        string
+}
 
 func NewRestConfig(kubeconfig string) (*rest.Config, error) {
 	configPath := resolveKubeconfigPath(kubeconfig)
@@ -65,6 +73,56 @@ func ResolvedKubeconfigPath(kubeconfig string) string {
 	return resolveKubeconfigPath(kubeconfig)
 }
 
+func ResolveKubeconfigIdentity(kubeconfig string) (*KubeconfigIdentity, error) {
+	resolvedPath := resolveKubeconfigPath(kubeconfig)
+
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	switch {
+	case strings.TrimSpace(kubeconfig) != "":
+		rules.Precedence = []string{strings.TrimSpace(kubeconfig)}
+	case strings.TrimSpace(os.Getenv("KUBECONFIG")) != "":
+		rules.Precedence = filepath.SplitList(strings.TrimSpace(os.Getenv("KUBECONFIG")))
+	default:
+		rules.Precedence = []string{defaultKubeconfigPath}
+	}
+
+	if !hasExistingKubeconfig(rules.Precedence) {
+		return nil, fmt.Errorf("当前环境变量找不到相应的 kubeconfig，请检查 -k 参数或 KUBECONFIG 环境变量")
+	}
+
+	config, err := rules.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load kubeconfig: %w", err)
+	}
+
+	currentContext := strings.TrimSpace(config.CurrentContext)
+	if currentContext == "" {
+		return nil, fmt.Errorf("当前 kubeconfig 没有 current-context")
+	}
+
+	ctx, ok := config.Contexts[currentContext]
+	if !ok || ctx == nil {
+		return nil, fmt.Errorf("当前 kubeconfig 的 context %q 不存在", currentContext)
+	}
+
+	user := strings.TrimSpace(ctx.AuthInfo)
+	if user == "" {
+		return nil, fmt.Errorf("当前 kubeconfig 的 context %q 没有关联 user", currentContext)
+	}
+
+	cluster := strings.TrimSpace(ctx.Cluster)
+	if cluster == "" {
+		return nil, fmt.Errorf("当前 kubeconfig 的 context %q 没有关联 cluster", currentContext)
+	}
+
+	return &KubeconfigIdentity{
+		Path:           resolvedPath,
+		CurrentContext: currentContext,
+		User:           user,
+		Cluster:        cluster,
+	}, nil
+}
+
 func resolveKubeconfigPath(kubeconfig string) string {
 	if path := strings.TrimSpace(kubeconfig); path != "" {
 		return path
@@ -73,4 +131,17 @@ func resolveKubeconfigPath(kubeconfig string) string {
 		return path
 	}
 	return defaultKubeconfigPath
+}
+
+func hasExistingKubeconfig(paths []string) bool {
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		if _, err := os.Stat(trimmed); err == nil {
+			return true
+		}
+	}
+	return false
 }

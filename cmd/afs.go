@@ -23,6 +23,7 @@ func newAFSCmd() *cobra.Command {
 }
 
 func newAFSCheckCmd() *cobra.Command {
+	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "check <afs-name-or-uid> [afs-name-or-uid...]",
 		Short: "根据 AFS 前端名称或 UID 查询 host pv/pvc 和关联的 virtual pvc",
@@ -43,11 +44,12 @@ func newAFSCheckCmd() *cobra.Command {
 				if i > 0 {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
-				output.PrintAFSCheckDetail(result)
+				output.PrintAFSCheckDetail(result, longOutput)
 			}
 			return nil
 		},
 	}
 
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail rows such as tenant")
 	return cmd
 }

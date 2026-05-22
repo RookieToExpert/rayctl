@@ -49,6 +49,7 @@ type NodeListItem struct {
 	InternalIP  string
 	ClusterName string
 	ClusterUID  string
+	Tenant      string
 }
 
 type NodeMutationResult struct {
@@ -113,7 +114,7 @@ func (s *NodeService) List(ctx context.Context, target string, extraSelector str
 				node.Labels[nodeVClusterNamespaceLabelKey],
 				node.Labels["resource.compute.sensecore.cn/vc-uid"],
 			),
-			ClusterUID: node.Labels["resource.compute.sensecore.cn/vc-uid"],
+			ClusterUID: nodeResolveClusterUID(node.Labels),
 		})
 	}
 
@@ -190,7 +191,7 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 			node.Labels[nodeVClusterNamespaceLabelKey],
 			node.Labels["resource.compute.sensecore.cn/vc-uid"],
 		),
-		VClusterUID:     strings.TrimSpace(node.Labels["resource.compute.sensecore.cn/vc-uid"]),
+		VClusterUID:     nodeResolveClusterUID(node.Labels),
 		Unschedulable:   node.Spec.Unschedulable,
 		Repair:          node.Labels[repairUsageLabelKey] == repairUsageLabelValue,
 		GPUUsage:        formatGPUUsage(allocatedGPU, totalGPU),
@@ -206,6 +207,26 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 			Total:          time.Since(startedAt),
 		},
 	}, nil
+}
+
+func nodeResolveClusterUID(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if uid := strings.TrimSpace(labels["resource.compute.sensecore.cn/vc-uid"]); uid != "" {
+		return uid
+	}
+	for _, candidate := range []string{
+		strings.TrimSpace(labels["cluster.x-k8s.io/vcluster-name"]),
+		strings.TrimSpace(labels["cluster.x-k8s.io/cluster-name"]),
+		strings.TrimSpace(labels[nodeVClusterNamespaceLabelKey]),
+	} {
+		if candidate == "" {
+			continue
+		}
+		return strings.TrimPrefix(candidate, "vc-")
+	}
+	return ""
 }
 
 func (s *NodeService) Cordon(ctx context.Context, nodeName string) (*NodeMutationResult, error) {

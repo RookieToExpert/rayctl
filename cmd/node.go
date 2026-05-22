@@ -39,7 +39,7 @@ func newNodeCmd() *cobra.Command {
 func newNodeGetCmd() *cobra.Command {
 	// labels 变量用于接收命令行传递的 --labels 参数值
 	var labels string
-	var limit int
+	var longOutput bool
 	var showAll bool
 	var prod string
 	var role string
@@ -58,7 +58,6 @@ func newNodeGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
 			// 2. 解析目标参数，如果有传递参数则作为 target，否则为空字符串
 			target := ""
 			if len(args) == 1 {
@@ -99,24 +98,81 @@ func newNodeGetCmd() *cobra.Command {
 			}
 
 			if vcClient, ok := platform.NewVirtualClusterClientFromEnv(); ok {
+				if longOutput {
+					if computeNodes, err := vcClient.ListAIComputeNodes(context.Background()); err == nil {
+						byHostName := make(map[string]platform.AIComputeNode, len(computeNodes))
+						byHostIP := make(map[string]platform.AIComputeNode, len(computeNodes))
+						for _, item := range computeNodes {
+							if key := strings.TrimSpace(item.Properties.HostName); key != "" {
+								byHostName[key] = item
+							}
+							if key := strings.TrimSpace(item.Properties.HostIP); key != "" {
+								byHostIP[key] = item
+							}
+						}
+						for i := range nodes {
+							item, ok := byHostName[strings.TrimSpace(nodes[i].Name)]
+							if !ok {
+								item, ok = byHostIP[strings.TrimSpace(nodes[i].InternalIP)]
+							}
+							if !ok {
+								continue
+							}
+							if strings.TrimSpace(nodes[i].Tenant) == "" {
+								nodes[i].Tenant = strings.TrimSpace(item.ProfileName)
+							}
+							if strings.TrimSpace(nodes[i].ClusterName) == "" || strings.HasPrefix(strings.TrimSpace(nodes[i].ClusterName), "vc-") {
+								if vcName := strings.TrimSpace(item.Properties.VirtualClusterName); vcName != "" {
+									nodes[i].ClusterName = vcName
+								}
+							}
+						}
+					}
+				}
+
 				clusterUIDs := make([]string, 0, len(nodes))
 				for _, node := range nodes {
-					if node.ClusterUID != "" {
+					if strings.Contains(strings.ToLower(strings.TrimSpace(node.ProdRole)), "ecs") {
+						continue
+					}
+					if node.ClusterUID != "" && (strings.TrimSpace(node.ClusterName) == "" || strings.HasPrefix(strings.TrimSpace(node.ClusterName), "vc-") || strings.TrimSpace(node.Tenant) == "") {
 						clusterUIDs = append(clusterUIDs, node.ClusterUID)
 					}
 				}
 
-				displayNames, err := vcClient.ResolveDisplayNames(context.Background(), clusterUIDs)
+				displayNames, profileNames, err := vcClient.ResolveDisplayNamesWithProfiles(context.Background(), clusterUIDs)
 				if err == nil {
 					for i := range nodes {
 						if displayName, ok := displayNames[nodes[i].ClusterUID]; ok {
 							nodes[i].ClusterName = displayName
 						}
+						if tenant, ok := profileNames[nodes[i].ClusterUID]; ok {
+							nodes[i].Tenant = tenant
+						}
 					}
 				}
 			}
 
-			displayLimit := limit
+			for i := range nodes {
+				if strings.Contains(strings.ToLower(strings.TrimSpace(nodes[i].ProdRole)), "ecs") {
+					nodes[i].ClusterName = "ecs 节点"
+					if longOutput {
+						nodes[i].Tenant = "ecs 节点"
+					}
+					continue
+				}
+				if longOutput {
+					if strings.TrimSpace(nodes[i].Tenant) != "" {
+						continue
+					}
+					nodes[i].Tenant = "控制面节点"
+					if strings.TrimSpace(nodes[i].ClusterName) == "" {
+						nodes[i].ClusterName = "控制面节点"
+					}
+				}
+			}
+
+			displayLimit := 100
 			if showAll {
 				displayLimit = 0
 			}
@@ -130,7 +186,7 @@ func newNodeGetCmd() *cobra.Command {
 			case "ecp", "ecs":
 				showProdRole = false
 			}
-			output.PrintNodeList(displayNodes, resolvedSelector, len(nodes), start, end, displayLimit, showProdRole)
+			output.PrintNodeList(displayNodes, resolvedSelector, len(nodes), start, end, displayLimit, showProdRole, longOutput)
 			return nil
 		},
 	}
@@ -140,8 +196,8 @@ func newNodeGetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&prod, "prod", "", "Filter by node-role.compute.sensecore.cn/prod, for example ecp-private or ecs")
 	cmd.Flags().StringVar(&role, "role", "", "Filter by displayed role, including node-role.sensecore.cn/* fallback roles")
 	cmd.Flags().BoolVar(&repairOnly, "repair", false, "Show only cordoned nodes")
-	cmd.Flags().IntVarP(&limit, "limit", "l", 100, "Number of nodes to show; use 0 to show all")
 	cmd.Flags().BoolVarP(&showAll, "all", "A", false, "Show all nodes")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail columns such as tenant")
 
 	return cmd
 }

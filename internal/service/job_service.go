@@ -92,6 +92,30 @@ type JobCheckResult struct {
 	Diagnosis           []string
 }
 
+type JobCreateRequest struct {
+	Name                string
+	Namespace           string
+	Submitter           string
+	SPBlock             string
+	MasterPort          string
+	Replicas            int64
+	Image               string
+	Command             string
+	ImagePullSecret     string
+	CPU                 string
+	Memory              string
+	AcceleratorResource string
+	AcceleratorCount    string
+	DataPVCName         string
+	AOSSPVCName         string
+	SHMSize             string
+	MachineType         string
+	HostArch            string
+	AcceleratorType     string
+	PriorityClass       string
+	Queue               string
+}
+
 type VolumeClaimRef struct {
 	Name             string
 	ClaimName        string
@@ -192,6 +216,249 @@ func NewJobService(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		dynamicClient: dynamicClient,
 		vcClient:      vcClient,
 	}
+}
+
+func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstructured, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, fmt.Errorf("job name is required")
+	}
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+	submitter := strings.TrimSpace(req.Submitter)
+	if submitter == "" {
+		return nil, fmt.Errorf("submitter is required")
+	}
+	spBlock := strings.TrimSpace(req.SPBlock)
+	if spBlock == "" {
+		return nil, fmt.Errorf("sp-block is required")
+	}
+	masterPort := strings.TrimSpace(req.MasterPort)
+	if masterPort == "" {
+		return nil, fmt.Errorf("master port is required")
+	}
+	if req.Replicas <= 0 {
+		return nil, fmt.Errorf("replicas must be greater than 0")
+	}
+	image := strings.TrimSpace(req.Image)
+	if image == "" {
+		return nil, fmt.Errorf("image is required")
+	}
+	command := strings.TrimSpace(req.Command)
+	if command == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+	cpu := strings.TrimSpace(req.CPU)
+	if cpu == "" {
+		return nil, fmt.Errorf("cpu is required")
+	}
+	memory := strings.TrimSpace(req.Memory)
+	if memory == "" {
+		return nil, fmt.Errorf("memory is required")
+	}
+	acceleratorResource := strings.TrimSpace(req.AcceleratorResource)
+	if acceleratorResource == "" {
+		return nil, fmt.Errorf("accelerator resource is required")
+	}
+	acceleratorCount := strings.TrimSpace(req.AcceleratorCount)
+	if acceleratorCount == "" {
+		return nil, fmt.Errorf("accelerator count is required")
+	}
+	dataPVCName := strings.TrimSpace(req.DataPVCName)
+	aossPVCName := strings.TrimSpace(req.AOSSPVCName)
+	shmSize := strings.TrimSpace(req.SHMSize)
+	if shmSize == "" {
+		return nil, fmt.Errorf("shm size is required")
+	}
+	machineType := strings.TrimSpace(req.MachineType)
+	if machineType == "" {
+		return nil, fmt.Errorf("machine type is required")
+	}
+	hostArch := strings.TrimSpace(req.HostArch)
+	if hostArch == "" {
+		return nil, fmt.Errorf("host arch is required")
+	}
+	acceleratorType := strings.TrimSpace(req.AcceleratorType)
+	if acceleratorType == "" {
+		return nil, fmt.Errorf("accelerator type is required")
+	}
+	priorityClass := strings.TrimSpace(req.PriorityClass)
+	if priorityClass == "" {
+		priorityClass = "normal"
+	}
+	queue := strings.TrimSpace(req.Queue)
+	if queue == "" {
+		queue = "default"
+	}
+
+	volumeMounts := make([]interface{}, 0, 3)
+	volumes := make([]interface{}, 0, 3)
+	if dataPVCName != "" {
+		volumeMounts = append(volumeMounts, map[string]interface{}{"name": "data-volume", "mountPath": "/data"})
+		volumes = append(volumes, map[string]interface{}{
+			"name": "data-volume",
+			"persistentVolumeClaim": map[string]interface{}{
+				"claimName": dataPVCName,
+			},
+		})
+	}
+	if aossPVCName != "" {
+		volumeMounts = append(volumeMounts, map[string]interface{}{"name": "aoss-volume", "mountPath": "/mnt/test"})
+		volumes = append(volumes, map[string]interface{}{
+			"name": "aoss-volume",
+			"persistentVolumeClaim": map[string]interface{}{
+				"claimName": aossPVCName,
+			},
+		})
+	}
+	volumeMounts = append(volumeMounts, map[string]interface{}{"name": "shm-data", "mountPath": "/dev/shm"})
+	volumes = append(volumes, map[string]interface{}{
+		"name": "shm-data",
+		"emptyDir": map[string]interface{}{
+			"medium":    "Memory",
+			"sizeLimit": shmSize,
+		},
+	})
+
+	workerSpec := map[string]interface{}{
+		"replicas": req.Replicas,
+		"name":     "worker",
+		"policies": []interface{}{
+			map[string]interface{}{
+				"event":  "PodEvicted",
+				"action": "RestartJob",
+			},
+		},
+		"template": map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"labels": map[string]interface{}{
+					"lepton.sensetime.com/submitter": submitter,
+					"ring-controller.atlas":          "ascend-910b",
+				},
+			},
+			"spec": map[string]interface{}{
+				"containers": []interface{}{
+					map[string]interface{}{
+						"name":            "worker",
+						"image":           image,
+						"imagePullPolicy": "IfNotPresent",
+						"command":         []interface{}{"bash", "-c"},
+						"args":            []interface{}{command},
+						"env":             []interface{}{},
+						"volumeMounts":    volumeMounts,
+						"resources": map[string]interface{}{
+							"requests": map[string]interface{}{
+								"cpu":                  cpu,
+								"memory":               memory,
+								acceleratorResource:    acceleratorCount,
+							},
+							"limits": map[string]interface{}{
+								"cpu":                  cpu,
+								"memory":               memory,
+								acceleratorResource:    acceleratorCount,
+							},
+						},
+					},
+				},
+				"restartPolicy": "Never",
+				"volumes": volumes,
+				"affinity": map[string]interface{}{
+					"nodeAffinity": map[string]interface{}{
+						"requiredDuringSchedulingIgnoredDuringExecution": map[string]interface{}{
+							"nodeSelectorTerms": []interface{}{
+								map[string]interface{}{
+									"matchExpressions": []interface{}{
+										map[string]interface{}{
+											"key":      "resource.compute.sensecore.cn/machine-type",
+											"operator": "In",
+											"values":   []interface{}{machineType},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				"nodeSelector": map[string]interface{}{
+					"host-arch":        hostArch,
+					"accelerator-type": acceleratorType,
+				},
+			},
+		},
+	}
+
+	templateSpec := workerSpec["template"].(map[string]interface{})["spec"].(map[string]interface{})
+	if secretName := strings.TrimSpace(req.ImagePullSecret); secretName != "" {
+		templateSpec["imagePullSecrets"] = []interface{}{
+			map[string]interface{}{"name": secretName},
+		}
+	} else {
+		templateSpec["imagePullSecrets"] = nil
+	}
+
+	job := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "batch.volcano.sh/v1alpha1",
+			"kind":       "Job",
+			"metadata": map[string]interface{}{
+				"name":         name,
+				"generateName": "vcjob-",
+				"namespace":    namespace,
+				"labels": map[string]interface{}{
+					"lepton.sensetime.com/submitter":      submitter,
+					"lepton.sensetime.com/framework-type": "PyTorch",
+					"ring-controller.atlas":               "ascend-910b",
+				},
+				"annotations": map[string]interface{}{
+					"sp-block": spBlock,
+				},
+			},
+			"spec": map[string]interface{}{
+				"minAvailable": 1,
+				"plugins": map[string]interface{}{
+					"svc": []interface{}{},
+					"pytorch": []interface{}{
+						"--master=master",
+						"--worker=worker",
+						fmt.Sprintf("--port=%s", masterPort),
+					},
+					"hcclrank": []interface{}{},
+				},
+				"maxRetry": 1,
+				"tasks":    []interface{}{workerSpec},
+				"priorityClassName": priorityClass,
+				"queue":             queue,
+				"schedulerName":     "volcano",
+				"policies": []interface{}{
+					map[string]interface{}{
+						"event":  "PodEvicted",
+						"action": "RestartJob",
+					},
+				},
+			},
+		},
+	}
+
+	return job, nil
+}
+
+func (s *JobService) CreateJob(ctx context.Context, req JobCreateRequest) (*unstructured.Unstructured, error) {
+	job, err := s.BuildJobManifest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+	created, err := s.dynamicClient.Resource(volcanoJobGVR).Namespace(namespace).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("create volcano job %s/%s: %w", namespace, job.GetName(), err)
+	}
+	return created, nil
 }
 
 func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResult, error) {

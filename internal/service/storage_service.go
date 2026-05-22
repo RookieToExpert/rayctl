@@ -22,6 +22,7 @@ type StorageService struct {
 
 type AFSCheckResult struct {
 	AFSName     string
+	Tenant      string
 	HostPVs     []string
 	HostPVCs    []string
 	VirtualPVCs []string
@@ -31,6 +32,7 @@ type PVCCheckItemResult struct {
 	PVCName   string
 	AFSName   string
 	Partition string
+	Tenant    string
 	JobNames  []string
 }
 
@@ -141,6 +143,7 @@ func (s *StorageService) CheckAFS(ctx context.Context, identifier string) (*AFSC
 
 	return &AFSCheckResult{
 		AFSName:     firstNonEmpty(resource.Name, resource.DisplayName, resource.ID),
+		Tenant:      strings.TrimSpace(resource.ProfileName),
 		HostPVs:     hostPVs,
 		HostPVCs:    hostPVCs,
 		VirtualPVCs: virtualPVCs,
@@ -166,8 +169,8 @@ func (s *StorageService) CheckPVC(ctx context.Context, pvcName string) (*PVCChec
 	items := make([]PVCCheckItemResult, 0, len(pvcs.Items))
 	seen := make(map[string]struct{})
 	for i := range pvcs.Items {
-		afsName, partitionName := s.resolvePVCFrontendInfo(ctx, &pvcs.Items[i])
-		key := fmt.Sprintf("%s|%s|%s", pvcs.Items[i].Name, afsName, partitionName)
+		afsName, partitionName, tenantName := s.resolvePVCFrontendInfo(ctx, &pvcs.Items[i])
+		key := fmt.Sprintf("%s|%s|%s|%s", pvcs.Items[i].Name, afsName, partitionName, tenantName)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -176,6 +179,7 @@ func (s *StorageService) CheckPVC(ctx context.Context, pvcName string) (*PVCChec
 			PVCName:   pvcs.Items[i].Name,
 			AFSName:   afsName,
 			Partition: partitionName,
+			Tenant:    tenantName,
 			JobNames:  s.findJobsUsingPVC(ctx, &pvcs.Items[i]),
 		})
 	}
@@ -257,26 +261,27 @@ func (s *StorageService) findVirtualPVCsForHostPVs(ctx context.Context, hostPVs 
 	return virtualPVCs, nil
 }
 
-func (s *StorageService) resolvePVCFrontendInfo(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (string, string) {
+func (s *StorageService) resolvePVCFrontendInfo(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (string, string, string) {
 	if pvc == nil {
-		return "-", "-"
+		return "-", "-", "-"
 	}
 
-	partitionName := firstNonEmpty(s.resolvePVCVirtualClusterName(ctx, pvc), "-")
+	partitionName, partitionTenant := s.resolvePVCVirtualClusterName(ctx, pvc)
+	partitionName = firstNonEmpty(partitionName, "-")
 	hostPVName := strings.TrimSpace(pvc.Spec.VolumeName)
 	if hostPVName == "" {
 		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
-			return endpoint, partitionName
+			return endpoint, partitionName, firstNonEmpty(partitionTenant, "-")
 		}
-		return "-", partitionName
+		return "-", partitionName, firstNonEmpty(partitionTenant, "-")
 	}
 
 	pv, err := s.clientset.CoreV1().PersistentVolumes().Get(ctx, hostPVName, metav1.GetOptions{})
 	if err != nil {
 		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
-			return endpoint, partitionName
+			return endpoint, partitionName, firstNonEmpty(partitionTenant, "-")
 		}
-		return "-", partitionName
+		return "-", partitionName, firstNonEmpty(partitionTenant, "-")
 	}
 
 	if sourcePV := strings.TrimSpace(pv.Labels["source-pv"]); sourcePV != "" {
@@ -284,36 +289,36 @@ func (s *StorageService) resolvePVCFrontendInfo(ctx context.Context, pvc *corev1
 		pv, err = s.clientset.CoreV1().PersistentVolumes().Get(ctx, hostPVName, metav1.GetOptions{})
 		if err != nil {
 			if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
-				return endpoint, partitionName
+				return endpoint, partitionName, firstNonEmpty(partitionTenant, "-")
 			}
-			return "-", partitionName
+			return "-", partitionName, firstNonEmpty(partitionTenant, "-")
 		}
 	}
 
 	if pv.Spec.ClaimRef == nil {
 		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
-			return endpoint, partitionName
+			return endpoint, partitionName, firstNonEmpty(partitionTenant, "-")
 		}
-		return "-", partitionName
+		return "-", partitionName, firstNonEmpty(partitionTenant, "-")
 	}
 
 	resourceUID := extractResourceUIDFromName(strings.TrimSpace(pv.Spec.ClaimRef.Name))
 	if resourceUID == "" || s.vcClient == nil {
 		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
-			return endpoint, partitionName
+			return endpoint, partitionName, firstNonEmpty(partitionTenant, "-")
 		}
-		return "-", partitionName
+		return "-", partitionName, firstNonEmpty(partitionTenant, "-")
 	}
 
 	resource, err := s.vcClient.FindStorageVolumeResource(ctx, resourceUID)
 	if err != nil || resource == nil {
 		if endpoint := s.resolveObjectStorageEndpointForPVC(ctx, pvc); endpoint != "" {
-			return endpoint, partitionName
+			return endpoint, partitionName, firstNonEmpty(partitionTenant, "-")
 		}
-		return "-", partitionName
+		return "-", partitionName, firstNonEmpty(partitionTenant, "-")
 	}
 
-	return firstNonEmpty(resource.Name, resource.DisplayName, resource.ID), partitionName
+	return firstNonEmpty(resource.Name, resource.DisplayName, resource.ID), partitionName, firstNonEmpty(strings.TrimSpace(resource.ProfileName), partitionTenant, "-")
 }
 
 func (s *StorageService) resolveObjectStorageEndpointForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) string {
@@ -342,23 +347,23 @@ func (s *StorageService) resolveObjectStorageEndpointForPVC(ctx context.Context,
 	return decodeObjectStorageEndpoint(secret)
 }
 
-func (s *StorageService) resolvePVCVirtualClusterName(ctx context.Context, pvc *corev1.PersistentVolumeClaim) string {
+func (s *StorageService) resolvePVCVirtualClusterName(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (string, string) {
 	if pvc == nil || s.vcClient == nil {
-		return ""
-	}
-
-	if vcUID := strings.TrimSpace(pvc.Labels["vcluster.loft.sh/vcluster-name"]); vcUID != "" {
-		return s.resolveVirtualClusterDisplayName(ctx, vcUID)
+		return "", ""
 	}
 
 	namespace := strings.TrimSpace(pvc.Namespace)
 	if namespace == "" {
-		return ""
+		return "", ""
+	}
+
+	if name, tenant := s.resolveVirtualClusterNameFromNamespace(ctx, namespace); strings.TrimSpace(name) != "" {
+		return name, tenant
 	}
 
 	pods, err := s.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	for _, pod := range pods.Items {
 		if !podUsesPVC(&pod, pvc.Name) {
@@ -374,13 +379,13 @@ func (s *StorageService) resolvePVCVirtualClusterName(ctx context.Context, pvc *
 		return s.resolveVirtualClusterDisplayName(ctx, vcName)
 	}
 
-	return s.resolveVirtualClusterNameFromNamespace(ctx, namespace)
+	return "", ""
 }
 
-func (s *StorageService) resolveVirtualClusterDisplayName(ctx context.Context, value string) string {
+func (s *StorageService) resolveVirtualClusterDisplayName(ctx context.Context, value string) (string, string) {
 	value = strings.TrimSpace(value)
 	if value == "" || s.vcClient == nil {
-		return ""
+		return "", ""
 	}
 
 	uid := value
@@ -388,22 +393,31 @@ func (s *StorageService) resolveVirtualClusterDisplayName(ctx context.Context, v
 		uid = strings.TrimPrefix(uid, "vc-")
 	}
 
-	names, err := s.vcClient.ResolveDisplayNames(ctx, []string{uid})
+	names, profiles, err := s.vcClient.ResolveDisplayNamesWithProfiles(ctx, []string{uid})
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(names[uid])
+	return strings.TrimSpace(names[uid]), strings.TrimSpace(profiles[uid])
 }
 
-func (s *StorageService) resolveVirtualClusterNameFromNamespace(ctx context.Context, namespace string) string {
+func (s *StorageService) resolveVirtualClusterNameFromNamespace(ctx context.Context, namespace string) (string, string) {
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" || s.vcClient == nil {
-		return ""
+		return "", ""
 	}
 
 	ns, err := s.clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
 	if err != nil {
-		return ""
+		return "", ""
+	}
+
+	if vcName := strings.TrimSpace(ns.Labels["vcluster.loft.sh/vcluster-name"]); vcName != "" {
+		if displayName, tenant := s.resolveVirtualClusterDisplayName(ctx, vcName); strings.TrimSpace(displayName) != "" {
+			return displayName, tenant
+		}
+		if strings.TrimSpace(vcName) != "" {
+			return vcName, ""
+		}
 	}
 
 	vclusterNamespace := firstNonEmpty(
@@ -411,14 +425,14 @@ func (s *StorageService) resolveVirtualClusterNameFromNamespace(ctx context.Cont
 		namespace,
 	)
 	if strings.TrimSpace(vclusterNamespace) == "" {
-		return ""
+		return "", ""
 	}
 
 	nodes, err := s.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", nodeVClusterNamespaceLabelKey, vclusterNamespace),
 	})
 	if err != nil || len(nodes.Items) == 0 {
-		return ""
+		return "", ""
 	}
 
 	for _, node := range nodes.Items {
@@ -426,12 +440,12 @@ func (s *StorageService) resolveVirtualClusterNameFromNamespace(ctx context.Cont
 		if vcUID == "" {
 			continue
 		}
-		if name := s.resolveVirtualClusterDisplayName(ctx, vcUID); strings.TrimSpace(name) != "" {
-			return name
+		if name, tenant := s.resolveVirtualClusterDisplayName(ctx, vcUID); strings.TrimSpace(name) != "" {
+			return name, tenant
 		}
 	}
 
-	return ""
+	return "", ""
 }
 
 func (s *StorageService) findJobsUsingPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) []string {
