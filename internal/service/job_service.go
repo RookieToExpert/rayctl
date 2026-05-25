@@ -97,6 +97,7 @@ type JobCreateRequest struct {
 	Namespace           string
 	Submitter           string
 	SPBlock             string
+	FrameworkType       string
 	MasterPort          string
 	Replicas            int64
 	Image               string
@@ -106,12 +107,16 @@ type JobCreateRequest struct {
 	Memory              string
 	AcceleratorResource string
 	AcceleratorCount    string
+	ExtraResourceName   string
+	ExtraResourceValue  string
 	DataPVCName         string
 	AOSSPVCName         string
 	SHMSize             string
 	MachineType         string
 	HostArch            string
 	AcceleratorType     string
+	UseDefaultNodeSelector bool
+	UsePCILinkVolume    bool
 	PriorityClass       string
 	Queue               string
 }
@@ -232,9 +237,7 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 		return nil, fmt.Errorf("submitter is required")
 	}
 	spBlock := strings.TrimSpace(req.SPBlock)
-	if spBlock == "" {
-		return nil, fmt.Errorf("sp-block is required")
-	}
+	frameworkType := normalizeJobFrameworkType(req.FrameworkType)
 	masterPort := strings.TrimSpace(req.MasterPort)
 	if masterPort == "" {
 		return nil, fmt.Errorf("master port is required")
@@ -321,6 +324,34 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 			"sizeLimit": shmSize,
 		},
 	})
+	if req.UsePCILinkVolume {
+		volumeMounts = append(volumeMounts, map[string]interface{}{"name": "pci-link", "mountPath": "/opt/pci_switch_link"})
+		volumes = append(volumes, map[string]interface{}{
+			"name": "pci-link",
+			"hostPath": map[string]interface{}{
+				"path": "/opt/pci_switch_link",
+			},
+		})
+	}
+
+	requests := map[string]interface{}{
+		"cpu":               cpu,
+		"memory":            memory,
+		acceleratorResource: acceleratorCount,
+	}
+	limits := map[string]interface{}{
+		"cpu":               cpu,
+		"memory":            memory,
+		acceleratorResource: acceleratorCount,
+	}
+	if extraName := strings.TrimSpace(req.ExtraResourceName); extraName != "" {
+		extraValue := strings.TrimSpace(req.ExtraResourceValue)
+		if extraValue == "" {
+			extraValue = "1"
+		}
+		requests[extraName] = extraValue
+		limits[extraName] = extraValue
+	}
 
 	workerSpec := map[string]interface{}{
 		"replicas": req.Replicas,
@@ -335,6 +366,7 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 			"metadata": map[string]interface{}{
 				"labels": map[string]interface{}{
 					"lepton.sensetime.com/submitter": submitter,
+					"lepton.sensetime.com/framework-type": frameworkType,
 					"ring-controller.atlas":          "ascend-910b",
 				},
 			},
@@ -349,16 +381,8 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 						"env":             []interface{}{},
 						"volumeMounts":    volumeMounts,
 						"resources": map[string]interface{}{
-							"requests": map[string]interface{}{
-								"cpu":                  cpu,
-								"memory":               memory,
-								acceleratorResource:    acceleratorCount,
-							},
-							"limits": map[string]interface{}{
-								"cpu":                  cpu,
-								"memory":               memory,
-								acceleratorResource:    acceleratorCount,
-							},
+							"requests": requests,
+							"limits":   limits,
 						},
 					},
 				},
@@ -381,12 +405,14 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 						},
 					},
 				},
-				"nodeSelector": map[string]interface{}{
-					"host-arch":        hostArch,
-					"accelerator-type": acceleratorType,
-				},
 			},
 		},
+	}
+	if req.UseDefaultNodeSelector {
+		workerSpec["template"].(map[string]interface{})["spec"].(map[string]interface{})["nodeSelector"] = map[string]interface{}{
+			"host-arch":        hostArch,
+			"accelerator-type": acceleratorType,
+		}
 	}
 
 	templateSpec := workerSpec["template"].(map[string]interface{})["spec"].(map[string]interface{})
@@ -396,6 +422,43 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 		}
 	} else {
 		templateSpec["imagePullSecrets"] = nil
+	}
+
+	topPolicies := []interface{}{
+		map[string]interface{}{
+			"event":  "PodEvicted",
+			"action": "RestartJob",
+		},
+	}
+	plugins := map[string]interface{}{
+		"svc": []interface{}{},
+	}
+	tasks := []interface{}{workerSpec}
+	if frameworkType == "MPI" {
+		workerSpec["name"] = "master"
+		workerSpec["policies"] = []interface{}{
+			map[string]interface{}{
+				"event":  "PodEvicted",
+				"action": "RestartJob",
+			},
+			map[string]interface{}{
+				"event":  "TaskCompleted",
+				"action": "CompleteJob",
+			},
+		}
+		plugins["ssh"] = []interface{}{}
+	} else {
+		plugins["pytorch"] = []interface{}{
+			"--master=master",
+			"--worker=worker",
+			fmt.Sprintf("--port=%s", masterPort),
+		}
+		plugins["hcclrank"] = []interface{}{}
+	}
+
+	metadataAnnotations := map[string]interface{}{}
+	if spBlock != "" {
+		metadataAnnotations["sp-block"] = spBlock
 	}
 
 	job := &unstructured.Unstructured{
@@ -408,35 +471,20 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 				"namespace":    namespace,
 				"labels": map[string]interface{}{
 					"lepton.sensetime.com/submitter":      submitter,
-					"lepton.sensetime.com/framework-type": "PyTorch",
+					"lepton.sensetime.com/framework-type": frameworkType,
 					"ring-controller.atlas":               "ascend-910b",
 				},
-				"annotations": map[string]interface{}{
-					"sp-block": spBlock,
-				},
+				"annotations": metadataAnnotations,
 			},
 			"spec": map[string]interface{}{
 				"minAvailable": 1,
-				"plugins": map[string]interface{}{
-					"svc": []interface{}{},
-					"pytorch": []interface{}{
-						"--master=master",
-						"--worker=worker",
-						fmt.Sprintf("--port=%s", masterPort),
-					},
-					"hcclrank": []interface{}{},
-				},
+				"plugins":      plugins,
 				"maxRetry": 1,
-				"tasks":    []interface{}{workerSpec},
+				"tasks":    tasks,
 				"priorityClassName": priorityClass,
 				"queue":             queue,
 				"schedulerName":     "volcano",
-				"policies": []interface{}{
-					map[string]interface{}{
-						"event":  "PodEvicted",
-						"action": "RestartJob",
-					},
-				},
+				"policies":          topPolicies,
 			},
 		},
 	}
@@ -459,6 +507,15 @@ func (s *JobService) CreateJob(ctx context.Context, req JobCreateRequest) (*unst
 		return nil, fmt.Errorf("create volcano job %s/%s: %w", namespace, job.GetName(), err)
 	}
 	return created, nil
+}
+
+func normalizeJobFrameworkType(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "MPI":
+		return "MPI"
+	default:
+		return "PyTorch"
+	}
 }
 
 func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResult, error) {
