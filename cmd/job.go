@@ -200,50 +200,291 @@ func newJobCreateCmd() *cobra.Command {
 		Short: "创建 Volcano Job",
 	}
 	createCmd.AddCommand(newJobCreate910CSingleCmd())
+	createCmd.AddCommand(newJobCreate910CMultiCmd())
+	createCmd.AddCommand(newJobCreate910BSingleCmd())
+	createCmd.AddCommand(newJobCreate910BMultiCmd())
 	createCmd.AddCommand(newJobCreateC550DefaultSingleCmd())
+	createCmd.AddCommand(newJobCreateC550DefaultMultiCmd())
 	createCmd.AddCommand(newJobCreateC550H3CSingleCmd())
+	createCmd.AddCommand(newJobCreateC550H3CMultiCmd())
 	createCmd.AddCommand(newJobCreateC550SuperpodSingleCmd())
+	createCmd.AddCommand(newJobCreateC550SuperpodMultiCmd())
 	return createCmd
 }
 
 type jobCreateTemplateConfig struct {
-	CommandName           string
-	ShortDescription      string
-	FixedSPBlock          bool
-	AcceleratorResource   string
-	ExtraResourceName     string
-	ExtraResourceValue    string
-	MinAccelerators       int
-	MaxAccelerators       int
-	AcceleratorsEvenOnly  bool
-	MaxCPU                int
-	MaxMemoryGi           int
-	MachineType           string
-	HostArch              string
-	AcceleratorType       string
+	CommandName            string
+	ShortDescription       string
+	FixedSPBlock           bool
+	AcceleratorResource    string
+	ExtraResourceName      string
+	ExtraResourceValue     string
+	MinAccelerators        int
+	MaxAccelerators        int
+	AcceleratorsEvenOnly   bool
+	MaxCPU                 int
+	MaxMemoryGi            int
+	MachineType            string
+	HostArch               string
+	AcceleratorType        string
 	UseDefaultNodeSelector bool
-	UsePCILinkVolume      bool
-	DefaultQueue          string
-	DefaultPriorityClass  string
+	UsePCILinkVolume       bool
+	DefaultQueue           string
+	DefaultPriorityClass   string
 }
 
 func newJobCreate910CSingleCmd() *cobra.Command {
 	return newSingleTemplateJobCreateCmd(jobCreateTemplateConfig{
-		CommandName:          "910c-single",
-		ShortDescription:     "通过交互方式创建一个 910C 单机 Volcano Job",
-		FixedSPBlock:         false,
-		AcceleratorResource:  "huawei.com/Ascend910",
+		CommandName:            "910c-single",
+		ShortDescription:       "通过交互方式创建一个 910C 单机 Volcano Job",
+		FixedSPBlock:           false,
+		AcceleratorResource:    "huawei.com/Ascend910",
 		UseDefaultNodeSelector: true,
-		MinAccelerators:      2,
-		MaxAccelerators:      16,
-		AcceleratorsEvenOnly: true,
-		MaxCPU:               256,
-		MaxMemoryGi:          1920,
-		MachineType:          "h2ls.ru.k10",
-		HostArch:             "huawei-arm",
-		AcceleratorType:      "module-910c-8",
-		DefaultQueue:         "default",
-		DefaultPriorityClass: "normal",
+		MinAccelerators:        2,
+		MaxAccelerators:        16,
+		AcceleratorsEvenOnly:   true,
+		MaxCPU:                 256,
+		MaxMemoryGi:            1920,
+		MachineType:            "h2ls.ru.k10",
+		HostArch:               "huawei-arm",
+		AcceleratorType:        "module-910c-8",
+		DefaultQueue:           "default",
+		DefaultPriorityClass:   "normal",
+	})
+}
+
+func newJobCreate910BSingleCmd() *cobra.Command {
+	return newSingleTemplateJobCreateCmd(jobCreateTemplateConfig{
+		CommandName:            "910b-single",
+		ShortDescription:       "通过交互方式创建一个 910B 单机 Volcano Job",
+		FixedSPBlock:           true,
+		AcceleratorResource:    "huawei.com/Ascend910",
+		UseDefaultNodeSelector: true,
+		MinAccelerators:        1,
+		MaxAccelerators:        8,
+		AcceleratorsEvenOnly:   false,
+		MaxCPU:                 144,
+		MaxMemoryGi:            1920,
+		MachineType:            "h1ls.rp.k60a",
+		HostArch:               "huawei-arm",
+		AcceleratorType:        "module-910b-8",
+		DefaultQueue:           "default",
+		DefaultPriorityClass:   "normal",
+	})
+}
+
+func newJobCreate910CMultiCmd() *cobra.Command {
+	var (
+		whatIf                bool
+		flagName              string
+		flagNamespace         string
+		flagFramework         string
+		flagImage             string
+		flagCommand           string
+		flagImagePullSecret   string
+		flagNodes             string
+		flagLogicalSupernodes string
+		flagDataPVC           string
+		flagAOSSPVC           string
+		flagSHMSize           string
+		flagPriorityClass     string
+	)
+
+	cmd := &cobra.Command{
+		Use:          "910c-multi",
+		Short:        "通过交互方式创建一个 910C 多机 Volcano Job",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kubeIdentity, err := kube.ResolveKubeconfigIdentity(kubeconfig)
+			if err != nil {
+				return err
+			}
+
+			reader := bufio.NewReader(cmd.InOrStdin())
+			jobName, namespace, frameworkType, image, command, imagePullSecret, totalNodes, logicalSupernodes, dataPVCName, aossPVCName, shmSize, priorityClass, interactive, err := resolve910CMultiJobCreateInputs(
+				reader,
+				cmd,
+				flagName,
+				flagNamespace,
+				flagFramework,
+				flagImage,
+				flagCommand,
+				flagImagePullSecret,
+				flagNodes,
+				flagLogicalSupernodes,
+				flagDataPVC,
+				flagAOSSPVC,
+				flagSHMSize,
+				flagPriorityClass,
+			)
+			if err != nil {
+				return err
+			}
+
+			totalCards := totalNodes * 16
+			spBlockValue := strconv.Itoa(totalCards / logicalSupernodes)
+
+			fmt.Fprintln(cmd.OutOrStdout())
+			fixedValueParts := []string{
+				fmt.Sprintf("framework=%s", frameworkType),
+				"master=1",
+				fmt.Sprintf("worker=%d", totalNodes-1),
+				fmt.Sprintf("minAvailable=%d", totalNodes),
+				fmt.Sprintf("sp-block=%s", spBlockValue),
+				fmt.Sprintf("逻辑超节点个数=%d", logicalSupernodes),
+				fmt.Sprintf("逻辑超节点芯片数=%d", totalCards/logicalSupernodes),
+				"cpu=256",
+				"memory=1920Gi",
+				"accelerators=16",
+				"accelerator resource=huawei.com/Ascend910",
+				"machine-type=h2ls.ru.k10",
+				"host-arch=huawei-arm",
+				"accelerator-type=module-910c-8",
+				"queue=default",
+				"ring-controller.atlas=ascend-910b",
+			}
+			if frameworkType == "MPI" {
+				fixedValueParts = append(fixedValueParts, "mpi port=22")
+			} else {
+				fixedValueParts = append(fixedValueParts, "master port=23456")
+			}
+			output.PrintJobCreatePreview([][]string{
+				{"当前 kubeconfig", kubeIdentity.Path},
+				{"当前 context", kubeIdentity.CurrentContext},
+				{"当前 cluster", kubeIdentity.Cluster},
+				{"submitter", kubeIdentity.User},
+				{"job", strings.TrimSpace(jobName)},
+				{"namespace", strings.TrimSpace(namespace)},
+				{"framework", frameworkType},
+				{"机器数", strconv.Itoa(totalNodes)},
+				{"逻辑超节点个数", strconv.Itoa(logicalSupernodes)},
+				{"sp-block", spBlockValue},
+				{"image", strings.TrimSpace(image)},
+				{"priorityClass", strings.TrimSpace(priorityClass)},
+				{"固定值", strings.Join(fixedValueParts, " | ")},
+			})
+			fmt.Fprintln(cmd.OutOrStdout(), "提醒: 逻辑超节点芯片数必须是 16 的倍数，因此【逻辑超节点个数】必须整除总机器数。")
+			fmt.Fprintln(cmd.OutOrStdout(), "提醒: job create 会直接在当前 kubeconfig 指向的 VC/集群里创建 Volcano Job。")
+
+			writeYAMLOnly := whatIf
+			if interactive {
+				yamlOnlyAnswer, err := promptPVCValue(reader, cmd, "是否只生成 YAML 文件到本地而不创建任务? (y/n): ", "")
+				if err != nil {
+					return err
+				}
+				if isYes(yamlOnlyAnswer) {
+					writeYAMLOnly = true
+				} else {
+					confirmed, err := promptPVCValue(reader, cmd, "是否确认在当前集群创建? (y/n): ", "")
+					if err != nil {
+						return err
+					}
+					if !isYes(confirmed) {
+						fmt.Fprintln(cmd.OutOrStdout(), "已取消创建。")
+						return nil
+					}
+				}
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "检测到参数模式，已跳过交互确认，可直接用于脚本。")
+			}
+
+			clientset, dynamicClient, err := newJobClients()
+			if err != nil {
+				return err
+			}
+			jobService := service.NewJobService(clientset, dynamicClient, nil)
+			request := service.JobCreateRequest{
+				Name:                   strings.TrimSpace(jobName),
+				Namespace:              strings.TrimSpace(namespace),
+				Submitter:              kubeIdentity.User,
+				SPBlock:                spBlockValue,
+				FrameworkType:          frameworkType,
+				MasterPort:             "23456",
+				Replicas:               1,
+				MinAvailable:           int64(totalNodes),
+				MasterReplicas:         1,
+				WorkerReplicas:         int64(totalNodes - 1),
+				Image:                  strings.TrimSpace(image),
+				Command:                command,
+				ImagePullSecret:        strings.TrimSpace(imagePullSecret),
+				CPU:                    "256",
+				Memory:                 "1920Gi",
+				AcceleratorResource:    "huawei.com/Ascend910",
+				AcceleratorCount:       "16",
+				DataPVCName:            strings.TrimSpace(dataPVCName),
+				AOSSPVCName:            strings.TrimSpace(aossPVCName),
+				SHMSize:                strings.TrimSpace(shmSize),
+				MachineType:            "h2ls.ru.k10",
+				HostArch:               "huawei-arm",
+				AcceleratorType:        "module-910c-8",
+				UseDefaultNodeSelector: true,
+				RequireIPCLock:         true,
+				PriorityClass:          strings.TrimSpace(priorityClass),
+				Queue:                  "default",
+			}
+			if writeYAMLOnly {
+				manifest, err := jobService.BuildJobManifest(request)
+				if err != nil {
+					return err
+				}
+				content, err := yaml.Marshal(manifest.Object)
+				if err != nil {
+					return fmt.Errorf("marshal job yaml: %w", err)
+				}
+				outputPath := filepath.Join(".", fmt.Sprintf("%s.yaml", request.Name))
+				if err := os.WriteFile(outputPath, content, 0644); err != nil {
+					return fmt.Errorf("write job yaml %s: %w", outputPath, err)
+				}
+				if whatIf {
+					fmt.Fprintf(cmd.OutOrStdout(), "what-if 模式：已生成 YAML，未提交到集群: %s\n", outputPath)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "已生成 YAML，未提交到集群: %s\n", outputPath)
+				}
+				return nil
+			}
+
+			created, err := jobService.CreateJob(context.Background(), request)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Job 创建成功: %s/%s\n", created.GetNamespace(), created.GetName())
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&whatIf, "what-if", false, "只生成最终 YAML，不真正创建 Job")
+	cmd.Flags().StringVar(&flagName, "name", "", "直接指定 job 名字")
+	cmd.Flags().StringVar(&flagNamespace, "ns", "default", "直接指定 namespace")
+	cmd.Flags().StringVar(&flagFramework, "framework", "PyTorch", "直接指定 framework，支持 PyTorch 或 MPI")
+	cmd.Flags().StringVar(&flagImage, "image", "", "直接指定完整镜像地址")
+	cmd.Flags().StringVar(&flagCommand, "command", "", "直接指定启动命令")
+	cmd.Flags().StringVar(&flagImagePullSecret, "secret", "", "直接指定 imagePullSecret；官方镜像可留空")
+	cmd.Flags().StringVar(&flagNodes, "nodes", "", "直接指定多机总数量，至少 2")
+	cmd.Flags().StringVar(&flagLogicalSupernodes, "logical-supernodes", "1", "直接指定逻辑超节点个数，必须整除总机器数")
+	cmd.Flags().StringVar(&flagDataPVC, "data-pvc", "", "直接指定文件存储对应的 PVC 名称")
+	cmd.Flags().StringVar(&flagAOSSPVC, "aoss-pvc", "", "直接指定对象存储对应的 PVC 名称")
+	cmd.Flags().StringVar(&flagSHMSize, "shm-size", "64Gi", "直接指定 shm 大小")
+	cmd.Flags().StringVar(&flagPriorityClass, "priority-class", "normal", "直接指定 priorityClass")
+	return cmd
+}
+
+func newJobCreate910BMultiCmd() *cobra.Command {
+	return newMultiTemplateJobCreateCmd(jobCreateTemplateConfig{
+		CommandName:            "910b-multi",
+		ShortDescription:       "通过交互方式创建一个 910B 多机 Volcano Job",
+		FixedSPBlock:           true,
+		AcceleratorResource:    "huawei.com/Ascend910",
+		UseDefaultNodeSelector: true,
+		MinAccelerators:        1,
+		MaxAccelerators:        8,
+		AcceleratorsEvenOnly:   false,
+		MaxCPU:                 144,
+		MaxMemoryGi:            1920,
+		MachineType:            "h1ls.rp.k60a",
+		HostArch:               "huawei-arm",
+		AcceleratorType:        "module-910b-8",
+		DefaultQueue:           "default",
+		DefaultPriorityClass:   "normal",
 	})
 }
 
@@ -269,47 +510,113 @@ func newJobCreateC550DefaultSingleCmd() *cobra.Command {
 	})
 }
 
+func newJobCreateC550DefaultMultiCmd() *cobra.Command {
+	return newMultiTemplateJobCreateCmd(jobCreateTemplateConfig{
+		CommandName:          "c550-default-multi",
+		ShortDescription:     "通过交互方式创建一个 C550 风冷多机 Volcano Job",
+		FixedSPBlock:         true,
+		AcceleratorResource:  "metax-tech.com/gpu",
+		ExtraResourceName:    "rdma-training/roce",
+		ExtraResourceValue:   "1",
+		MinAccelerators:      1,
+		MaxAccelerators:      8,
+		AcceleratorsEvenOnly: false,
+		MaxCPU:               224,
+		MaxMemoryGi:          1440,
+		MachineType:          "x2ls.ri.i80",
+		HostArch:             "huawei-arm",
+		AcceleratorType:      "module-910c-8",
+		UsePCILinkVolume:     true,
+		DefaultQueue:         "default",
+		DefaultPriorityClass: "normal",
+	})
+}
+
 func newJobCreateC550H3CSingleCmd() *cobra.Command {
 	return newSingleTemplateJobCreateCmd(jobCreateTemplateConfig{
-		CommandName:            "c550-h3c-single",
-		ShortDescription:       "通过交互方式创建一个 C550 液冷单机 Volcano Job",
-		FixedSPBlock:           true,
-		AcceleratorResource:    "metax-tech.com/gpu",
-		ExtraResourceName:      "rdma-training/roce",
-		ExtraResourceValue:     "1",
-		MinAccelerators:        1,
-		MaxAccelerators:        8,
-		AcceleratorsEvenOnly:   false,
-		MaxCPU:                 224,
-		MaxMemoryGi:            640,
-		MachineType:            "x2ls.ri.i70",
-		HostArch:               "huawei-arm",
-		AcceleratorType:        "module-910c-8",
-		UsePCILinkVolume:       false,
-		DefaultQueue:           "default",
-		DefaultPriorityClass:   "normal",
+		CommandName:          "c550-h3c-single",
+		ShortDescription:     "通过交互方式创建一个 C550 液冷单机 Volcano Job",
+		FixedSPBlock:         true,
+		AcceleratorResource:  "metax-tech.com/gpu",
+		ExtraResourceName:    "rdma-training/roce",
+		ExtraResourceValue:   "1",
+		MinAccelerators:      1,
+		MaxAccelerators:      8,
+		AcceleratorsEvenOnly: false,
+		MaxCPU:               224,
+		MaxMemoryGi:          640,
+		MachineType:          "x2ls.ri.i70",
+		HostArch:             "huawei-arm",
+		AcceleratorType:      "module-910c-8",
+		UsePCILinkVolume:     false,
+		DefaultQueue:         "default",
+		DefaultPriorityClass: "normal",
+	})
+}
+
+func newJobCreateC550H3CMultiCmd() *cobra.Command {
+	return newMultiTemplateJobCreateCmd(jobCreateTemplateConfig{
+		CommandName:          "c550-h3c-multi",
+		ShortDescription:     "通过交互方式创建一个 C550 液冷多机 Volcano Job",
+		FixedSPBlock:         true,
+		AcceleratorResource:  "metax-tech.com/gpu",
+		ExtraResourceName:    "rdma-training/roce",
+		ExtraResourceValue:   "1",
+		MinAccelerators:      1,
+		MaxAccelerators:      8,
+		AcceleratorsEvenOnly: false,
+		MaxCPU:               224,
+		MaxMemoryGi:          640,
+		MachineType:          "x2ls.ri.i70",
+		HostArch:             "huawei-arm",
+		AcceleratorType:      "module-910c-8",
+		UsePCILinkVolume:     false,
+		DefaultQueue:         "default",
+		DefaultPriorityClass: "normal",
 	})
 }
 
 func newJobCreateC550SuperpodSingleCmd() *cobra.Command {
 	return newSingleTemplateJobCreateCmd(jobCreateTemplateConfig{
-		CommandName:            "c550-superpod-single",
-		ShortDescription:       "通过交互方式创建一个 C550 超节点单机 Volcano Job",
-		FixedSPBlock:           true,
-		AcceleratorResource:    "metax-tech.com/gpu",
-		ExtraResourceName:      "rdma-training/roce",
-		ExtraResourceValue:     "1",
-		MinAccelerators:        1,
-		MaxAccelerators:        8,
-		AcceleratorsEvenOnly:   false,
-		MaxCPU:                 120,
-		MaxMemoryGi:            1440,
-		MachineType:            "x3ls.ri.i80",
-		HostArch:               "huawei-arm",
-		AcceleratorType:        "module-910c-8",
-		UsePCILinkVolume:       false,
-		DefaultQueue:           "default",
-		DefaultPriorityClass:   "normal",
+		CommandName:          "c550-superpod-single",
+		ShortDescription:     "通过交互方式创建一个 C550 超节点单机 Volcano Job",
+		FixedSPBlock:         true,
+		AcceleratorResource:  "metax-tech.com/gpu",
+		ExtraResourceName:    "rdma-training/roce",
+		ExtraResourceValue:   "1",
+		MinAccelerators:      1,
+		MaxAccelerators:      8,
+		AcceleratorsEvenOnly: false,
+		MaxCPU:               120,
+		MaxMemoryGi:          1440,
+		MachineType:          "x3ls.ri.i80",
+		HostArch:             "huawei-arm",
+		AcceleratorType:      "module-910c-8",
+		UsePCILinkVolume:     false,
+		DefaultQueue:         "default",
+		DefaultPriorityClass: "normal",
+	})
+}
+
+func newJobCreateC550SuperpodMultiCmd() *cobra.Command {
+	return newMultiTemplateJobCreateCmd(jobCreateTemplateConfig{
+		CommandName:          "c550-superpod-multi",
+		ShortDescription:     "通过交互方式创建一个 C550 超节点多机 Volcano Job",
+		FixedSPBlock:         true,
+		AcceleratorResource:  "metax-tech.com/gpu",
+		ExtraResourceName:    "rdma-training/roce",
+		ExtraResourceValue:   "1",
+		MinAccelerators:      1,
+		MaxAccelerators:      8,
+		AcceleratorsEvenOnly: false,
+		MaxCPU:               120,
+		MaxMemoryGi:          1440,
+		MachineType:          "x3ls.ri.i80",
+		HostArch:             "huawei-arm",
+		AcceleratorType:      "module-910c-8",
+		UsePCILinkVolume:     false,
+		DefaultQueue:         "default",
+		DefaultPriorityClass: "normal",
 	})
 }
 
@@ -332,8 +639,8 @@ func newSingleTemplateJobCreateCmd(cfg jobCreateTemplateConfig) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   cfg.CommandName,
-		Short: cfg.ShortDescription,
+		Use:          cfg.CommandName,
+		Short:        cfg.ShortDescription,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kubeIdentity, err := kube.ResolveKubeconfigIdentity(kubeconfig)
@@ -431,32 +738,32 @@ func newSingleTemplateJobCreateCmd(cfg jobCreateTemplateConfig) *cobra.Command {
 			}
 			jobService := service.NewJobService(clientset, dynamicClient, nil)
 			request := service.JobCreateRequest{
-				Name:                strings.TrimSpace(jobName),
-				Namespace:           strings.TrimSpace(namespace),
-				Submitter:           kubeIdentity.User,
-				SPBlock:             spBlockValue,
-				FrameworkType:       frameworkType,
-				MasterPort:          "23456",
-				Replicas:            1,
-				Image:               strings.TrimSpace(image),
-				Command:             command,
-				ImagePullSecret:     strings.TrimSpace(imagePullSecret),
-				CPU:                 strconv.Itoa(cpuValue),
-				Memory:              fmt.Sprintf("%dGi", memoryValue),
-				AcceleratorResource: cfg.AcceleratorResource,
-				AcceleratorCount:    strconv.Itoa(acceleratorCountValue),
-				ExtraResourceName:   cfg.ExtraResourceName,
-				ExtraResourceValue:  cfg.ExtraResourceValue,
-				DataPVCName:         strings.TrimSpace(dataPVCName),
-				AOSSPVCName:         strings.TrimSpace(aossPVCName),
-				SHMSize:             strings.TrimSpace(shmSize),
-				MachineType:         cfg.MachineType,
-				HostArch:            cfg.HostArch,
-				AcceleratorType:     cfg.AcceleratorType,
+				Name:                   strings.TrimSpace(jobName),
+				Namespace:              strings.TrimSpace(namespace),
+				Submitter:              kubeIdentity.User,
+				SPBlock:                spBlockValue,
+				FrameworkType:          frameworkType,
+				MasterPort:             "23456",
+				Replicas:               1,
+				Image:                  strings.TrimSpace(image),
+				Command:                command,
+				ImagePullSecret:        strings.TrimSpace(imagePullSecret),
+				CPU:                    strconv.Itoa(cpuValue),
+				Memory:                 fmt.Sprintf("%dGi", memoryValue),
+				AcceleratorResource:    cfg.AcceleratorResource,
+				AcceleratorCount:       strconv.Itoa(acceleratorCountValue),
+				ExtraResourceName:      cfg.ExtraResourceName,
+				ExtraResourceValue:     cfg.ExtraResourceValue,
+				DataPVCName:            strings.TrimSpace(dataPVCName),
+				AOSSPVCName:            strings.TrimSpace(aossPVCName),
+				SHMSize:                strings.TrimSpace(shmSize),
+				MachineType:            cfg.MachineType,
+				HostArch:               cfg.HostArch,
+				AcceleratorType:        cfg.AcceleratorType,
 				UseDefaultNodeSelector: cfg.UseDefaultNodeSelector,
-				UsePCILinkVolume:    cfg.UsePCILinkVolume,
-				PriorityClass:       strings.TrimSpace(priorityClass),
-				Queue:               cfg.DefaultQueue,
+				UsePCILinkVolume:       cfg.UsePCILinkVolume,
+				PriorityClass:          strings.TrimSpace(priorityClass),
+				Queue:                  cfg.DefaultQueue,
 			}
 			if writeYAMLOnly {
 				manifest, err := jobService.BuildJobManifest(request)
@@ -502,6 +809,200 @@ func newSingleTemplateJobCreateCmd(cfg jobCreateTemplateConfig) *cobra.Command {
 	} else {
 		cmd.Flags().StringVar(&flagAccelerators, "accelerators", "", fmt.Sprintf("直接指定加速卡数量，范围 %d 到 %d", cfg.MinAccelerators, cfg.MaxAccelerators))
 	}
+	cmd.Flags().StringVar(&flagDataPVC, "data-pvc", "", "直接指定文件存储对应的 PVC 名称")
+	cmd.Flags().StringVar(&flagAOSSPVC, "aoss-pvc", "", "直接指定对象存储对应的 PVC 名称")
+	cmd.Flags().StringVar(&flagSHMSize, "shm-size", "64Gi", "直接指定 shm 大小")
+	cmd.Flags().StringVar(&flagPriorityClass, "priority-class", cfg.DefaultPriorityClass, "直接指定 priorityClass")
+	return cmd
+}
+
+func newMultiTemplateJobCreateCmd(cfg jobCreateTemplateConfig) *cobra.Command {
+	var (
+		whatIf              bool
+		flagName            string
+		flagNamespace       string
+		flagFramework       string
+		flagImage           string
+		flagCommand         string
+		flagImagePullSecret string
+		flagNodes           string
+		flagDataPVC         string
+		flagAOSSPVC         string
+		flagSHMSize         string
+		flagPriorityClass   string
+	)
+
+	cmd := &cobra.Command{
+		Use:          cfg.CommandName,
+		Short:        cfg.ShortDescription,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kubeIdentity, err := kube.ResolveKubeconfigIdentity(kubeconfig)
+			if err != nil {
+				return err
+			}
+
+			reader := bufio.NewReader(cmd.InOrStdin())
+			jobName, namespace, frameworkType, image, command, imagePullSecret, totalNodes, dataPVCName, aossPVCName, shmSize, priorityClass, interactive, err := resolveMultiTemplateJobCreateInputs(
+				reader,
+				cmd,
+				cfg,
+				flagName,
+				flagNamespace,
+				flagFramework,
+				flagImage,
+				flagCommand,
+				flagImagePullSecret,
+				flagNodes,
+				flagDataPVC,
+				flagAOSSPVC,
+				flagSHMSize,
+				flagPriorityClass,
+			)
+			if err != nil {
+				return err
+			}
+
+			spBlockValue := ""
+			if !cfg.FixedSPBlock {
+				spBlockValue = strconv.Itoa(cfg.MaxAccelerators)
+			}
+			fmt.Fprintln(cmd.OutOrStdout())
+			fixedValueParts := []string{
+				fmt.Sprintf("framework=%s", frameworkType),
+				"master=1",
+				fmt.Sprintf("worker=%d", totalNodes-1),
+				fmt.Sprintf("minAvailable=%d", totalNodes),
+				fmt.Sprintf("cpu=%d", cfg.MaxCPU),
+				fmt.Sprintf("memory=%dGi", cfg.MaxMemoryGi),
+				fmt.Sprintf("accelerators=%d", cfg.MaxAccelerators),
+				fmt.Sprintf("accelerator resource=%s", cfg.AcceleratorResource),
+				fmt.Sprintf("machine-type=%s", cfg.MachineType),
+				fmt.Sprintf("host-arch=%s", cfg.HostArch),
+				fmt.Sprintf("accelerator-type=%s", cfg.AcceleratorType),
+				fmt.Sprintf("queue=%s", cfg.DefaultQueue),
+				"ring-controller.atlas=ascend-910b",
+			}
+			if frameworkType == "MPI" {
+				fixedValueParts = append(fixedValueParts, "mpi port=22")
+			} else {
+				fixedValueParts = append(fixedValueParts, "master port=23456")
+			}
+			if spBlockValue != "" {
+				fixedValueParts = append([]string{fmt.Sprintf("sp-block=%s", spBlockValue)}, fixedValueParts...)
+			} else {
+				fixedValueParts = append([]string{"sp-block=不设置"}, fixedValueParts...)
+			}
+			output.PrintJobCreatePreview([][]string{
+				{"当前 kubeconfig", kubeIdentity.Path},
+				{"当前 context", kubeIdentity.CurrentContext},
+				{"当前 cluster", kubeIdentity.Cluster},
+				{"submitter", kubeIdentity.User},
+				{"job", strings.TrimSpace(jobName)},
+				{"namespace", strings.TrimSpace(namespace)},
+				{"framework", frameworkType},
+				{"机器数", strconv.Itoa(totalNodes)},
+				{"image", strings.TrimSpace(image)},
+				{"priorityClass", strings.TrimSpace(priorityClass)},
+				{"固定值", strings.Join(fixedValueParts, " | ")},
+			})
+			fmt.Fprintln(cmd.OutOrStdout(), "提醒: job create 会直接在当前 kubeconfig 指向的 VC/集群里创建 Volcano Job。")
+			writeYAMLOnly := whatIf
+			if interactive {
+				yamlOnlyAnswer, err := promptPVCValue(reader, cmd, "是否只生成 YAML 文件到本地而不创建任务? (y/n): ", "")
+				if err != nil {
+					return err
+				}
+				if isYes(yamlOnlyAnswer) {
+					writeYAMLOnly = true
+				} else {
+					confirmed, err := promptPVCValue(reader, cmd, "是否确认在当前集群创建? (y/n): ", "")
+					if err != nil {
+						return err
+					}
+					if !isYes(confirmed) {
+						fmt.Fprintln(cmd.OutOrStdout(), "已取消创建。")
+						return nil
+					}
+				}
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "检测到参数模式，已跳过交互确认，可直接用于脚本。")
+			}
+
+			clientset, dynamicClient, err := newJobClients()
+			if err != nil {
+				return err
+			}
+			jobService := service.NewJobService(clientset, dynamicClient, nil)
+			request := service.JobCreateRequest{
+				Name:                   strings.TrimSpace(jobName),
+				Namespace:              strings.TrimSpace(namespace),
+				Submitter:              kubeIdentity.User,
+				SPBlock:                spBlockValue,
+				FrameworkType:          frameworkType,
+				MasterPort:             "23456",
+				Replicas:               1,
+				MinAvailable:           int64(totalNodes),
+				MasterReplicas:         1,
+				WorkerReplicas:         int64(totalNodes - 1),
+				Image:                  strings.TrimSpace(image),
+				Command:                command,
+				ImagePullSecret:        strings.TrimSpace(imagePullSecret),
+				CPU:                    strconv.Itoa(cfg.MaxCPU),
+				Memory:                 fmt.Sprintf("%dGi", cfg.MaxMemoryGi),
+				AcceleratorResource:    cfg.AcceleratorResource,
+				AcceleratorCount:       strconv.Itoa(cfg.MaxAccelerators),
+				ExtraResourceName:      cfg.ExtraResourceName,
+				ExtraResourceValue:     cfg.ExtraResourceValue,
+				DataPVCName:            strings.TrimSpace(dataPVCName),
+				AOSSPVCName:            strings.TrimSpace(aossPVCName),
+				SHMSize:                strings.TrimSpace(shmSize),
+				MachineType:            cfg.MachineType,
+				HostArch:               cfg.HostArch,
+				AcceleratorType:        cfg.AcceleratorType,
+				UseDefaultNodeSelector: cfg.UseDefaultNodeSelector,
+				UsePCILinkVolume:       cfg.UsePCILinkVolume,
+				RequireIPCLock:         true,
+				PriorityClass:          strings.TrimSpace(priorityClass),
+				Queue:                  cfg.DefaultQueue,
+			}
+			if writeYAMLOnly {
+				manifest, err := jobService.BuildJobManifest(request)
+				if err != nil {
+					return err
+				}
+				content, err := yaml.Marshal(manifest.Object)
+				if err != nil {
+					return fmt.Errorf("marshal job yaml: %w", err)
+				}
+				outputPath := filepath.Join(".", fmt.Sprintf("%s.yaml", request.Name))
+				if err := os.WriteFile(outputPath, content, 0644); err != nil {
+					return fmt.Errorf("write job yaml %s: %w", outputPath, err)
+				}
+				if whatIf {
+					fmt.Fprintf(cmd.OutOrStdout(), "what-if 模式：已生成 YAML，未提交到集群: %s\n", outputPath)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "已生成 YAML，未提交到集群: %s\n", outputPath)
+				}
+				return nil
+			}
+			created, err := jobService.CreateJob(context.Background(), request)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Job 创建成功: %s/%s\n", created.GetNamespace(), created.GetName())
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&whatIf, "what-if", false, "只生成最终 YAML，不真正创建 Job")
+	cmd.Flags().StringVar(&flagName, "name", "", "直接指定 job 名字")
+	cmd.Flags().StringVar(&flagNamespace, "ns", "default", "直接指定 namespace")
+	cmd.Flags().StringVar(&flagFramework, "framework", "PyTorch", "直接指定 framework，支持 PyTorch 或 MPI")
+	cmd.Flags().StringVar(&flagImage, "image", "", "直接指定完整镜像地址")
+	cmd.Flags().StringVar(&flagCommand, "command", "", "直接指定启动命令")
+	cmd.Flags().StringVar(&flagImagePullSecret, "secret", "", "直接指定 imagePullSecret；官方镜像可留空")
+	cmd.Flags().StringVar(&flagNodes, "nodes", "", "直接指定多机总数量，至少 2")
 	cmd.Flags().StringVar(&flagDataPVC, "data-pvc", "", "直接指定文件存储对应的 PVC 名称")
 	cmd.Flags().StringVar(&flagAOSSPVC, "aoss-pvc", "", "直接指定对象存储对应的 PVC 名称")
 	cmd.Flags().StringVar(&flagSHMSize, "shm-size", "64Gi", "直接指定 shm 大小")
@@ -622,6 +1123,188 @@ func resolveSingleTemplateJobCreateInputs(reader *bufio.Reader, cmd *cobra.Comma
 	return strings.TrimSpace(flagName), strings.TrimSpace(flagNamespace), frameworkType, strings.TrimSpace(flagImage), strings.TrimSpace(flagCommand), strings.TrimSpace(flagImagePullSecret), cpuValue, memoryValue, acceleratorCountValue, strings.TrimSpace(flagDataPVC), strings.TrimSpace(flagAOSSPVC), strings.TrimSpace(flagSHMSize), strings.TrimSpace(flagPriorityClass), false, nil
 }
 
+func resolveMultiTemplateJobCreateInputs(reader *bufio.Reader, cmd *cobra.Command, cfg jobCreateTemplateConfig, flagName string, flagNamespace string, flagFramework string, flagImage string, flagCommand string, flagImagePullSecret string, flagNodes string, flagDataPVC string, flagAOSSPVC string, flagSHMSize string, flagPriorityClass string) (string, string, string, string, string, string, int, string, string, string, string, bool, error) {
+	if strings.TrimSpace(flagName) == "" && strings.TrimSpace(flagImage) == "" && strings.TrimSpace(flagCommand) == "" && strings.TrimSpace(flagNodes) == "" {
+		jobName, err := promptPVCValue(reader, cmd, "1. 请输入 job 名字: ", "")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		namespace, err := promptPVCValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", "default")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		frameworkType, err := promptFrameworkValue(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", "PyTorch")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		totalNodes, err := promptIntInRange(reader, cmd, "4. 请输入总机器数(至少 2): ", 2, 64)
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		image, err := promptPVCValue(reader, cmd, "5. 请输入完整镜像地址: ", "")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		command, err := promptPVCValue(reader, cmd, "6. 请输入启动命令 command: ", "")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		imagePullSecret, err := promptPVCValue(reader, cmd, "7. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", "-")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		if strings.TrimSpace(imagePullSecret) == "-" {
+			imagePullSecret = ""
+		}
+		dataPVCName, err := promptPVCValue(reader, cmd, "8. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", "-")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		if strings.TrimSpace(dataPVCName) == "-" {
+			dataPVCName = ""
+		}
+		aossPVCName, err := promptPVCValue(reader, cmd, "9. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", "-")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		if strings.TrimSpace(aossPVCName) == "-" {
+			aossPVCName = ""
+		}
+		shmSize, err := promptPVCValue(reader, cmd, "10. 请输入 shm 大小(默认 64Gi): ", "64Gi")
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		priorityClass, err := promptPVCValue(reader, cmd, fmt.Sprintf("11. 请输入 priorityClass(默认 %s): ", cfg.DefaultPriorityClass), cfg.DefaultPriorityClass)
+		if err != nil {
+			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		}
+		return strings.TrimSpace(jobName), strings.TrimSpace(namespace), frameworkType, strings.TrimSpace(image), command, strings.TrimSpace(imagePullSecret), totalNodes, strings.TrimSpace(dataPVCName), strings.TrimSpace(aossPVCName), strings.TrimSpace(shmSize), strings.TrimSpace(priorityClass), true, nil
+	}
+
+	missing := make([]string, 0, 4)
+	if strings.TrimSpace(flagName) == "" {
+		missing = append(missing, "--name")
+	}
+	if strings.TrimSpace(flagImage) == "" {
+		missing = append(missing, "--image")
+	}
+	if strings.TrimSpace(flagCommand) == "" {
+		missing = append(missing, "--command")
+	}
+	if strings.TrimSpace(flagNodes) == "" {
+		missing = append(missing, "--nodes")
+	}
+	if len(missing) > 0 {
+		return "", "", "", "", "", "", 0, "", "", "", "", false, fmt.Errorf("检测到你在用参数模式，请同时补齐这些必填参数: %s", strings.Join(missing, ", "))
+	}
+	frameworkType, err := parseFrameworkValue(flagFramework)
+	if err != nil {
+		return "", "", "", "", "", "", 0, "", "", "", "", false, fmt.Errorf("参数 --framework 非法: %w", err)
+	}
+	totalNodes, err := parseIntInRange(flagNodes, 2, 64)
+	if err != nil {
+		return "", "", "", "", "", "", 0, "", "", "", "", false, fmt.Errorf("参数 --nodes 非法: %w", err)
+	}
+	return strings.TrimSpace(flagName), strings.TrimSpace(flagNamespace), frameworkType, strings.TrimSpace(flagImage), strings.TrimSpace(flagCommand), strings.TrimSpace(flagImagePullSecret), totalNodes, strings.TrimSpace(flagDataPVC), strings.TrimSpace(flagAOSSPVC), strings.TrimSpace(flagSHMSize), strings.TrimSpace(flagPriorityClass), false, nil
+}
+
+func resolve910CMultiJobCreateInputs(reader *bufio.Reader, cmd *cobra.Command, flagName string, flagNamespace string, flagFramework string, flagImage string, flagCommand string, flagImagePullSecret string, flagNodes string, flagLogicalSupernodes string, flagDataPVC string, flagAOSSPVC string, flagSHMSize string, flagPriorityClass string) (string, string, string, string, string, string, int, int, string, string, string, string, bool, error) {
+	if strings.TrimSpace(flagName) == "" && strings.TrimSpace(flagImage) == "" && strings.TrimSpace(flagCommand) == "" && strings.TrimSpace(flagNodes) == "" {
+		jobName, err := promptPVCValue(reader, cmd, "1. 请输入 job 名字: ", "")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		namespace, err := promptPVCValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", "default")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		frameworkType, err := promptFrameworkValue(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", "PyTorch")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		totalNodes, err := promptIntInRange(reader, cmd, "4. 请输入总机器数(至少 2): ", 2, 64)
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		logicalSupernodes, err := prompt910CMultiLogicalSupernodes(reader, cmd, totalNodes, "5. 请输入逻辑超节点个数(默认 1，必须整除总机器数): ", 1)
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		image, err := promptPVCValue(reader, cmd, "6. 请输入完整镜像地址: ", "")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		command, err := promptPVCValue(reader, cmd, "7. 请输入启动命令 command: ", "")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		imagePullSecret, err := promptPVCValue(reader, cmd, "8. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", "-")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		if strings.TrimSpace(imagePullSecret) == "-" {
+			imagePullSecret = ""
+		}
+		dataPVCName, err := promptPVCValue(reader, cmd, "9. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", "-")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		if strings.TrimSpace(dataPVCName) == "-" {
+			dataPVCName = ""
+		}
+		aossPVCName, err := promptPVCValue(reader, cmd, "10. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", "-")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		if strings.TrimSpace(aossPVCName) == "-" {
+			aossPVCName = ""
+		}
+		shmSize, err := promptPVCValue(reader, cmd, "11. 请输入 shm 大小(默认 64Gi): ", "64Gi")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		priorityClass, err := promptPVCValue(reader, cmd, "12. 请输入 priorityClass(默认 normal): ", "normal")
+		if err != nil {
+			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		}
+		return strings.TrimSpace(jobName), strings.TrimSpace(namespace), frameworkType, strings.TrimSpace(image), command, strings.TrimSpace(imagePullSecret), totalNodes, logicalSupernodes, strings.TrimSpace(dataPVCName), strings.TrimSpace(aossPVCName), strings.TrimSpace(shmSize), strings.TrimSpace(priorityClass), true, nil
+	}
+
+	missing := make([]string, 0, 5)
+	if strings.TrimSpace(flagName) == "" {
+		missing = append(missing, "--name")
+	}
+	if strings.TrimSpace(flagImage) == "" {
+		missing = append(missing, "--image")
+	}
+	if strings.TrimSpace(flagCommand) == "" {
+		missing = append(missing, "--command")
+	}
+	if strings.TrimSpace(flagNodes) == "" {
+		missing = append(missing, "--nodes")
+	}
+	if strings.TrimSpace(flagLogicalSupernodes) == "" {
+		missing = append(missing, "--logical-supernodes")
+	}
+	if len(missing) > 0 {
+		return "", "", "", "", "", "", 0, 0, "", "", "", "", false, fmt.Errorf("检测到你在用参数模式，请同时补齐这些必填参数: %s", strings.Join(missing, ", "))
+	}
+
+	frameworkType, err := parseFrameworkValue(flagFramework)
+	if err != nil {
+		return "", "", "", "", "", "", 0, 0, "", "", "", "", false, fmt.Errorf("参数 --framework 非法: %w", err)
+	}
+	totalNodes, err := parseIntInRange(flagNodes, 2, 64)
+	if err != nil {
+		return "", "", "", "", "", "", 0, 0, "", "", "", "", false, fmt.Errorf("参数 --nodes 非法: %w", err)
+	}
+	logicalSupernodes, err := parse910CMultiLogicalSupernodes(flagLogicalSupernodes, totalNodes)
+	if err != nil {
+		return "", "", "", "", "", "", 0, 0, "", "", "", "", false, fmt.Errorf("参数 --logical-supernodes 非法: %w", err)
+	}
+	return strings.TrimSpace(flagName), strings.TrimSpace(flagNamespace), frameworkType, strings.TrimSpace(flagImage), strings.TrimSpace(flagCommand), strings.TrimSpace(flagImagePullSecret), totalNodes, logicalSupernodes, strings.TrimSpace(flagDataPVC), strings.TrimSpace(flagAOSSPVC), strings.TrimSpace(flagSHMSize), strings.TrimSpace(flagPriorityClass), false, nil
+}
+
 func promptIntInRange(reader *bufio.Reader, cmd *cobra.Command, label string, min int, max int) (int, error) {
 	for {
 		value, err := promptPVCValue(reader, cmd, label, "")
@@ -680,6 +1363,32 @@ func parseAcceleratorCount(value string, min int, max int, evenOnly bool) (int, 
 		return parseEvenIntInRange(value, min, max)
 	}
 	return parseIntInRange(value, min, max)
+}
+
+func prompt910CMultiLogicalSupernodes(reader *bufio.Reader, cmd *cobra.Command, totalNodes int, label string, defaultValue int) (int, error) {
+	defaultText := strconv.Itoa(defaultValue)
+	for {
+		value, err := promptPVCValue(reader, cmd, label, defaultText)
+		if err != nil {
+			return 0, err
+		}
+		number, err := parse910CMultiLogicalSupernodes(value, totalNodes)
+		if err == nil {
+			return number, nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "逻辑超节点个数必须是正整数，并且能整除总机器数 %d，这样逻辑超节点芯片数才会是 16 的倍数。\n", totalNodes)
+	}
+}
+
+func parse910CMultiLogicalSupernodes(value string, totalNodes int) (int, error) {
+	number, err := parseIntInRange(value, 1, totalNodes)
+	if err != nil {
+		return 0, err
+	}
+	if totalNodes%number != 0 {
+		return 0, fmt.Errorf("必须整除总机器数 %d", totalNodes)
+	}
+	return number, nil
 }
 
 func promptFrameworkValue(reader *bufio.Reader, cmd *cobra.Command, label string, defaultValue string) (string, error) {

@@ -100,6 +100,9 @@ type JobCreateRequest struct {
 	FrameworkType       string
 	MasterPort          string
 	Replicas            int64
+	MinAvailable        int64
+	MasterReplicas      int64
+	WorkerReplicas      int64
 	Image               string
 	Command             string
 	ImagePullSecret     string
@@ -117,6 +120,7 @@ type JobCreateRequest struct {
 	AcceleratorType     string
 	UseDefaultNodeSelector bool
 	UsePCILinkVolume    bool
+	RequireIPCLock      bool
 	PriorityClass       string
 	Queue               string
 }
@@ -245,6 +249,30 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 	if req.Replicas <= 0 {
 		return nil, fmt.Errorf("replicas must be greater than 0")
 	}
+	masterReplicas := req.MasterReplicas
+	workerReplicas := req.WorkerReplicas
+	minAvailable := req.MinAvailable
+	isMultiNode := masterReplicas > 0 || workerReplicas > 0 || minAvailable > 1
+	if isMultiNode {
+		if masterReplicas <= 0 {
+			masterReplicas = 1
+		}
+		if workerReplicas < 0 {
+			return nil, fmt.Errorf("worker replicas must be greater than or equal to 0")
+		}
+		if minAvailable <= 0 {
+			minAvailable = masterReplicas + workerReplicas
+		}
+		if minAvailable <= 0 {
+			return nil, fmt.Errorf("minAvailable must be greater than 0")
+		}
+	} else {
+		masterReplicas = 0
+		workerReplicas = req.Replicas
+		if minAvailable <= 0 {
+			minAvailable = 1
+		}
+	}
 	image := strings.TrimSpace(req.Image)
 	if image == "" {
 		return nil, fmt.Errorf("image is required")
@@ -353,52 +381,41 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 		limits[extraName] = extraValue
 	}
 
-	workerSpec := map[string]interface{}{
-		"replicas": req.Replicas,
-		"name":     "worker",
-		"policies": []interface{}{
-			map[string]interface{}{
-				"event":  "PodEvicted",
-				"action": "RestartJob",
+	buildTaskSpec := func(taskName string, replicas int64, includeCompletePolicy bool) map[string]interface{} {
+		container := map[string]interface{}{
+			"name":            taskName,
+			"image":           image,
+			"imagePullPolicy": "IfNotPresent",
+			"command":         []interface{}{"bash", "-c"},
+			"args":            []interface{}{command},
+			"env":             []interface{}{},
+			"volumeMounts":    volumeMounts,
+			"resources": map[string]interface{}{
+				"requests": requests,
+				"limits":   limits,
 			},
-		},
-		"template": map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"labels": map[string]interface{}{
-					"lepton.sensetime.com/submitter": submitter,
-					"lepton.sensetime.com/framework-type": frameworkType,
-					"ring-controller.atlas":          "ascend-910b",
+		}
+		if req.RequireIPCLock {
+			container["securityContext"] = map[string]interface{}{
+				"capabilities": map[string]interface{}{
+					"add": []interface{}{"IPC_LOCK"},
 				},
-			},
-			"spec": map[string]interface{}{
-				"containers": []interface{}{
-					map[string]interface{}{
-						"name":            "worker",
-						"image":           image,
-						"imagePullPolicy": "IfNotPresent",
-						"command":         []interface{}{"bash", "-c"},
-						"args":            []interface{}{command},
-						"env":             []interface{}{},
-						"volumeMounts":    volumeMounts,
-						"resources": map[string]interface{}{
-							"requests": requests,
-							"limits":   limits,
-						},
-					},
-				},
-				"restartPolicy": "Never",
-				"volumes": volumes,
-				"affinity": map[string]interface{}{
-					"nodeAffinity": map[string]interface{}{
-						"requiredDuringSchedulingIgnoredDuringExecution": map[string]interface{}{
-							"nodeSelectorTerms": []interface{}{
-								map[string]interface{}{
-									"matchExpressions": []interface{}{
-										map[string]interface{}{
-											"key":      "resource.compute.sensecore.cn/machine-type",
-											"operator": "In",
-											"values":   []interface{}{machineType},
-										},
+			}
+		}
+		spec := map[string]interface{}{
+			"containers": []interface{}{container},
+			"restartPolicy": "Never",
+			"volumes": volumes,
+			"affinity": map[string]interface{}{
+				"nodeAffinity": map[string]interface{}{
+					"requiredDuringSchedulingIgnoredDuringExecution": map[string]interface{}{
+						"nodeSelectorTerms": []interface{}{
+							map[string]interface{}{
+								"matchExpressions": []interface{}{
+									map[string]interface{}{
+										"key":      "resource.compute.sensecore.cn/machine-type",
+										"operator": "In",
+										"values":   []interface{}{machineType},
 									},
 								},
 							},
@@ -406,22 +423,47 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 					},
 				},
 			},
-		},
-	}
-	if req.UseDefaultNodeSelector {
-		workerSpec["template"].(map[string]interface{})["spec"].(map[string]interface{})["nodeSelector"] = map[string]interface{}{
-			"host-arch":        hostArch,
-			"accelerator-type": acceleratorType,
 		}
-	}
-
-	templateSpec := workerSpec["template"].(map[string]interface{})["spec"].(map[string]interface{})
-	if secretName := strings.TrimSpace(req.ImagePullSecret); secretName != "" {
-		templateSpec["imagePullSecrets"] = []interface{}{
-			map[string]interface{}{"name": secretName},
+		if req.UseDefaultNodeSelector {
+			spec["nodeSelector"] = map[string]interface{}{
+				"host-arch":        hostArch,
+				"accelerator-type": acceleratorType,
+			}
 		}
-	} else {
-		templateSpec["imagePullSecrets"] = nil
+		if secretName := strings.TrimSpace(req.ImagePullSecret); secretName != "" {
+			spec["imagePullSecrets"] = []interface{}{
+				map[string]interface{}{"name": secretName},
+			}
+		} else {
+			spec["imagePullSecrets"] = nil
+		}
+		policies := []interface{}{
+			map[string]interface{}{
+				"event":  "PodEvicted",
+				"action": "RestartJob",
+			},
+		}
+		if includeCompletePolicy {
+			policies = append(policies, map[string]interface{}{
+				"event":  "TaskCompleted",
+				"action": "CompleteJob",
+			})
+		}
+		return map[string]interface{}{
+			"replicas": replicas,
+			"name":     taskName,
+			"policies": policies,
+			"template": map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"labels": map[string]interface{}{
+						"lepton.sensetime.com/submitter":      submitter,
+						"lepton.sensetime.com/framework-type": frameworkType,
+						"ring-controller.atlas":               "ascend-910b",
+					},
+				},
+				"spec": spec,
+			},
+		}
 	}
 
 	topPolicies := []interface{}{
@@ -433,20 +475,29 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 	plugins := map[string]interface{}{
 		"svc": []interface{}{},
 	}
-	tasks := []interface{}{workerSpec}
-	if frameworkType == "MPI" {
-		workerSpec["name"] = "master"
-		workerSpec["policies"] = []interface{}{
-			map[string]interface{}{
-				"event":  "PodEvicted",
-				"action": "RestartJob",
-			},
-			map[string]interface{}{
-				"event":  "TaskCompleted",
-				"action": "CompleteJob",
-			},
+	tasks := make([]interface{}, 0, 2)
+	if isMultiNode {
+		tasks = append(tasks, buildTaskSpec("master", masterReplicas, frameworkType == "MPI"))
+		if workerReplicas > 0 {
+			tasks = append(tasks, buildTaskSpec("worker", workerReplicas, false))
 		}
+	} else {
+		taskName := "worker"
+		if frameworkType == "MPI" {
+			taskName = "master"
+		}
+		tasks = append(tasks, buildTaskSpec(taskName, workerReplicas, frameworkType == "MPI"))
+	}
+	if frameworkType == "MPI" {
 		plugins["ssh"] = []interface{}{}
+		if isMultiNode {
+			plugins["mpi"] = []interface{}{
+				"--master=master",
+				"--worker=worker",
+				"--port=22",
+			}
+			plugins["hcclrank"] = []interface{}{}
+		}
 	} else {
 		plugins["pytorch"] = []interface{}{
 			"--master=master",
@@ -477,7 +528,7 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 				"annotations": metadataAnnotations,
 			},
 			"spec": map[string]interface{}{
-				"minAvailable": 1,
+				"minAvailable": minAvailable,
 				"plugins":      plugins,
 				"maxRetry": 1,
 				"tasks":    tasks,
