@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
@@ -51,78 +52,78 @@ type JobService struct {
 }
 
 type jobIdentity struct {
-	Name         string
-	Namespace    string
-	UID          string
-	Submitter    string
-	PodGroupName string
-	VClusterName string
+	Name          string
+	Namespace     string
+	UID           string
+	Submitter     string
+	PodGroupName  string
+	VClusterName  string
 	HostNamespace string
 }
 
 type JobGetResult struct {
-	Name          string
-	Namespace     string
-	UID           string
-	VClusterName  string
-	Submitter     string
-	PodGroupName  string
-	ImagePullSecrets []string
+	Name                   string
+	Namespace              string
+	UID                    string
+	VClusterName           string
+	Submitter              string
+	PodGroupName           string
+	ImagePullSecrets       []string
 	PersistentVolumeClaims []VolumeClaimRef
-	Pods          []JobPodItem
-	Nodes         []string
-	InspectPod    string
-	RecentEvents  []EventItem
-	RecentLogLines []string
-	Timings       JobGetTimings
+	Pods                   []JobPodItem
+	Nodes                  []string
+	InspectPod             string
+	RecentEvents           []EventItem
+	RecentLogLines         []string
+	Timings                JobGetTimings
 }
 
 type JobCheckResult struct {
-	Name                string
-	Namespace           string
-	UID                 string
-	PodGroupName        string
-	Stage               string
-	Instruction         string
-	Pods                []JobPodCheckItem
-	PVCs                []PVCCheckItem
-	SecretChecks        []SecretCheckItem
-	PodEvidence         []CheckEvidenceItem
-	PodGroupEvidence    []CheckEvidenceItem
-	Diagnosis           []string
+	Name             string
+	Namespace        string
+	UID              string
+	PodGroupName     string
+	Stage            string
+	Instruction      string
+	Pods             []JobPodCheckItem
+	PVCs             []PVCCheckItem
+	SecretChecks     []SecretCheckItem
+	PodEvidence      []CheckEvidenceItem
+	PodGroupEvidence []CheckEvidenceItem
+	Diagnosis        []string
 }
 
 type JobCreateRequest struct {
-	Name                string
-	Namespace           string
-	Submitter           string
-	SPBlock             string
-	FrameworkType       string
-	MasterPort          string
-	Replicas            int64
-	MinAvailable        int64
-	MasterReplicas      int64
-	WorkerReplicas      int64
-	Image               string
-	Command             string
-	ImagePullSecret     string
-	CPU                 string
-	Memory              string
-	AcceleratorResource string
-	AcceleratorCount    string
-	ExtraResourceName   string
-	ExtraResourceValue  string
-	DataPVCName         string
-	AOSSPVCName         string
-	SHMSize             string
-	MachineType         string
-	HostArch            string
-	AcceleratorType     string
+	Name                   string
+	Namespace              string
+	Submitter              string
+	SPBlock                string
+	FrameworkType          string
+	MasterPort             string
+	Replicas               int64
+	MinAvailable           int64
+	MasterReplicas         int64
+	WorkerReplicas         int64
+	Image                  string
+	Command                string
+	ImagePullSecret        string
+	CPU                    string
+	Memory                 string
+	AcceleratorResource    string
+	AcceleratorCount       string
+	ExtraResourceName      string
+	ExtraResourceValue     string
+	DataPVCName            string
+	AOSSPVCName            string
+	SHMSize                string
+	MachineType            string
+	HostArch               string
+	AcceleratorType        string
 	UseDefaultNodeSelector bool
-	UsePCILinkVolume    bool
-	RequireIPCLock      bool
-	PriorityClass       string
-	Queue               string
+	UsePCILinkVolume       bool
+	RequireIPCLock         bool
+	PriorityClass          string
+	Queue                  string
 }
 
 type VolumeClaimRef struct {
@@ -165,17 +166,17 @@ type CheckEvidenceItem struct {
 }
 
 type JobGetTimings struct {
-	Locate       time.Duration
-	PlatformJob  time.Duration
-	PlatformPods time.Duration
+	Locate         time.Duration
+	PlatformJob    time.Duration
+	PlatformPods   time.Duration
 	PlatformEvents time.Duration
-	PlatformLogs time.Duration
-	KubeJob      time.Duration
-	KubePods     time.Duration
-	KubeEvents   time.Duration
-	KubeLogs     time.Duration
-	Format       time.Duration
-	Total        time.Duration
+	PlatformLogs   time.Duration
+	KubeJob        time.Duration
+	KubePods       time.Duration
+	KubeEvents     time.Duration
+	KubeLogs       time.Duration
+	Format         time.Duration
+	Total          time.Duration
 }
 
 type JobPodItem struct {
@@ -188,22 +189,22 @@ type JobPodItem struct {
 }
 
 type JobPodCheckItem struct {
-	Name      string
-	Phase     string
-	Ready     string
-	NodeName  string
-	Reason    string
+	Name     string
+	Phase    string
+	Ready    string
+	NodeName string
+	Reason   string
 }
 
 type PodGroupGetResult struct {
-	Name         string
-	Namespace    string
-	Status       string
-	MinMember    string
-	Queue        string
-	CreatedAt    string
+	Name           string
+	Namespace      string
+	Status         string
+	MinMember      string
+	Queue          string
+	CreatedAt      string
 	StatusMessages []string
-	RecentEvents []EventItem
+	RecentEvents   []EventItem
 }
 
 type EventItem struct {
@@ -403,9 +404,9 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 			}
 		}
 		spec := map[string]interface{}{
-			"containers": []interface{}{container},
+			"containers":    []interface{}{container},
 			"restartPolicy": "Never",
-			"volumes": volumes,
+			"volumes":       volumes,
 			"affinity": map[string]interface{}{
 				"nodeAffinity": map[string]interface{}{
 					"requiredDuringSchedulingIgnoredDuringExecution": map[string]interface{}{
@@ -528,10 +529,10 @@ func (s *JobService) BuildJobManifest(req JobCreateRequest) (*unstructured.Unstr
 				"annotations": metadataAnnotations,
 			},
 			"spec": map[string]interface{}{
-				"minAvailable": minAvailable,
-				"plugins":      plugins,
-				"maxRetry": 1,
-				"tasks":    tasks,
+				"minAvailable":      minAvailable,
+				"plugins":           plugins,
+				"maxRetry":          1,
+				"tasks":             tasks,
 				"priorityClassName": priorityClass,
 				"queue":             queue,
 				"schedulerName":     "volcano",
@@ -640,23 +641,23 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 	imagePullSecrets = s.resolveImagePullSecretsFromKube(ctx, firstNonEmpty(identity.HostNamespace, identity.Namespace), imagePullSecrets)
 
 	return &JobGetResult{
-		Name:           identity.Name,
-		Namespace:      identity.Namespace,
-		UID:            identity.UID,
-		VClusterName:   dashIfEmpty(identity.VClusterName),
-		Submitter:      identity.Submitter,
-		PodGroupName:   dashIfEmpty(identity.PodGroupName),
-		ImagePullSecrets: imagePullSecrets,
+		Name:                   identity.Name,
+		Namespace:              identity.Namespace,
+		UID:                    identity.UID,
+		VClusterName:           dashIfEmpty(identity.VClusterName),
+		Submitter:              identity.Submitter,
+		PodGroupName:           dashIfEmpty(identity.PodGroupName),
+		ImagePullSecrets:       imagePullSecrets,
 		PersistentVolumeClaims: pvcRefs,
-		Pods:           resultPods,
-		Nodes:          nodes,
-		InspectPod:     inspectPodName,
-		RecentLogLines: recentLogLines,
+		Pods:                   resultPods,
+		Nodes:                  nodes,
+		InspectPod:             inspectPodName,
+		RecentLogLines:         recentLogLines,
 		Timings: JobGetTimings{
-			Locate:     locateDuration,
-			KubeLogs:   kubeLogsDuration,
-			Format:     formatDuration,
-			Total:      time.Since(startedAt),
+			Locate:   locateDuration,
+			KubeLogs: kubeLogsDuration,
+			Format:   formatDuration,
+			Total:    time.Since(startedAt),
 		},
 	}, nil
 }
@@ -780,7 +781,7 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 	stage := "running"
 	missingPVCs := 0
 	for _, pvc := range failedPVCChecks {
-		if pvc.Message == "pvc 不存在于当前分区" {
+		if pvc.Message == "PVC 在当前集群不存在" {
 			missingPVCs++
 		}
 	}
@@ -799,7 +800,7 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 	} else if len(pods) == 0 || assignedPodCount == 0 {
 		stage = "scheduling"
 		if missingPVCs > 0 {
-			diagnosis = append(diagnosis, "存在 PVC 不在当前分区，任务因此无法继续调度。")
+			diagnosis = append(diagnosis, "存在 PVC 在当前集群不存在，任务因此无法继续调度。")
 		} else if pendingPVCs > 0 {
 			diagnosis = append(diagnosis, "PVC 仍处于 Pending，当前大概率是 PVC 的 AKSK 错误。")
 		} else {
@@ -1033,25 +1034,25 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 	imagePullSecrets = s.resolveImagePullSecrets(ctx, identity, imagePullSecrets)
 
 	return &JobGetResult{
-		Name:           identity.Name,
-		Namespace:      identity.Namespace,
-		UID:            identity.UID,
-		VClusterName:   dashIfEmpty(identity.VClusterName),
-		Submitter:      identity.Submitter,
-		PodGroupName:   dashIfEmpty(identity.PodGroupName),
-		ImagePullSecrets: imagePullSecrets,
+		Name:                   identity.Name,
+		Namespace:              identity.Namespace,
+		UID:                    identity.UID,
+		VClusterName:           dashIfEmpty(identity.VClusterName),
+		Submitter:              identity.Submitter,
+		PodGroupName:           dashIfEmpty(identity.PodGroupName),
+		ImagePullSecrets:       imagePullSecrets,
 		PersistentVolumeClaims: pvcRefs,
-		Pods:           resultPods,
-		Nodes:          nodes,
-		InspectPod:     inspectPodName,
-		RecentLogLines: recentLogLines,
+		Pods:                   resultPods,
+		Nodes:                  nodes,
+		InspectPod:             inspectPodName,
+		RecentLogLines:         recentLogLines,
 		Timings: JobGetTimings{
-			Locate:         locateDuration,
-			PlatformJob:    platformJobDuration,
-			PlatformPods:   platformPodsDuration,
-			PlatformLogs:   platformLogsDuration,
-			Format:         formatDuration,
-			Total:          time.Since(startedAt),
+			Locate:       locateDuration,
+			PlatformJob:  platformJobDuration,
+			PlatformPods: platformPodsDuration,
+			PlatformLogs: platformLogsDuration,
+			Format:       formatDuration,
+			Total:        time.Since(startedAt),
 		},
 	}, nil
 }
@@ -1954,12 +1955,12 @@ func parseOwnerReferenceAnnotation(raw string) (string, string, string) {
 
 func jobIdentityFromPod(pod corev1.Pod) *jobIdentity {
 	return &jobIdentity{
-		Name:         deriveJobName(pod),
-		Namespace:    deriveLogicalNamespace(pod),
-		UID:          deriveJobUID(pod),
-		Submitter:    firstNonEmpty(pod.Labels["lepton.sensetime.com/submitter"], pod.Annotations["lepton.sensetime.com/submitter"], "-"),
-		PodGroupName: firstNonEmpty(pod.Annotations["scheduling.k8s.io/group-name"], pod.Labels["scheduling.k8s.io/group-name"]),
-		VClusterName: firstNonEmpty(pod.Annotations["vcluster.loft.sh/vcluster-name"], pod.Labels["vcluster.loft.sh/vcluster-name"]),
+		Name:          deriveJobName(pod),
+		Namespace:     deriveLogicalNamespace(pod),
+		UID:           deriveJobUID(pod),
+		Submitter:     firstNonEmpty(pod.Labels["lepton.sensetime.com/submitter"], pod.Annotations["lepton.sensetime.com/submitter"], "-"),
+		PodGroupName:  firstNonEmpty(pod.Annotations["scheduling.k8s.io/group-name"], pod.Labels["scheduling.k8s.io/group-name"]),
+		VClusterName:  firstNonEmpty(pod.Annotations["vcluster.loft.sh/vcluster-name"], pod.Labels["vcluster.loft.sh/vcluster-name"]),
 		HostNamespace: pod.Namespace,
 	}
 }
@@ -2712,9 +2713,12 @@ func classifyPVCErrorMessage(err error) string {
 	if err == nil {
 		return "-"
 	}
+	if apierrors.IsNotFound(err) {
+		return "PVC 在当前集群不存在"
+	}
 	message := strings.TrimSpace(err.Error())
 	if strings.Contains(message, "persistentvolumeclaims") && strings.Contains(message, "not found") {
-		return "pvc 不存在于当前分区"
+		return "PVC 在当前集群不存在"
 	}
 	return message
 }

@@ -1012,72 +1012,198 @@ func newMultiTemplateJobCreateCmd(cfg jobCreateTemplateConfig) *cobra.Command {
 
 func resolveSingleTemplateJobCreateInputs(reader *bufio.Reader, cmd *cobra.Command, cfg jobCreateTemplateConfig, flagName string, flagNamespace string, flagFramework string, flagImage string, flagCommand string, flagImagePullSecret string, flagCPU string, flagMemory string, flagAccelerators string, flagDataPVC string, flagAOSSPVC string, flagSHMSize string, flagPriorityClass string) (string, string, string, string, string, string, int, int, int, string, string, string, string, bool, error) {
 	if strings.TrimSpace(flagName) == "" && strings.TrimSpace(flagImage) == "" && strings.TrimSpace(flagCommand) == "" && strings.TrimSpace(flagCPU) == "" && strings.TrimSpace(flagMemory) == "" && strings.TrimSpace(flagAccelerators) == "" {
-		jobName, err := promptPVCValue(reader, cmd, "1. 请输入 job 名字: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+		fmt.Fprintln(cmd.OutOrStdout(), "提示: 输入 :b 可返回上一步。")
+		var (
+			jobName               string
+			namespace             = "default"
+			frameworkType         = "PyTorch"
+			image                 string
+			command               string
+			imagePullSecret       string
+			cpuValue              int
+			memoryValue           int
+			acceleratorCountValue int
+			dataPVCName           string
+			aossPVCName           string
+			shmSize               = "64Gi"
+			priorityClass         = cfg.DefaultPriorityClass
+		)
+		step := 1
+		for {
+			switch step {
+			case 1:
+				value, back, err := promptCreateValue(reader, cmd, "1. 请输入 job 名字: ", jobName)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					fmt.Fprintln(cmd.OutOrStdout(), "已经是第一步了。")
+					continue
+				}
+				jobName = strings.TrimSpace(value)
+				step++
+			case 2:
+				value, back, err := promptCreateValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", namespace)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				namespace = strings.TrimSpace(value)
+				step++
+			case 3:
+				value, back, err := promptFrameworkValueWithBack(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", frameworkType)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				frameworkType = value
+				step++
+			case 4:
+				value, back, err := promptCreateValue(reader, cmd, "4. 请输入完整镜像地址(例如 registry2.d.pjlab.org.cn/lepton-trainingjob/a2-cann:8.3.rc2-910b-ubuntu22.04-py3.11): ", image)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				image = strings.TrimSpace(value)
+				step++
+			case 5:
+				value, back, err := promptCreateValue(reader, cmd, "5. 请输入启动命令 command: ", command)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				command = value
+				step++
+			case 6:
+				defaultSecret := "-"
+				if strings.TrimSpace(imagePullSecret) != "" {
+					defaultSecret = imagePullSecret
+				}
+				value, back, err := promptCreateValue(reader, cmd, "6. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", defaultSecret)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					imagePullSecret = ""
+				} else {
+					imagePullSecret = strings.TrimSpace(value)
+				}
+				step++
+			case 7:
+				value, back, err := promptIntInRangeWithBack(reader, cmd, fmt.Sprintf("7. 请输入 CPU(不高于 %d): ", cfg.MaxCPU), 1, cfg.MaxCPU, cpuValue)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				cpuValue = value
+				step++
+			case 8:
+				value, back, err := promptIntInRangeWithBack(reader, cmd, fmt.Sprintf("8. 请输入内存 MEMORY，默认单位 Gi(不高于 %d): ", cfg.MaxMemoryGi), 1, cfg.MaxMemoryGi, memoryValue)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				memoryValue = value
+				step++
+			case 9:
+				acceleratorPrompt := fmt.Sprintf("9. 请输入加速卡数量(范围 %d 到 %d): ", cfg.MinAccelerators, cfg.MaxAccelerators)
+				if cfg.AcceleratorsEvenOnly {
+					acceleratorPrompt = fmt.Sprintf("9. 请输入加速卡数量(仅允许偶数，范围 %d 到 %d): ", cfg.MinAccelerators, cfg.MaxAccelerators)
+				}
+				value, back, err := promptAcceleratorCountWithBack(reader, cmd, acceleratorPrompt, cfg.MinAccelerators, cfg.MaxAccelerators, cfg.AcceleratorsEvenOnly, acceleratorCountValue)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				acceleratorCountValue = value
+				step++
+			case 10:
+				defaultPVC := "-"
+				if strings.TrimSpace(dataPVCName) != "" {
+					defaultPVC = dataPVCName
+				}
+				value, back, err := promptCreateValue(reader, cmd, "10. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", defaultPVC)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					dataPVCName = ""
+				} else {
+					dataPVCName = strings.TrimSpace(value)
+				}
+				step++
+			case 11:
+				defaultPVC := "-"
+				if strings.TrimSpace(aossPVCName) != "" {
+					defaultPVC = aossPVCName
+				}
+				value, back, err := promptCreateValue(reader, cmd, "11. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", defaultPVC)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					aossPVCName = ""
+				} else {
+					aossPVCName = strings.TrimSpace(value)
+				}
+				step++
+			case 12:
+				value, back, err := promptCreateValue(reader, cmd, "12. 请输入 shm 大小(默认 64Gi): ", shmSize)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				shmSize = strings.TrimSpace(value)
+				step++
+			case 13:
+				value, back, err := promptCreateValue(reader, cmd, fmt.Sprintf("13. 请输入 priorityClass(默认 %s): ", cfg.DefaultPriorityClass), priorityClass)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				priorityClass = strings.TrimSpace(value)
+				return jobName, namespace, frameworkType, image, command, imagePullSecret, cpuValue, memoryValue, acceleratorCountValue, dataPVCName, aossPVCName, shmSize, priorityClass, true, nil
+			}
 		}
-		namespace, err := promptPVCValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", "default")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		frameworkType, err := promptFrameworkValue(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", "PyTorch")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		image, err := promptPVCValue(reader, cmd, "4. 请输入完整镜像地址(例如 registry2.d.pjlab.org.cn/lepton-trainingjob/a2-cann:8.3.rc2-910b-ubuntu22.04-py3.11): ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		command, err := promptPVCValue(reader, cmd, "5. 请输入启动命令 command: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		imagePullSecret, err := promptPVCValue(reader, cmd, "6. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(imagePullSecret) == "-" {
-			imagePullSecret = ""
-		}
-		cpuValue, err := promptIntInRange(reader, cmd, fmt.Sprintf("7. 请输入 CPU(不高于 %d): ", cfg.MaxCPU), 1, cfg.MaxCPU)
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		memoryValue, err := promptIntInRange(reader, cmd, fmt.Sprintf("8. 请输入内存 MEMORY，默认单位 Gi(不高于 %d): ", cfg.MaxMemoryGi), 1, cfg.MaxMemoryGi)
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		acceleratorPrompt := fmt.Sprintf("9. 请输入加速卡数量(范围 %d 到 %d): ", cfg.MinAccelerators, cfg.MaxAccelerators)
-		if cfg.AcceleratorsEvenOnly {
-			acceleratorPrompt = fmt.Sprintf("9. 请输入加速卡数量(仅允许偶数，范围 %d 到 %d): ", cfg.MinAccelerators, cfg.MaxAccelerators)
-		}
-		acceleratorCountValue, err := promptAcceleratorCount(reader, cmd, acceleratorPrompt, cfg.MinAccelerators, cfg.MaxAccelerators, cfg.AcceleratorsEvenOnly)
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		dataPVCName, err := promptPVCValue(reader, cmd, "10. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(dataPVCName) == "-" {
-			dataPVCName = ""
-		}
-		aossPVCName, err := promptPVCValue(reader, cmd, "11. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(aossPVCName) == "-" {
-			aossPVCName = ""
-		}
-		shmSize, err := promptPVCValue(reader, cmd, "12. 请输入 shm 大小(默认 64Gi): ", "64Gi")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		priorityClass, err := promptPVCValue(reader, cmd, fmt.Sprintf("13. 请输入 priorityClass(默认 %s): ", cfg.DefaultPriorityClass), cfg.DefaultPriorityClass)
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, 0, "", "", "", "", true, err
-		}
-		return strings.TrimSpace(jobName), strings.TrimSpace(namespace), frameworkType, strings.TrimSpace(image), command, strings.TrimSpace(imagePullSecret), cpuValue, memoryValue, acceleratorCountValue, strings.TrimSpace(dataPVCName), strings.TrimSpace(aossPVCName), strings.TrimSpace(shmSize), strings.TrimSpace(priorityClass), true, nil
 	}
 
 	missing := make([]string, 0, 6)
@@ -1125,60 +1251,170 @@ func resolveSingleTemplateJobCreateInputs(reader *bufio.Reader, cmd *cobra.Comma
 
 func resolveMultiTemplateJobCreateInputs(reader *bufio.Reader, cmd *cobra.Command, cfg jobCreateTemplateConfig, flagName string, flagNamespace string, flagFramework string, flagImage string, flagCommand string, flagImagePullSecret string, flagNodes string, flagDataPVC string, flagAOSSPVC string, flagSHMSize string, flagPriorityClass string) (string, string, string, string, string, string, int, string, string, string, string, bool, error) {
 	if strings.TrimSpace(flagName) == "" && strings.TrimSpace(flagImage) == "" && strings.TrimSpace(flagCommand) == "" && strings.TrimSpace(flagNodes) == "" {
-		jobName, err := promptPVCValue(reader, cmd, "1. 请输入 job 名字: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
+		fmt.Fprintln(cmd.OutOrStdout(), "提示: 输入 :b 可返回上一步。")
+		var (
+			jobName         string
+			namespace       = "default"
+			frameworkType   = "PyTorch"
+			totalNodes      int
+			image           string
+			command         string
+			imagePullSecret string
+			dataPVCName     string
+			aossPVCName     string
+			shmSize         = "64Gi"
+			priorityClass   = cfg.DefaultPriorityClass
+		)
+		step := 1
+		for {
+			switch step {
+			case 1:
+				value, back, err := promptCreateValue(reader, cmd, "1. 请输入 job 名字: ", jobName)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					fmt.Fprintln(cmd.OutOrStdout(), "已经是第一步了。")
+					continue
+				}
+				jobName = strings.TrimSpace(value)
+				step++
+			case 2:
+				value, back, err := promptCreateValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", namespace)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				namespace = strings.TrimSpace(value)
+				step++
+			case 3:
+				value, back, err := promptFrameworkValueWithBack(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", frameworkType)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				frameworkType = value
+				step++
+			case 4:
+				value, back, err := promptIntInRangeWithBack(reader, cmd, "4. 请输入总机器数(至少 2): ", 2, 64, totalNodes)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				totalNodes = value
+				step++
+			case 5:
+				value, back, err := promptCreateValue(reader, cmd, "5. 请输入完整镜像地址: ", image)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				image = strings.TrimSpace(value)
+				step++
+			case 6:
+				value, back, err := promptCreateValue(reader, cmd, "6. 请输入启动命令 command: ", command)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				command = value
+				step++
+			case 7:
+				defaultSecret := "-"
+				if strings.TrimSpace(imagePullSecret) != "" {
+					defaultSecret = imagePullSecret
+				}
+				value, back, err := promptCreateValue(reader, cmd, "7. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", defaultSecret)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					imagePullSecret = ""
+				} else {
+					imagePullSecret = strings.TrimSpace(value)
+				}
+				step++
+			case 8:
+				defaultPVC := "-"
+				if strings.TrimSpace(dataPVCName) != "" {
+					defaultPVC = dataPVCName
+				}
+				value, back, err := promptCreateValue(reader, cmd, "8. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", defaultPVC)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					dataPVCName = ""
+				} else {
+					dataPVCName = strings.TrimSpace(value)
+				}
+				step++
+			case 9:
+				defaultPVC := "-"
+				if strings.TrimSpace(aossPVCName) != "" {
+					defaultPVC = aossPVCName
+				}
+				value, back, err := promptCreateValue(reader, cmd, "9. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", defaultPVC)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					aossPVCName = ""
+				} else {
+					aossPVCName = strings.TrimSpace(value)
+				}
+				step++
+			case 10:
+				value, back, err := promptCreateValue(reader, cmd, "10. 请输入 shm 大小(默认 64Gi): ", shmSize)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				shmSize = strings.TrimSpace(value)
+				step++
+			case 11:
+				value, back, err := promptCreateValue(reader, cmd, fmt.Sprintf("11. 请输入 priorityClass(默认 %s): ", cfg.DefaultPriorityClass), priorityClass)
+				if err != nil {
+					return "", "", "", "", "", "", 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				priorityClass = strings.TrimSpace(value)
+				return jobName, namespace, frameworkType, image, command, imagePullSecret, totalNodes, dataPVCName, aossPVCName, shmSize, priorityClass, true, nil
+			}
 		}
-		namespace, err := promptPVCValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", "default")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		frameworkType, err := promptFrameworkValue(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", "PyTorch")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		totalNodes, err := promptIntInRange(reader, cmd, "4. 请输入总机器数(至少 2): ", 2, 64)
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		image, err := promptPVCValue(reader, cmd, "5. 请输入完整镜像地址: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		command, err := promptPVCValue(reader, cmd, "6. 请输入启动命令 command: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		imagePullSecret, err := promptPVCValue(reader, cmd, "7. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(imagePullSecret) == "-" {
-			imagePullSecret = ""
-		}
-		dataPVCName, err := promptPVCValue(reader, cmd, "8. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(dataPVCName) == "-" {
-			dataPVCName = ""
-		}
-		aossPVCName, err := promptPVCValue(reader, cmd, "9. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(aossPVCName) == "-" {
-			aossPVCName = ""
-		}
-		shmSize, err := promptPVCValue(reader, cmd, "10. 请输入 shm 大小(默认 64Gi): ", "64Gi")
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		priorityClass, err := promptPVCValue(reader, cmd, fmt.Sprintf("11. 请输入 priorityClass(默认 %s): ", cfg.DefaultPriorityClass), cfg.DefaultPriorityClass)
-		if err != nil {
-			return "", "", "", "", "", "", 0, "", "", "", "", true, err
-		}
-		return strings.TrimSpace(jobName), strings.TrimSpace(namespace), frameworkType, strings.TrimSpace(image), command, strings.TrimSpace(imagePullSecret), totalNodes, strings.TrimSpace(dataPVCName), strings.TrimSpace(aossPVCName), strings.TrimSpace(shmSize), strings.TrimSpace(priorityClass), true, nil
 	}
 
 	missing := make([]string, 0, 4)
@@ -1210,64 +1446,185 @@ func resolveMultiTemplateJobCreateInputs(reader *bufio.Reader, cmd *cobra.Comman
 
 func resolve910CMultiJobCreateInputs(reader *bufio.Reader, cmd *cobra.Command, flagName string, flagNamespace string, flagFramework string, flagImage string, flagCommand string, flagImagePullSecret string, flagNodes string, flagLogicalSupernodes string, flagDataPVC string, flagAOSSPVC string, flagSHMSize string, flagPriorityClass string) (string, string, string, string, string, string, int, int, string, string, string, string, bool, error) {
 	if strings.TrimSpace(flagName) == "" && strings.TrimSpace(flagImage) == "" && strings.TrimSpace(flagCommand) == "" && strings.TrimSpace(flagNodes) == "" {
-		jobName, err := promptPVCValue(reader, cmd, "1. 请输入 job 名字: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+		fmt.Fprintln(cmd.OutOrStdout(), "提示: 输入 :b 可返回上一步。")
+		var (
+			jobName           string
+			namespace         = "default"
+			frameworkType     = "PyTorch"
+			totalNodes        int
+			logicalSupernodes = 1
+			image             string
+			command           string
+			imagePullSecret   string
+			dataPVCName       string
+			aossPVCName       string
+			shmSize           = "64Gi"
+			priorityClass     = "normal"
+		)
+		step := 1
+		for {
+			switch step {
+			case 1:
+				value, back, err := promptCreateValue(reader, cmd, "1. 请输入 job 名字: ", jobName)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					fmt.Fprintln(cmd.OutOrStdout(), "已经是第一步了。")
+					continue
+				}
+				jobName = strings.TrimSpace(value)
+				step++
+			case 2:
+				value, back, err := promptCreateValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", namespace)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				namespace = strings.TrimSpace(value)
+				step++
+			case 3:
+				value, back, err := promptFrameworkValueWithBack(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", frameworkType)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				frameworkType = value
+				step++
+			case 4:
+				value, back, err := promptIntInRangeWithBack(reader, cmd, "4. 请输入总机器数(至少 2): ", 2, 64, totalNodes)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				totalNodes = value
+				if logicalSupernodes > totalNodes {
+					logicalSupernodes = 1
+				}
+				step++
+			case 5:
+				value, back, err := prompt910CMultiLogicalSupernodesWithBack(reader, cmd, totalNodes, "5. 请输入逻辑超节点个数(默认 1，必须整除总机器数): ", logicalSupernodes)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				logicalSupernodes = value
+				step++
+			case 6:
+				value, back, err := promptCreateValue(reader, cmd, "6. 请输入完整镜像地址: ", image)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				image = strings.TrimSpace(value)
+				step++
+			case 7:
+				value, back, err := promptCreateValue(reader, cmd, "7. 请输入启动命令 command: ", command)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				command = value
+				step++
+			case 8:
+				defaultSecret := "-"
+				if strings.TrimSpace(imagePullSecret) != "" {
+					defaultSecret = imagePullSecret
+				}
+				value, back, err := promptCreateValue(reader, cmd, "8. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", defaultSecret)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					imagePullSecret = ""
+				} else {
+					imagePullSecret = strings.TrimSpace(value)
+				}
+				step++
+			case 9:
+				defaultPVC := "-"
+				if strings.TrimSpace(dataPVCName) != "" {
+					defaultPVC = dataPVCName
+				}
+				value, back, err := promptCreateValue(reader, cmd, "9. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", defaultPVC)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					dataPVCName = ""
+				} else {
+					dataPVCName = strings.TrimSpace(value)
+				}
+				step++
+			case 10:
+				defaultPVC := "-"
+				if strings.TrimSpace(aossPVCName) != "" {
+					defaultPVC = aossPVCName
+				}
+				value, back, err := promptCreateValue(reader, cmd, "10. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", defaultPVC)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if strings.TrimSpace(value) == "-" {
+					aossPVCName = ""
+				} else {
+					aossPVCName = strings.TrimSpace(value)
+				}
+				step++
+			case 11:
+				value, back, err := promptCreateValue(reader, cmd, "11. 请输入 shm 大小(默认 64Gi): ", shmSize)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				shmSize = strings.TrimSpace(value)
+				step++
+			case 12:
+				value, back, err := promptCreateValue(reader, cmd, "12. 请输入 priorityClass(默认 normal): ", priorityClass)
+				if err != nil {
+					return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				priorityClass = strings.TrimSpace(value)
+				return jobName, namespace, frameworkType, image, command, imagePullSecret, totalNodes, logicalSupernodes, dataPVCName, aossPVCName, shmSize, priorityClass, true, nil
+			}
 		}
-		namespace, err := promptPVCValue(reader, cmd, "2. 请输入 namespace(默认为 default): ", "default")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		frameworkType, err := promptFrameworkValue(reader, cmd, "3. 请输入 framework(默认 PyTorch，可选 PyTorch/MPI): ", "PyTorch")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		totalNodes, err := promptIntInRange(reader, cmd, "4. 请输入总机器数(至少 2): ", 2, 64)
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		logicalSupernodes, err := prompt910CMultiLogicalSupernodes(reader, cmd, totalNodes, "5. 请输入逻辑超节点个数(默认 1，必须整除总机器数): ", 1)
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		image, err := promptPVCValue(reader, cmd, "6. 请输入完整镜像地址: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		command, err := promptPVCValue(reader, cmd, "7. 请输入启动命令 command: ", "")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		imagePullSecret, err := promptPVCValue(reader, cmd, "8. 请输入 imagePullSecret(如果是非官方镜像需要填写，否则直接回车留空): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(imagePullSecret) == "-" {
-			imagePullSecret = ""
-		}
-		dataPVCName, err := promptPVCValue(reader, cmd, "9. 请输入文件存储对应的 PVC 名称(可留空，直接回车): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(dataPVCName) == "-" {
-			dataPVCName = ""
-		}
-		aossPVCName, err := promptPVCValue(reader, cmd, "10. 请输入对象存储对应的 PVC 名称(可留空，直接回车): ", "-")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		if strings.TrimSpace(aossPVCName) == "-" {
-			aossPVCName = ""
-		}
-		shmSize, err := promptPVCValue(reader, cmd, "11. 请输入 shm 大小(默认 64Gi): ", "64Gi")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		priorityClass, err := promptPVCValue(reader, cmd, "12. 请输入 priorityClass(默认 normal): ", "normal")
-		if err != nil {
-			return "", "", "", "", "", "", 0, 0, "", "", "", "", true, err
-		}
-		return strings.TrimSpace(jobName), strings.TrimSpace(namespace), frameworkType, strings.TrimSpace(image), command, strings.TrimSpace(imagePullSecret), totalNodes, logicalSupernodes, strings.TrimSpace(dataPVCName), strings.TrimSpace(aossPVCName), strings.TrimSpace(shmSize), strings.TrimSpace(priorityClass), true, nil
 	}
 
 	missing := make([]string, 0, 5)
@@ -1319,6 +1676,27 @@ func promptIntInRange(reader *bufio.Reader, cmd *cobra.Command, label string, mi
 	}
 }
 
+func promptIntInRangeWithBack(reader *bufio.Reader, cmd *cobra.Command, label string, min int, max int, defaultValue int) (int, bool, error) {
+	defaultText := ""
+	if defaultValue > 0 {
+		defaultText = strconv.Itoa(defaultValue)
+	}
+	for {
+		value, back, err := promptCreateValue(reader, cmd, label, defaultText)
+		if err != nil {
+			return 0, false, err
+		}
+		if back {
+			return 0, true, nil
+		}
+		number, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil && number >= min && number <= max {
+			return number, false, nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "请输入 %d 到 %d 之间的整数。\n", min, max)
+	}
+}
+
 func promptEvenIntInRange(reader *bufio.Reader, cmd *cobra.Command, label string, min int, max int) (int, error) {
 	for {
 		number, err := promptIntInRange(reader, cmd, label, min, max)
@@ -1337,6 +1715,22 @@ func promptAcceleratorCount(reader *bufio.Reader, cmd *cobra.Command, label stri
 		return promptEvenIntInRange(reader, cmd, label, min, max)
 	}
 	return promptIntInRange(reader, cmd, label, min, max)
+}
+
+func promptAcceleratorCountWithBack(reader *bufio.Reader, cmd *cobra.Command, label string, min int, max int, evenOnly bool, defaultValue int) (int, bool, error) {
+	for {
+		number, back, err := promptIntInRangeWithBack(reader, cmd, label, min, max, defaultValue)
+		if err != nil {
+			return 0, false, err
+		}
+		if back {
+			return 0, true, nil
+		}
+		if !evenOnly || number%2 == 0 {
+			return number, false, nil
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "请输入偶数。")
+	}
 }
 
 func parseIntInRange(value string, min int, max int) (int, error) {
@@ -1380,6 +1774,24 @@ func prompt910CMultiLogicalSupernodes(reader *bufio.Reader, cmd *cobra.Command, 
 	}
 }
 
+func prompt910CMultiLogicalSupernodesWithBack(reader *bufio.Reader, cmd *cobra.Command, totalNodes int, label string, defaultValue int) (int, bool, error) {
+	defaultText := strconv.Itoa(defaultValue)
+	for {
+		value, back, err := promptCreateValue(reader, cmd, label, defaultText)
+		if err != nil {
+			return 0, false, err
+		}
+		if back {
+			return 0, true, nil
+		}
+		number, err := parse910CMultiLogicalSupernodes(value, totalNodes)
+		if err == nil {
+			return number, false, nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "逻辑超节点个数必须是正整数，并且能整除总机器数 %d，这样逻辑超节点芯片数才会是 16 的倍数。\n", totalNodes)
+	}
+}
+
 func parse910CMultiLogicalSupernodes(value string, totalNodes int) (int, error) {
 	number, err := parseIntInRange(value, 1, totalNodes)
 	if err != nil {
@@ -1400,6 +1812,23 @@ func promptFrameworkValue(reader *bufio.Reader, cmd *cobra.Command, label string
 		normalized, err := parseFrameworkValue(value)
 		if err == nil {
 			return normalized, nil
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "framework 仅支持 PyTorch 或 MPI。")
+	}
+}
+
+func promptFrameworkValueWithBack(reader *bufio.Reader, cmd *cobra.Command, label string, defaultValue string) (string, bool, error) {
+	for {
+		value, back, err := promptCreateValue(reader, cmd, label, defaultValue)
+		if err != nil {
+			return "", false, err
+		}
+		if back {
+			return "", true, nil
+		}
+		normalized, err := parseFrameworkValue(value)
+		if err == nil {
+			return normalized, false, nil
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "framework 仅支持 PyTorch 或 MPI。")
 	}

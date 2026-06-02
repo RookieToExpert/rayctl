@@ -108,35 +108,88 @@ func newPVCCreateCmd() *cobra.Command {
 func resolvePVCCreateRequest(cmd *cobra.Command, flagName string, flagAFSUUID string, flagSecretName string, flagNamespace string, flagSize string) (service.PVCCreateRequest, bool, error) {
 	if strings.TrimSpace(flagName) == "" && strings.TrimSpace(flagAFSUUID) == "" && strings.TrimSpace(flagSecretName) == "" {
 		reader := bufio.NewReader(cmd.InOrStdin())
+		fmt.Fprintln(cmd.OutOrStdout(), "提示: 输入 :b 可返回上一步。")
 
-		pvcName, err := promptPVCValue(reader, cmd, "1. 请输入 pvc 名字: ", "")
-		if err != nil {
-			return service.PVCCreateRequest{}, true, err
+		var (
+			pvcName    string
+			afsUUID    string
+			secretName string
+			namespace  = "default"
+			size       = "1000Mi"
+		)
+		step := 1
+		for {
+			switch step {
+			case 1:
+				value, back, err := promptCreateValue(reader, cmd, "1. 请输入 pvc 名字: ", pvcName)
+				if err != nil {
+					return service.PVCCreateRequest{}, true, err
+				}
+				if back {
+					fmt.Fprintln(cmd.OutOrStdout(), "已经是第一步了。")
+					continue
+				}
+				pvcName = value
+				step++
+			case 2:
+				value, back, err := promptCreateValue(reader, cmd, "2. 请输入你 afs 的 uuid: ", afsUUID)
+				if err != nil {
+					return service.PVCCreateRequest{}, true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				afsUUID = value
+				step++
+			case 3:
+				value, back, err := promptCreateValue(reader, cmd, "3. 请输入你 afs 对应的 secret 名字: ", secretName)
+				if err != nil {
+					return service.PVCCreateRequest{}, true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				secretName = value
+				step++
+			case 4:
+				value, back, err := promptCreateValue(reader, cmd, "4. 请输入你需要创建到的命名空间(默认为 default): ", namespace)
+				if err != nil {
+					return service.PVCCreateRequest{}, true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				namespace = value
+				step++
+			case 5:
+				value, back, err := promptCreateValue(reader, cmd, "5. 请输入你需要的大小(默认 1000Mi): ", size)
+				if err != nil {
+					return service.PVCCreateRequest{}, true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				size = value
+				step++
+			case 6:
+				confirmed, back, err := promptCreateValue(reader, cmd, "是否确认创建到当前集群? (y/n): ", "")
+				if err != nil {
+					return service.PVCCreateRequest{}, true, err
+				}
+				if back {
+					step--
+					continue
+				}
+				if !isYes(confirmed) {
+					return service.PVCCreateRequest{}, true, fmt.Errorf("已取消创建，请确认 kubeconfig 后重试")
+				}
+				return normalizedPVCCreateRequest(pvcName, afsUUID, secretName, namespace, size), true, nil
+			}
 		}
-		afsUUID, err := promptPVCValue(reader, cmd, "2. 请输入你 afs 的 uuid: ", "")
-		if err != nil {
-			return service.PVCCreateRequest{}, true, err
-		}
-		secretName, err := promptPVCValue(reader, cmd, "3. 请输入你 afs 对应的 secret 名字: ", "")
-		if err != nil {
-			return service.PVCCreateRequest{}, true, err
-		}
-		namespace, err := promptPVCValue(reader, cmd, "4. 请输入你需要创建到的命名空间(默认为 default): ", "default")
-		if err != nil {
-			return service.PVCCreateRequest{}, true, err
-		}
-		size, err := promptPVCValue(reader, cmd, "5. 请输入你需要的大小(默认 1000Mi): ", "1000Mi")
-		if err != nil {
-			return service.PVCCreateRequest{}, true, err
-		}
-		confirmed, err := promptPVCValue(reader, cmd, "是否确认创建到当前集群? (y/n): ", "")
-		if err != nil {
-			return service.PVCCreateRequest{}, true, err
-		}
-		if !isYes(confirmed) {
-			return service.PVCCreateRequest{}, true, fmt.Errorf("已取消创建，请确认 kubeconfig 后重试")
-		}
-		return normalizedPVCCreateRequest(pvcName, afsUUID, secretName, namespace, size), true, nil
 	}
 
 	missing := make([]string, 0, 3)
@@ -188,9 +241,39 @@ func promptPVCValue(reader *bufio.Reader, cmd *cobra.Command, label string, defa
 	}
 }
 
+func promptCreateValue(reader *bufio.Reader, cmd *cobra.Command, label string, defaultValue string) (string, bool, error) {
+	for {
+		fmt.Fprint(cmd.OutOrStdout(), label)
+		value, err := reader.ReadString('\n')
+		if err != nil {
+			return "", false, err
+		}
+		value = strings.TrimSpace(value)
+		if isBack(value) {
+			return "", true, nil
+		}
+		if value == "" && defaultValue != "" {
+			return defaultValue, false, nil
+		}
+		if value != "" {
+			return value, false, nil
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "该项不能为空，请重新输入。")
+	}
+}
+
 func isYes(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBack(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ":back", ":b":
 		return true
 	default:
 		return false
