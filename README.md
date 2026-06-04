@@ -9,7 +9,6 @@
 ```bash
 rayctl node get
 rayctl node get ecp
-rayctl node get ecs --labels="accelerator=huawei-ascend"
 rayctl node get "accelerator=huawei-ascend"
 rayctl node cordon worker-01
 rayctl node uncordon worker-01

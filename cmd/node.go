@@ -37,20 +37,15 @@ func newNodeCmd() *cobra.Command {
 
 // newNodeGetCmd 创建 "get" 子命令，用于根据 profile 或 label selector 获取节点列表。
 func newNodeGetCmd() *cobra.Command {
-	// labels 变量用于接收命令行传递的 --labels 参数值
-	var labels string
 	var longOutput bool
 	var showAll bool
-	var prod string
-	var role string
-	var repairOnly bool
 
 	// 定义 get 命令的结构和行为
 	cmd := &cobra.Command{
 		Use:   "get [profile-or-selector]",
 		Short: "通过 profile 或 label selector 列出节点",
 		// 限制最多只能接受 1 个位置参数 (作为 target)
-		Args:  cobra.MaximumNArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 1. 初始化 Kubernetes 客户端，使用全局的 kubeconfig 变量
 			// kube.NewClientset 定义于 internal/kube/client.go
@@ -64,37 +59,13 @@ func newNodeGetCmd() *cobra.Command {
 				target = args[0]
 			}
 
-			effectiveLabels := labels
-			if prod != "" {
-				effectiveLabels = appendLabelSelector(effectiveLabels, "node-role.compute.sensecore.cn/prod="+prod)
-			}
 			// 3. 实例化 NodeService 并调用 List 方法获取符合条件的节点及最终使用的选择器
 			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
 			// nodeService.List 定义于 internal/service/node_service.go
-			nodes, resolvedSelector, err := nodeService.List(context.Background(), target, effectiveLabels)
+			nodes, resolvedSelector, err := nodeService.List(context.Background(), target, "")
 			if err != nil {
 				return err
-			}
-
-			if repairOnly {
-				filtered := make([]service.NodeListItem, 0, len(nodes))
-				for _, node := range nodes {
-					if node.Repair {
-						filtered = append(filtered, node)
-					}
-				}
-				nodes = filtered
-			}
-
-			if role != "" {
-				filtered := make([]service.NodeListItem, 0, len(nodes))
-				for _, node := range nodes {
-					if strings.Contains(strings.ToLower(node.ProdRole), strings.ToLower(role)) {
-						filtered = append(filtered, node)
-					}
-				}
-				nodes = filtered
 			}
 
 			if vcClient, ok := platform.NewVirtualClusterClientFromEnv(); ok {
@@ -191,28 +162,10 @@ func newNodeGetCmd() *cobra.Command {
 		},
 	}
 
-	// 为 get 命令绑定 --labels 标志，允许用户在命令行中追加额外的标签过滤条件
-	cmd.Flags().StringVar(&labels, "labels", "", "附加到 profile 选择器上的额外标签选择器")
-	cmd.Flags().StringVar(&prod, "prod", "", "Filter by node-role.compute.sensecore.cn/prod, for example ecp-private or ecs")
-	cmd.Flags().StringVar(&role, "role", "", "Filter by displayed role, including node-role.sensecore.cn/* fallback roles")
-	cmd.Flags().BoolVar(&repairOnly, "repair", false, "Show only cordoned nodes")
 	cmd.Flags().BoolVarP(&showAll, "all", "A", false, "Show all nodes")
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail columns such as tenant")
 
 	return cmd
-}
-
-func appendLabelSelector(base string, clause string) string {
-	base = strings.TrimSpace(base)
-	clause = strings.TrimSpace(clause)
-	switch {
-	case base == "":
-		return clause
-	case clause == "":
-		return base
-	default:
-		return base + "," + clause
-	}
 }
 
 func limitNodes(nodes []service.NodeListItem, limit int) ([]service.NodeListItem, int, int) {
@@ -285,7 +238,7 @@ func newNodeCordonCmd() *cobra.Command {
 		Use:   "cordon <node-name>",
 		Short: "封锁节点并将其标记为维修状态",
 		// 强制要求必须提供 1 个位置参数，即节点名称
-		Args:  cobra.ExactArgs(1),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 1. 初始化 Kubernetes 客户端
 			// kube.NewClientset 定义于 internal/kube/client.go
@@ -321,7 +274,7 @@ func newNodeUncordonCmd() *cobra.Command {
 		Use:   "uncordon <node-name>",
 		Short: "解封节点并清除维修标签",
 		// 强制要求必须提供 1 个位置参数，即节点名称
-		Args:  cobra.ExactArgs(1),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 1. 初始化 Kubernetes 客户端
 			// kube.NewClientset 定义于 internal/kube/client.go
