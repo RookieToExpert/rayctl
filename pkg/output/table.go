@@ -195,14 +195,19 @@ func PrintNodeMutationResult(result *service.NodeMutationResult) {
 func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 	summaryRows := [][]string{
 		{"JOB", result.Name},
+		{"STATUS", emptyDash(result.Status)},
 		{"VC", result.VClusterName},
 		{"NAMESPACE", result.Namespace},
 		{"UID", result.UID},
 		{"SUBMITTER", result.Submitter},
 		{"PODGROUP", result.PodGroupName},
 		{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
-		{"INSPECT POD", result.InspectPod},
-		{"NODES", joinOrDash(result.Nodes)},
+	}
+	if !result.Terminal {
+		summaryRows = append(summaryRows,
+			[]string{"INSPECT POD", result.InspectPod},
+			[]string{"NODES", joinOrDash(result.Nodes)},
+		)
 	}
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
@@ -216,6 +221,7 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 				[2]int{3, 1},
 				[2]int{4, 1},
 				[2]int{5, 1},
+				[2]int{6, 1},
 				[2]int{7, 1},
 			),
 		},
@@ -237,36 +243,38 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 		)
 	}
 
-	fmt.Fprintln(os.Stdout)
-	podRows := make([][]string, 0, len(result.Pods))
-	for _, pod := range result.Pods {
-		podRows = append(podRows, []string{
-			pod.Name,
-			emptyDash(pod.TaskSpec),
-			emptyDash(pod.TaskIndex),
-			emptyDash(pod.Phase),
-			emptyDash(pod.NodeName),
-		})
-	}
-	if len(podRows) == 0 {
-		podRows = [][]string{{"-", "-", "-", "-", "-"}}
-	}
-	printBoxTableWithMaxWidths(
-		[]string{"POD", "TASK", "INDEX", "PHASE", "NODE"},
-		podRows,
-		[]int{48, 12, 8, 12, 24},
-	)
+	if !result.Terminal {
+		fmt.Fprintln(os.Stdout)
+		podRows := make([][]string, 0, len(result.Pods))
+		for _, pod := range result.Pods {
+			podRows = append(podRows, []string{
+				pod.Name,
+				emptyDash(pod.TaskSpec),
+				emptyDash(pod.TaskIndex),
+				emptyDash(pod.Phase),
+				emptyDash(pod.NodeName),
+			})
+		}
+		if len(podRows) == 0 {
+			podRows = [][]string{{"-", "-", "-", "-", "-"}}
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"POD", "TASK", "INDEX", "PHASE", "NODE"},
+			podRows,
+			[]int{48, 12, 8, 12, 24},
+		)
 
-	fmt.Fprintln(os.Stdout)
-	logRows := make([][]string, 0, len(result.RecentLogLines))
-	for _, line := range result.RecentLogLines {
-		logRows = append(logRows, []string{line})
+		fmt.Fprintln(os.Stdout)
+		logRows := make([][]string, 0, len(result.RecentLogLines))
+		for _, line := range result.RecentLogLines {
+			logRows = append(logRows, []string{line})
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"LATEST LOGS"},
+			logRows,
+			[]int{110},
+		)
 	}
-	printBoxTableWithMaxWidths(
-		[]string{"LATEST LOGS"},
-		logRows,
-		[]int{110},
-	)
 
 	if strings.TrimSpace(result.PodGroupName) != "" {
 		fmt.Fprintf(os.Stdout, "For PodGroup diagnosis, switch KUBECONFIG to the target vcluster and run: rayctl job get pg %s\n", result.PodGroupName)

@@ -65,6 +65,8 @@ type JobGetResult struct {
 	Name                   string
 	Namespace              string
 	UID                    string
+	Status                 string
+	Terminal               bool
 	VClusterName           string
 	Submitter              string
 	PodGroupName           string
@@ -579,6 +581,13 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 		}
 	}
 
+	status := "-"
+	terminal := false
+	if currentJob, err := s.getJobInCurrentCluster(ctx, identifier); err == nil && currentJob != nil {
+		status = extractVolcanoJobPhase(currentJob)
+		terminal = isTerminalVolcanoJobPhase(status)
+	}
+
 	locateBegin := time.Now()
 	identity, pods, err := s.resolveJobIdentity(ctx, identifier)
 	locateDuration := time.Since(locateBegin)
@@ -644,6 +653,8 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 		Name:                   identity.Name,
 		Namespace:              identity.Namespace,
 		UID:                    identity.UID,
+		Status:                 status,
+		Terminal:               terminal,
 		VClusterName:           dashIfEmpty(identity.VClusterName),
 		Submitter:              identity.Submitter,
 		PodGroupName:           dashIfEmpty(identity.PodGroupName),
@@ -961,6 +972,8 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 	}
 
 	identity.UID = firstNonEmpty(identity.UID, string(job.GetUID()))
+	status := extractVolcanoJobPhase(job)
+	terminal := isTerminalVolcanoJobPhase(status)
 	identity.Submitter = firstNonEmpty(
 		identity.Submitter,
 		getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
@@ -1037,6 +1050,8 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 		Name:                   identity.Name,
 		Namespace:              identity.Namespace,
 		UID:                    identity.UID,
+		Status:                 status,
+		Terminal:               terminal,
 		VClusterName:           dashIfEmpty(identity.VClusterName),
 		Submitter:              identity.Submitter,
 		PodGroupName:           dashIfEmpty(identity.PodGroupName),
@@ -1203,28 +1218,42 @@ func (s *JobService) getJobInCurrentCluster(ctx context.Context, identifier stri
 func (s *JobService) resolveJobIdentity(ctx context.Context, identifier string) (*jobIdentity, []corev1.Pod, error) {
 	job, err := s.findJob(ctx, identifier)
 	if err == nil {
-		namespace := job.GetNamespace()
-		jobName := job.GetName()
-		jobUID := string(job.GetUID())
+		hostNamespace := firstNonEmpty(
+			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-host-namespace"),
+			job.GetNamespace(),
+		)
+		namespace := firstNonEmpty(
+			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-namespace"),
+			job.GetNamespace(),
+		)
+		jobName := firstNonEmpty(
+			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"),
+			job.GetName(),
+		)
+		jobUID := firstNonEmpty(
+			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"),
+			string(job.GetUID()),
+		)
 		submitter := firstNonEmpty(
 			getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
 			getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"),
 			"-",
 		)
 
-		podGroupName, _ := s.findOwnedPodGroupName(ctx, namespace, jobUID)
-		pods, podErr := s.listJobPods(ctx, namespace, jobName, jobUID)
+		podGroupName, _ := s.findOwnedPodGroupName(ctx, hostNamespace, string(job.GetUID()))
+		pods, podErr := s.listJobPods(ctx, hostNamespace, jobName, jobUID)
 		if podErr != nil {
 			return nil, nil, podErr
 		}
 
 		return &jobIdentity{
-			Name:         jobName,
-			Namespace:    namespace,
-			UID:          jobUID,
-			Submitter:    submitter,
-			PodGroupName: podGroupName,
-			VClusterName: "",
+			Name:          jobName,
+			Namespace:     namespace,
+			UID:           jobUID,
+			Submitter:     submitter,
+			PodGroupName:  firstNonEmpty(podGroupName, derivePodGroupName(jobName, jobUID)),
+			VClusterName:  s.resolveVClusterNameFromNamespace(ctx, hostNamespace),
+			HostNamespace: hostNamespace,
 		}, pods, nil
 	}
 
@@ -1301,23 +1330,26 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			for _, vcRef := range platformVCRefs(vc) {
+				job, getErr := s.vcClient.GetVolcanoJob(searchCtx, vcRef, "default", identifier)
+				if getErr != nil {
+					continue
+				}
 
-			job, getErr := s.vcClient.GetVolcanoJob(searchCtx, vc.Name, "default", identifier)
-			if getErr != nil {
-				results <- searchResult{}
+				results <- searchResult{
+					identity: &jobIdentity{
+						Name:         job.GetName(),
+						Namespace:    job.GetNamespace(),
+						UID:          string(job.GetUID()),
+						Submitter:    firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), "-"),
+						PodGroupName: fmt.Sprintf("%s-%s", job.GetName(), string(job.GetUID())),
+						VClusterName: vcRef,
+					},
+				}
 				return
 			}
 
-			results <- searchResult{
-				identity: &jobIdentity{
-					Name:         job.GetName(),
-					Namespace:    job.GetNamespace(),
-					UID:          string(job.GetUID()),
-					Submitter:    firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), "-"),
-					PodGroupName: fmt.Sprintf("%s-%s", job.GetName(), string(job.GetUID())),
-					VClusterName: vc.Name,
-				},
-			}
+			results <- searchResult{}
 		}()
 	}
 
@@ -1337,6 +1369,29 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 	}
 
 	return nil, fmt.Errorf("platform volcano job %q not found", identifier)
+}
+
+func platformVCRefs(vc platform.VirtualCluster) []string {
+	candidates := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		candidates = append(candidates, value)
+	}
+
+	add(vc.Name)
+	if uid := strings.TrimSpace(vc.UID); uid != "" {
+		add("vc-" + uid)
+		add(uid)
+	}
+	return candidates
 }
 
 func (s *JobService) locatePodGroupForPlatform(ctx context.Context, identifier string) (*jobIdentity, error) {
@@ -1439,10 +1494,12 @@ func (s *JobService) findJob(ctx context.Context, identifier string) (*unstructu
 	var fuzzy []*unstructured.Unstructured
 	for i := range list.Items {
 		item := &list.Items[i]
+		logicalName := strings.TrimSpace(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"))
+		logicalUID := strings.TrimSpace(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"))
 		switch {
-		case item.GetName() == identifier || string(item.GetUID()) == identifier:
+		case item.GetName() == identifier || string(item.GetUID()) == identifier || logicalName == identifier || logicalUID == identifier:
 			exact = append(exact, item)
-		case strings.HasPrefix(item.GetName(), identifier), strings.HasPrefix(item.GetGenerateName(), identifier):
+		case strings.HasPrefix(item.GetName(), identifier), strings.HasPrefix(item.GetGenerateName(), identifier), strings.HasPrefix(logicalName, identifier):
 			fuzzy = append(fuzzy, item)
 		}
 	}
@@ -1466,6 +1523,41 @@ func (s *JobService) findJob(ctx context.Context, identifier string) (*unstructu
 	}
 
 	return nil, fmt.Errorf("volcano job %q not found in current cluster", identifier)
+}
+
+func (s *JobService) resolveVClusterNameFromNamespace(ctx context.Context, namespace string) string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return ""
+	}
+	ns, err := s.clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return ""
+	}
+	return firstNonEmpty(
+		strings.TrimSpace(ns.Labels["vcluster.loft.sh/vcluster-name"]),
+		strings.TrimSpace(ns.Labels["vcluster.loft.sh/vcluster-namespace"]),
+	)
+}
+
+func extractVolcanoJobPhase(job *unstructured.Unstructured) string {
+	if job == nil {
+		return "-"
+	}
+	return dashIfEmpty(firstNonEmpty(
+		getNestedText(job.Object, "status", "state", "phase"),
+		getNestedText(job.Object, "status", "phase"),
+		getNestedText(job.Object, "status", "state"),
+	))
+}
+
+func isTerminalVolcanoJobPhase(phase string) bool {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "aborted", "completed", "failed", "terminated", "succeeded":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *JobService) findPodGroup(ctx context.Context, identifier string) (*unstructured.Unstructured, error) {

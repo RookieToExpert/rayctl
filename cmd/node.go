@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -44,6 +45,15 @@ func newNodeGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get [profile-or-selector]",
 		Short: "通过 profile 或 label selector 列出节点",
+		Long: "通过 profile、label selector 或 InternalIP 片段列出节点。\n" +
+			"支持直接传入 IP 过滤片段，例如 10.12.14；也支持使用 | 分隔多个片段做或匹配，例如 '10.12|10.140'。",
+		Example: strings.Join([]string{
+			"  rayctl node get",
+			"  rayctl node get ecp",
+			"  rayctl node get 'node-role.compute.sensecore.cn/prod=ecs'",
+			"  rayctl node get -A 10.12.14",
+			"  rayctl node get -A '10.12|10.140'",
+		}, "\n"),
 		// 限制最多只能接受 1 个位置参数 (作为 target)
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -59,13 +69,23 @@ func newNodeGetCmd() *cobra.Command {
 				target = args[0]
 			}
 
+			listTarget := target
+			ipFilters := parseNodeIPFilters(target)
+			if len(ipFilters) > 0 {
+				listTarget = ""
+			}
+
 			// 3. 实例化 NodeService 并调用 List 方法获取符合条件的节点及最终使用的选择器
 			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
 			// nodeService.List 定义于 internal/service/node_service.go
-			nodes, resolvedSelector, err := nodeService.List(context.Background(), target, "")
+			nodes, resolvedSelector, err := nodeService.List(context.Background(), listTarget, "")
 			if err != nil {
 				return err
+			}
+			if len(ipFilters) > 0 {
+				nodes = filterNodesByIP(nodes, ipFilters)
+				resolvedSelector = fmt.Sprintf("InternalIP matches %s", strings.Join(ipFilters, " | "))
 			}
 
 			if vcClient, ok := platform.NewVirtualClusterClientFromEnv(); ok {
@@ -191,7 +211,12 @@ func newNodeDescribeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "describe <node-name> [node-name...]",
 		Aliases: []string{"check"},
-		Short:   "快速检查节点上的 vcluster Pod 和资源占用",
+		Short:   "快速检查节点上的 vcluster Pod 和资源占用，支持节点名或 IP",
+		Long:    "快速检查节点上的 vcluster Pod 和资源占用，支持直接传入节点名，或传入形如 10.140.214.222 的节点 IP。",
+		Example: strings.Join([]string{
+			"  rayctl node check host-10-140-214-222",
+			"  rayctl node check 10.140.214.222",
+		}, "\n"),
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientBegin := time.Now()
@@ -204,7 +229,8 @@ func newNodeDescribeCmd() *cobra.Command {
 			nodeService := service.NewNodeService(clientset)
 
 			for i, nodeName := range args {
-				details, err := nodeService.Describe(context.Background(), nodeName)
+				resolvedNodeName := normalizeNodeIdentifier(nodeName)
+				details, err := nodeService.Describe(context.Background(), resolvedNodeName)
 				if err != nil {
 					return fmt.Errorf("node %q: %w", nodeName, err)
 				}
@@ -228,6 +254,70 @@ func newNodeDescribeCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for node check")
 
 	return cmd
+}
+
+func parseNodeIPFilters(target string) []string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+	if _, ok := map[string]struct{}{"ecp": {}, "ecs": {}}[strings.ToLower(target)]; ok {
+		return nil
+	}
+	if strings.ContainsAny(target, "=,") || strings.HasPrefix(target, "host-") {
+		return nil
+	}
+	parts := strings.Split(target, "|")
+	filters := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if looksLikeIPFragment(part) {
+			filters = append(filters, part)
+		} else {
+			return nil
+		}
+	}
+	return filters
+}
+
+func looksLikeIPFragment(value string) bool {
+	for _, r := range value {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return strings.Contains(value, ".")
+}
+
+func filterNodesByIP(nodes []service.NodeListItem, filters []string) []service.NodeListItem {
+	if len(filters) == 0 {
+		return nodes
+	}
+	filtered := make([]service.NodeListItem, 0, len(nodes))
+	for _, node := range nodes {
+		ip := strings.TrimSpace(node.InternalIP)
+		for _, filter := range filters {
+			if strings.Contains(ip, filter) {
+				filtered = append(filtered, node)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func normalizeNodeIdentifier(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "host-") {
+		return value
+	}
+	if ip := net.ParseIP(value); ip != nil && strings.Contains(value, ".") {
+		return "host-" + strings.ReplaceAll(value, ".", "-")
+	}
+	return value
 }
 
 // newNodeCordonCmd 创建 "cordon" 子命令，用于将指定节点置于不可调度 (Cordon) 状态。
