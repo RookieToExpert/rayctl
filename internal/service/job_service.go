@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -59,6 +60,31 @@ type jobIdentity struct {
 	PodGroupName  string
 	VClusterName  string
 	HostNamespace string
+	HostJobName   string
+}
+
+type ambiguousJobMatchError struct {
+	Identifier string
+	Matches    []jobIdentity
+}
+
+func (e *ambiguousJobMatchError) Error() string {
+	if e == nil {
+		return "ambiguous job match"
+	}
+	parts := make([]string, 0, len(e.Matches))
+	for _, match := range e.Matches {
+		label := strings.TrimSpace(match.Name)
+		if ns := strings.TrimSpace(match.Namespace); ns != "" {
+			label = ns + "/" + label
+		}
+		if vc := strings.TrimSpace(match.VClusterName); vc != "" {
+			label = label + "@" + vc
+		}
+		parts = append(parts, label)
+	}
+	sort.Strings(parts)
+	return fmt.Sprintf("multiple jobs matched %q: %s", e.Identifier, strings.Join(parts, ", "))
 }
 
 type JobGetResult struct {
@@ -67,14 +93,19 @@ type JobGetResult struct {
 	UID                    string
 	Status                 string
 	Terminal               bool
+	Stage                  string
+	Instruction            string
+	Diagnosis              []string
 	VClusterName           string
 	Submitter              string
 	PodGroupName           string
 	ImagePullSecrets       []string
+	SecretChecks           []SecretCheckItem
 	PersistentVolumeClaims []VolumeClaimRef
 	Pods                   []JobPodItem
 	Nodes                  []string
 	InspectPod             string
+	CheckEvidence          []CheckEvidenceItem
 	RecentEvents           []EventItem
 	RecentLogLines         []string
 	Timings                JobGetTimings
@@ -217,9 +248,11 @@ type EventItem struct {
 }
 
 type dockerCredential struct {
-	Registry string
-	Username string
-	Password string
+	Registry              string
+	RegistryRaw           string
+	RegistryHasWhitespace bool
+	Username              string
+	Password              string
 }
 
 func NewJobService(clientset kubernetes.Interface, dynamicClient dynamic.Interface, vcClient *platform.VirtualClusterClient) *JobService {
@@ -572,27 +605,139 @@ func normalizeJobFrameworkType(value string) string {
 	}
 }
 
+func (s *JobService) GetJobs(ctx context.Context, identifier string) ([]*JobGetResult, error) {
+	result, err := s.GetJob(ctx, identifier)
+	if err == nil {
+		return []*JobGetResult{result}, nil
+	}
+
+	var ambiguousErr *ambiguousJobMatchError
+	if !errors.As(err, &ambiguousErr) {
+		return nil, err
+	}
+
+	results := make([]*JobGetResult, 0, len(ambiguousErr.Matches))
+	seen := make(map[string]struct{}, len(ambiguousErr.Matches))
+	for _, match := range ambiguousErr.Matches {
+		key := strings.Join([]string{
+			strings.TrimSpace(match.VClusterName),
+			strings.TrimSpace(match.Namespace),
+			strings.TrimSpace(match.Name),
+			strings.TrimSpace(match.UID),
+			strings.TrimSpace(match.HostNamespace),
+			strings.TrimSpace(match.HostJobName),
+		}, "|")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		jobResult, getErr := s.getJobByIdentity(ctx, match)
+		if getErr != nil {
+			return nil, getErr
+		}
+		results = append(results, jobResult)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].VClusterName != results[j].VClusterName {
+			return results[i].VClusterName < results[j].VClusterName
+		}
+		if results[i].Namespace != results[j].Namespace {
+			return results[i].Namespace < results[j].Namespace
+		}
+		if results[i].Name != results[j].Name {
+			return results[i].Name < results[j].Name
+		}
+		return results[i].UID < results[j].UID
+	})
+
+	return results, nil
+}
+
 func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResult, error) {
 	startedAt := time.Now()
 	if s.vcClient != nil {
 		if result, err := s.getJobViaPlatform(ctx, identifier); err == nil {
 			result.Timings.Total = time.Since(startedAt)
 			return result, nil
+		} else {
+			var ambiguousErr *ambiguousJobMatchError
+			if errors.As(err, &ambiguousErr) {
+				return nil, err
+			}
 		}
 	}
 
-	status := "-"
-	terminal := false
-	if currentJob, err := s.getJobInCurrentCluster(ctx, identifier); err == nil && currentJob != nil {
-		status = extractVolcanoJobPhase(currentJob)
-		terminal = isTerminalVolcanoJobPhase(status)
-	}
-
 	locateBegin := time.Now()
-	identity, pods, err := s.resolveJobIdentity(ctx, identifier)
+	identity, pods, job, err := s.resolveJobInCurrentCluster(ctx, identifier)
 	locateDuration := time.Since(locateBegin)
 	if err != nil {
 		return nil, err
+	}
+
+	return s.buildJobGetResultFromCurrentCluster(ctx, identifier, *identity, pods, job, locateDuration, startedAt)
+}
+
+func (s *JobService) getJobByIdentity(ctx context.Context, identity jobIdentity) (*JobGetResult, error) {
+	startedAt := time.Now()
+	if s.vcClient != nil && strings.TrimSpace(identity.VClusterName) != "" {
+		return s.getJobViaPlatformByIdentity(ctx, identity, identity.Name, 0, startedAt)
+	}
+
+	hostNamespace := strings.TrimSpace(identity.HostNamespace)
+	hostJobName := strings.TrimSpace(identity.HostJobName)
+	if hostNamespace == "" || hostJobName == "" {
+		return nil, fmt.Errorf("unable to fetch job %q exactly from current cluster", identity.Name)
+	}
+
+	job, err := s.dynamicClient.Resource(volcanoJobGVR).Namespace(hostNamespace).Get(ctx, hostJobName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	resolvedIdentity, pods, err := s.resolveJobIdentityFromJobObject(ctx, job)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.buildJobGetResultFromCurrentCluster(ctx, identity.Name, *resolvedIdentity, pods, job, 0, startedAt)
+}
+
+func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, identifier string, identity jobIdentity, pods []corev1.Pod, job *unstructured.Unstructured, locateDuration time.Duration, startedAt time.Time) (*JobGetResult, error) {
+	status := "-"
+	terminal := false
+	if job != nil {
+		status = extractVolcanoJobPhase(job)
+		terminal = isTerminalVolcanoJobPhase(status)
+	}
+
+	stage := ""
+	instruction := ""
+	diagnosis := []string(nil)
+	secretChecks := []SecretCheckItem(nil)
+	detailEvidence := []CheckEvidenceItem(nil)
+	if shouldAttachJobCheckSummary(status, terminal) {
+		if checkResult, err := s.CheckJob(ctx, identifier); err == nil && checkResult != nil {
+			stage = strings.TrimSpace(checkResult.Stage)
+			instruction = strings.TrimSpace(checkResult.Instruction)
+			if len(checkResult.Diagnosis) > 0 {
+				diagnosis = append([]string{}, checkResult.Diagnosis...)
+			}
+			if len(checkResult.SecretChecks) > 0 {
+				secretChecks = append([]SecretCheckItem{}, checkResult.SecretChecks...)
+			}
+			switch stage {
+			case "scheduling":
+				if len(checkResult.PodGroupEvidence) > 0 {
+					detailEvidence = append([]CheckEvidenceItem{}, checkResult.PodGroupEvidence...)
+				}
+			case "startup", "failed":
+				if len(checkResult.PodEvidence) > 0 {
+					detailEvidence = append([]CheckEvidenceItem{}, checkResult.PodEvidence...)
+				}
+			}
+		}
 	}
 
 	inspectPod := chooseInspectPod(pods)
@@ -602,10 +747,12 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 	if inspectPod != nil {
 		if podHasRunnableLogs(*inspectPod) {
 			logsBegin := time.Now()
-			recentLogLines, err = s.tailPodLogs(ctx, inspectPod.Namespace, inspectPod.Name, defaultTailLogLines)
+			lines, err := s.tailPodLogs(ctx, inspectPod.Namespace, inspectPod.Name, defaultTailLogLines)
 			kubeLogsDuration = time.Since(logsBegin)
 			if err != nil {
 				recentLogLines = []string{fmt.Sprintf("log unavailable: %v", err)}
+			} else {
+				recentLogLines = lines
 			}
 		} else {
 			recentLogLines = []string{fmt.Sprintf("pod phase is %s, logs are not available yet", inspectPod.Status.Phase)}
@@ -646,7 +793,7 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 	}
 	formatDuration := time.Since(formatBegin)
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
-	pvcRefs = s.resolveVolumeClaimRefs(ctx, identity, pvcRefs)
+	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
 	imagePullSecrets = s.resolveImagePullSecretsFromKube(ctx, firstNonEmpty(identity.HostNamespace, identity.Namespace), imagePullSecrets)
 
 	return &JobGetResult{
@@ -655,14 +802,19 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 		UID:                    identity.UID,
 		Status:                 status,
 		Terminal:               terminal,
+		Stage:                  stage,
+		Instruction:            instruction,
+		Diagnosis:              diagnosis,
 		VClusterName:           dashIfEmpty(identity.VClusterName),
 		Submitter:              identity.Submitter,
 		PodGroupName:           dashIfEmpty(identity.PodGroupName),
 		ImagePullSecrets:       imagePullSecrets,
+		SecretChecks:           secretChecks,
 		PersistentVolumeClaims: pvcRefs,
 		Pods:                   resultPods,
 		Nodes:                  nodes,
 		InspectPod:             inspectPodName,
+		CheckEvidence:          detailEvidence,
 		RecentLogLines:         recentLogLines,
 		Timings: JobGetTimings{
 			Locate:   locateDuration,
@@ -862,11 +1014,9 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 	}
 
 	instruction := ""
-	if stage == "scheduling" {
-		instruction = fmt.Sprintf("当前任务还没调度成功，请带上目标 vcluster 的 kubeconfig 重新执行：rayctl job check %s -k <vcluster-kubeconfig-path>", identity.Name)
-	}
 
 	podEvidence := make([]CheckEvidenceItem, 0)
+	podGroupEvidence := make([]CheckEvidenceItem, 0)
 	if stage == "startup" || stage == "failed" {
 		eventNamespace := firstNonEmpty(identity.HostNamespace, identity.Namespace)
 		if strings.TrimSpace(eventNamespace) != "" {
@@ -898,15 +1048,20 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 			}
 		}
 		if len(podEvidence) == 0 && s.vcClient != nil && strings.TrimSpace(identity.VClusterName) != "" && strings.TrimSpace(identity.Namespace) != "" {
-			jobEvents, eventErr := s.vcClient.ListEvents(ctx, identity.VClusterName, identity.Namespace, identity.Name, "")
-			if eventErr == nil {
-				formatted := formatEventItems(jobEvents, 5)
-				for _, event := range formatted {
+			for _, pod := range pods {
+				if stage == "startup" && isPodReady(pod) {
+					continue
+				}
+				podEvents, eventErr := s.vcClient.ListEvents(ctx, identity.VClusterName, identity.Namespace, pod.Name, "")
+				if eventErr != nil {
+					continue
+				}
+				for _, event := range formatEventItems(podEvents, 5) {
 					if strings.EqualFold(event.Message, "no events") {
 						continue
 					}
 					podEvidence = append(podEvidence, CheckEvidenceItem{
-						Source: "job",
+						Source: pod.Name,
 						Status: firstNonEmpty(event.Reason, event.Type, "-"),
 						Detail: event.Message,
 					})
@@ -914,8 +1069,27 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 			}
 		}
 	}
+	if stage == "scheduling" && s.vcClient != nil && strings.TrimSpace(identity.VClusterName) != "" && strings.TrimSpace(identity.Namespace) != "" {
+		eventName := firstNonEmpty(identity.PodGroupName, identity.Name)
+		events, eventErr := s.vcClient.ListEvents(ctx, identity.VClusterName, identity.Namespace, eventName, "")
+		if eventErr == nil {
+			for _, event := range formatEventItems(events, defaultEventLimit) {
+				if strings.EqualFold(event.Message, "no events") {
+					continue
+				}
+				podGroupEvidence = append(podGroupEvidence, CheckEvidenceItem{
+					Source: event.Time,
+					Status: firstNonEmpty(event.Reason, event.Type, "-"),
+					Detail: event.Message,
+				})
+			}
+		}
+	}
 	if stage == "startup" && len(podEvidence) > 0 && len(diagnosis) > 0 {
 		diagnosis[0] = diagnosis[0] + " 请进一步看下方 event 部分判断任务启动失败原因。"
+	}
+	if stage == "scheduling" && len(podGroupEvidence) > 0 && len(diagnosis) > 0 {
+		diagnosis[0] = diagnosis[0] + " 请查看下方 PodGroup event。"
 	}
 
 	return &JobCheckResult{
@@ -929,7 +1103,7 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 		PVCs:             append(failedPVCChecks, pvcRefsToChecks(duplicatePVRefs)...),
 		SecretChecks:     displaySecrets,
 		PodEvidence:      podEvidence,
-		PodGroupEvidence: nil,
+		PodGroupEvidence: podGroupEvidence,
 		Diagnosis:        diagnosis,
 	}, nil
 }
@@ -957,6 +1131,10 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 		return nil, err
 	}
 
+	return s.getJobViaPlatformByIdentity(ctx, *identity, identifier, locateDuration, startedAt)
+}
+
+func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity jobIdentity, identifier string, locateDuration time.Duration, startedAt time.Time) (*JobGetResult, error) {
 	jobBegin := time.Now()
 	job, err := s.vcClient.GetVolcanoJob(ctx, identity.VClusterName, identity.Namespace, identity.Name)
 	platformJobDuration := time.Since(jobBegin)
@@ -974,6 +1152,33 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 	identity.UID = firstNonEmpty(identity.UID, string(job.GetUID()))
 	status := extractVolcanoJobPhase(job)
 	terminal := isTerminalVolcanoJobPhase(status)
+	stage := ""
+	instruction := ""
+	diagnosis := []string(nil)
+	secretChecks := []SecretCheckItem(nil)
+	detailEvidence := []CheckEvidenceItem(nil)
+	if shouldAttachJobCheckSummary(status, terminal) {
+		if checkResult, err := s.CheckJob(ctx, identifier); err == nil && checkResult != nil {
+			stage = strings.TrimSpace(checkResult.Stage)
+			instruction = strings.TrimSpace(checkResult.Instruction)
+			if len(checkResult.Diagnosis) > 0 {
+				diagnosis = append([]string{}, checkResult.Diagnosis...)
+			}
+			if len(checkResult.SecretChecks) > 0 {
+				secretChecks = append([]SecretCheckItem{}, checkResult.SecretChecks...)
+			}
+			switch stage {
+			case "scheduling":
+				if len(checkResult.PodGroupEvidence) > 0 {
+					detailEvidence = append([]CheckEvidenceItem{}, checkResult.PodGroupEvidence...)
+				}
+			case "startup", "failed":
+				if len(checkResult.PodEvidence) > 0 {
+					detailEvidence = append([]CheckEvidenceItem{}, checkResult.PodEvidence...)
+				}
+			}
+		}
+	}
 	identity.Submitter = firstNonEmpty(
 		identity.Submitter,
 		getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
@@ -1043,8 +1248,8 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 	}
 	formatDuration := time.Since(formatBegin)
 	imagePullSecrets, pvcRefs := extractJobSpecDetails(job)
-	pvcRefs = s.resolveVolumeClaimRefs(ctx, identity, pvcRefs)
-	imagePullSecrets = s.resolveImagePullSecrets(ctx, identity, imagePullSecrets)
+	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
+	imagePullSecrets = s.resolveImagePullSecrets(ctx, &identity, imagePullSecrets)
 
 	return &JobGetResult{
 		Name:                   identity.Name,
@@ -1052,14 +1257,19 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 		UID:                    identity.UID,
 		Status:                 status,
 		Terminal:               terminal,
+		Stage:                  stage,
+		Instruction:            instruction,
+		Diagnosis:              diagnosis,
 		VClusterName:           dashIfEmpty(identity.VClusterName),
 		Submitter:              identity.Submitter,
 		PodGroupName:           dashIfEmpty(identity.PodGroupName),
 		ImagePullSecrets:       imagePullSecrets,
+		SecretChecks:           secretChecks,
 		PersistentVolumeClaims: pvcRefs,
 		Pods:                   resultPods,
 		Nodes:                  nodes,
 		InspectPod:             inspectPodName,
+		CheckEvidence:          detailEvidence,
 		RecentLogLines:         recentLogLines,
 		Timings: JobGetTimings{
 			Locate:       locateDuration,
@@ -1150,51 +1360,18 @@ func (s *JobService) checkJobInCurrentCluster(ctx context.Context, identifier st
 		}, nil
 	}
 
-	if strings.TrimSpace(podGroupName) == "" {
-		return &JobCheckResult{
-			Name:         identity.Name,
-			Namespace:    identity.Namespace,
-			UID:          identity.UID,
-			PodGroupName: "-",
-			Stage:        "scheduling",
-			Diagnosis:    []string{"当前 vcluster kubeconfig 里没有找到对应的 PodGroup。"},
-		}, nil
-	}
-
-	pg, err := s.dynamicClient.Resource(volcanoPodGroupGVR).Namespace(namespace).Get(ctx, podGroupName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get podgroup %q in namespace %q: %w", podGroupName, namespace, err)
-	}
-
-	evidence := make([]CheckEvidenceItem, 0)
-	for _, message := range extractPodGroupMessages(pg) {
-		evidence = append(evidence, CheckEvidenceItem{
-			Source: "status",
-			Status: extractPodGroupPhase(pg),
-			Detail: message,
-		})
-	}
-
-	events, err := s.listEventsForObject(ctx, namespace, "PodGroup", podGroupName, string(pg.GetUID()), defaultEventLimit)
-	if err == nil {
-		for _, event := range events {
-			evidence = append(evidence, CheckEvidenceItem{
-				Source: "event",
-				Status: firstNonEmpty(event.Reason, event.Type, "-"),
-				Detail: event.Message,
-			})
-		}
+	if s.vcClient != nil {
+		return nil, fmt.Errorf("defer scheduling diagnosis to platform")
 	}
 
 	return &JobCheckResult{
-		Name:             identity.Name,
-		Namespace:        identity.Namespace,
-		UID:              identity.UID,
-		PodGroupName:     dashIfEmpty(identity.PodGroupName),
-		Stage:            "scheduling",
-		PodGroupEvidence: evidence,
+		Name:         identity.Name,
+		Namespace:    identity.Namespace,
+		UID:          identity.UID,
+		PodGroupName: dashIfEmpty(identity.PodGroupName),
+		Stage:        "scheduling",
 		Diagnosis: []string{
-			"当前任务仍在等待调度，下面是 vcluster 里的 PodGroup 状态和事件。",
+			"当前任务仍在等待调度。",
 		},
 	}, nil
 }
@@ -1218,61 +1395,88 @@ func (s *JobService) getJobInCurrentCluster(ctx context.Context, identifier stri
 func (s *JobService) resolveJobIdentity(ctx context.Context, identifier string) (*jobIdentity, []corev1.Pod, error) {
 	job, err := s.findJob(ctx, identifier)
 	if err == nil {
-		hostNamespace := firstNonEmpty(
-			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-host-namespace"),
-			job.GetNamespace(),
-		)
-		namespace := firstNonEmpty(
-			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-namespace"),
-			job.GetNamespace(),
-		)
-		jobName := firstNonEmpty(
-			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"),
-			job.GetName(),
-		)
-		jobUID := firstNonEmpty(
-			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"),
-			string(job.GetUID()),
-		)
-		submitter := firstNonEmpty(
-			getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
-			getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"),
-			"-",
-		)
-
-		podGroupName, _ := s.findOwnedPodGroupName(ctx, hostNamespace, string(job.GetUID()))
-		pods, podErr := s.listJobPods(ctx, hostNamespace, jobName, jobUID)
-		if podErr != nil {
-			return nil, nil, podErr
-		}
-
-		return &jobIdentity{
-			Name:          jobName,
-			Namespace:     namespace,
-			UID:           jobUID,
-			Submitter:     submitter,
-			PodGroupName:  firstNonEmpty(podGroupName, derivePodGroupName(jobName, jobUID)),
-			VClusterName:  s.resolveVClusterNameFromNamespace(ctx, hostNamespace),
-			HostNamespace: hostNamespace,
-		}, pods, nil
+		return s.resolveJobIdentityFromJobObject(ctx, job)
 	}
 
 	return s.resolveJobFromPods(ctx, identifier, err)
 }
 
+func (s *JobService) resolveJobInCurrentCluster(ctx context.Context, identifier string) (*jobIdentity, []corev1.Pod, *unstructured.Unstructured, error) {
+	job, err := s.findJob(ctx, identifier)
+	if err == nil {
+		identity, pods, resolveErr := s.resolveJobIdentityFromJobObject(ctx, job)
+		if resolveErr != nil {
+			return nil, nil, nil, resolveErr
+		}
+		return identity, pods, job, nil
+	}
+
+	identity, pods, resolveErr := s.resolveJobFromPods(ctx, identifier, err)
+	if resolveErr != nil {
+		return nil, nil, nil, resolveErr
+	}
+	return identity, pods, nil, nil
+}
+
+func (s *JobService) resolveJobIdentityFromJobObject(ctx context.Context, job *unstructured.Unstructured) (*jobIdentity, []corev1.Pod, error) {
+	hostNamespace := firstNonEmpty(
+		getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-host-namespace"),
+		job.GetNamespace(),
+	)
+	namespace := firstNonEmpty(
+		getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-namespace"),
+		job.GetNamespace(),
+	)
+	jobName := firstNonEmpty(
+		getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"),
+		job.GetName(),
+	)
+	jobUID := firstNonEmpty(
+		getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"),
+		string(job.GetUID()),
+	)
+	submitter := firstNonEmpty(
+		getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
+		getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"),
+		"-",
+	)
+
+	podGroupName, _ := s.findOwnedPodGroupName(ctx, hostNamespace, string(job.GetUID()))
+	pods, podErr := s.listJobPods(ctx, hostNamespace, jobName, jobUID)
+	if podErr != nil {
+		return nil, nil, podErr
+	}
+
+	return &jobIdentity{
+		Name:          jobName,
+		Namespace:     namespace,
+		UID:           jobUID,
+		Submitter:     submitter,
+		PodGroupName:  firstNonEmpty(podGroupName, derivePodGroupName(jobName, jobUID)),
+		VClusterName:  s.resolveVClusterNameFromNamespace(ctx, hostNamespace),
+		HostNamespace: hostNamespace,
+		HostJobName:   job.GetName(),
+	}, pods, nil
+}
+
 func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string) (*jobIdentity, error) {
-	if shouldLookupJobByPlatform(identifier) {
+	if s.vcClient != nil && shouldLookupJobByPlatform(identifier) {
+		if identity, err := s.findPlatformJobIdentity(ctx, identifier); err == nil {
+			return identity, nil
+		} else {
+			var ambiguousErr *ambiguousJobMatchError
+			if errors.As(err, &ambiguousErr) {
+				return nil, err
+			}
+		}
+	}
+
+	if looksLikePodBackedIdentifier(identifier) {
 		if pod, err := s.findSinglePodByJobName(ctx, identifier); err == nil && pod != nil {
 			return jobIdentityFromPod(*pod), nil
 		}
 		if pod, err := s.findSeedPodForJobName(ctx, identifier); err == nil && pod != nil {
 			return jobIdentityFromPod(*pod), nil
-		}
-	}
-
-	if s.vcClient != nil && shouldLookupJobByPlatform(identifier) {
-		if identity, err := s.findPlatformJobIdentity(ctx, identifier); err == nil {
-			return identity, nil
 		}
 	}
 
@@ -1288,6 +1492,14 @@ func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string
 		return nil, fmt.Errorf("unable to determine vcluster for %q", identifier)
 	}
 	return identity, nil
+}
+
+func looksLikePodBackedIdentifier(identifier string) bool {
+	id := strings.ToLower(strings.TrimSpace(identifier))
+	if id == "" {
+		return false
+	}
+	return strings.Contains(id, "-worker-") || strings.Contains(id, "-master-") || strings.Contains(id, "-launcher-") || strings.Contains(id, "-chief-")
 }
 
 func (s *JobService) findSeedPodForJobName(ctx context.Context, jobName string) (*corev1.Pod, error) {
@@ -1314,9 +1526,6 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		return nil, err
 	}
 
-	searchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	type searchResult struct {
 		identity *jobIdentity
 		err      error
@@ -1331,7 +1540,7 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		go func() {
 			defer wg.Done()
 			for _, vcRef := range platformVCRefs(vc) {
-				job, getErr := s.vcClient.GetVolcanoJob(searchCtx, vcRef, "default", identifier)
+				job, getErr := s.vcClient.GetVolcanoJob(ctx, vcRef, "default", identifier)
 				if getErr != nil {
 					continue
 				}
@@ -1358,13 +1567,34 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		close(results)
 	}()
 
+	matches := make([]jobIdentity, 0, len(vclusters))
+	seen := make(map[string]struct{}, len(vclusters))
 	for result := range results {
 		if result.err != nil {
 			continue
 		}
 		if result.identity != nil {
-			cancel()
-			return result.identity, nil
+			key := strings.Join([]string{
+				strings.TrimSpace(result.identity.VClusterName),
+				strings.TrimSpace(result.identity.Namespace),
+				strings.TrimSpace(result.identity.Name),
+				strings.TrimSpace(result.identity.UID),
+			}, "|")
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			matches = append(matches, *result.identity)
+		}
+	}
+
+	if len(matches) == 1 {
+		return &matches[0], nil
+	}
+	if len(matches) > 1 {
+		return nil, &ambiguousJobMatchError{
+			Identifier: identifier,
+			Matches:    matches,
 		}
 	}
 
@@ -1508,21 +1738,47 @@ func (s *JobService) findJob(ctx context.Context, identifier string) (*unstructu
 		return exact[0], nil
 	}
 	if len(exact) > 1 {
-		return nil, fmt.Errorf("multiple volcano jobs matched %q exactly", identifier)
+		return nil, &ambiguousJobMatchError{
+			Identifier: identifier,
+			Matches:    buildAmbiguousMatchesFromJobs(exact),
+		}
 	}
 	if len(fuzzy) == 1 {
 		return fuzzy[0], nil
 	}
 	if len(fuzzy) > 1 {
-		names := make([]string, 0, len(fuzzy))
-		for _, item := range fuzzy {
-			names = append(names, fmt.Sprintf("%s/%s", item.GetNamespace(), item.GetName()))
+		return nil, &ambiguousJobMatchError{
+			Identifier: identifier,
+			Matches:    buildAmbiguousMatchesFromJobs(fuzzy),
 		}
-		sort.Strings(names)
-		return nil, fmt.Errorf("multiple volcano jobs matched %q: %s", identifier, strings.Join(names, ", "))
 	}
 
 	return nil, fmt.Errorf("volcano job %q not found in current cluster", identifier)
+}
+
+func buildAmbiguousMatchesFromJobs(items []*unstructured.Unstructured) []jobIdentity {
+	matches := make([]jobIdentity, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		match := jobIdentity{
+			Name:          firstNonEmpty(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"), item.GetName()),
+			Namespace:     firstNonEmpty(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-namespace"), item.GetNamespace()),
+			UID:           firstNonEmpty(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"), string(item.GetUID())),
+			Submitter:     firstNonEmpty(getNestedString(item.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(item.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), "-"),
+			HostNamespace: firstNonEmpty(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-host-namespace"), item.GetNamespace()),
+			HostJobName:   item.GetName(),
+		}
+		key := strings.Join([]string{match.Namespace, match.Name, match.UID, match.HostNamespace, match.HostJobName}, "|")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		matches = append(matches, match)
+	}
+	return matches
 }
 
 func (s *JobService) resolveVClusterNameFromNamespace(ctx context.Context, namespace string) string {
@@ -1558,6 +1814,13 @@ func isTerminalVolcanoJobPhase(phase string) bool {
 	default:
 		return false
 	}
+}
+
+func shouldAttachJobCheckSummary(status string, terminal bool) bool {
+	if terminal {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(status), "Running")
 }
 
 func (s *JobService) findPodGroup(ctx context.Context, identifier string) (*unstructured.Unstructured, error) {
@@ -1642,12 +1905,10 @@ func (s *JobService) resolveJobFromPods(ctx context.Context, identifier string, 
 		return nil, nil, jobLookupErr
 	}
 	if len(groups) > 1 {
-		keys := make([]string, 0, len(groups))
-		for key := range groups {
-			keys = append(keys, key)
+		return nil, nil, &ambiguousJobMatchError{
+			Identifier: identifier,
+			Matches:    buildAmbiguousMatchesFromPodGroups(groups),
 		}
-		sort.Strings(keys)
-		return nil, nil, fmt.Errorf("multiple pod-backed jobs matched %q: %s", identifier, strings.Join(keys, ", "))
 	}
 
 	var selectedKey string
@@ -1680,6 +1941,18 @@ func (s *JobService) resolveJobFromPods(ctx context.Context, identifier string, 
 		return identity, selectedPods, nil
 	}
 	return identity, siblingPods, nil
+}
+
+func buildAmbiguousMatchesFromPodGroups(groups map[string][]corev1.Pod) []jobIdentity {
+	matches := make([]jobIdentity, 0, len(groups))
+	for _, pods := range groups {
+		if len(pods) == 0 {
+			continue
+		}
+		identity := jobIdentityFromPod(pods[0])
+		matches = append(matches, *identity)
+	}
+	return matches
 }
 
 func (s *JobService) listSiblingPods(ctx context.Context, seed corev1.Pod, identity *jobIdentity) ([]corev1.Pod, error) {
@@ -1749,12 +2022,10 @@ func (s *JobService) findHostPodForIdentifier(ctx context.Context, identifier st
 
 	groups := groupPodsByDerivedJob(matched)
 	if len(groups) > 1 {
-		keys := make([]string, 0, len(groups))
-		for key := range groups {
-			keys = append(keys, key)
+		return nil, &ambiguousJobMatchError{
+			Identifier: id,
+			Matches:    buildAmbiguousMatchesFromPodGroups(groups),
 		}
-		sort.Strings(keys)
-		return nil, fmt.Errorf("multiple pod-backed jobs matched %q: %s", id, strings.Join(keys, ", "))
 	}
 
 	sort.Slice(matched, func(i, j int) bool {
@@ -2643,8 +2914,12 @@ func decodeDockerSecret(secret *corev1.Secret) []string {
 	credentials := decodeDockerCredentials(secret)
 	results := make([]string, 0, len(credentials))
 	for _, credential := range credentials {
+		registryDisplay := credential.Registry
+		if credential.RegistryHasWhitespace {
+			registryDisplay = fmt.Sprintf("%q [registry 两端有空格]", credential.RegistryRaw)
+		}
 		if credential.Registry != "" {
-			results = append(results, fmt.Sprintf("%s username: %s password: %s", credential.Registry, credential.Username, credential.Password))
+			results = append(results, fmt.Sprintf("%s username: %s password: %s", registryDisplay, credential.Username, credential.Password))
 		} else {
 			results = append(results, fmt.Sprintf("username: %s password: %s", credential.Username, credential.Password))
 		}
@@ -2690,6 +2965,7 @@ func decodeDockerCredentials(secret *corev1.Secret) []dockerCredential {
 	results := make([]dockerCredential, 0, len(registries))
 	for _, registry := range registries {
 		entry := payload.Auths[registry]
+		registryTrimmed := strings.TrimSpace(registry)
 		username := strings.TrimSpace(entry.Username)
 		password := strings.TrimSpace(entry.Password)
 		if (username == "" || password == "") && strings.TrimSpace(entry.Auth) != "" {
@@ -2710,9 +2986,11 @@ func decodeDockerCredentials(secret *corev1.Secret) []dockerCredential {
 			continue
 		}
 		results = append(results, dockerCredential{
-			Registry: registry,
-			Username: username,
-			Password: password,
+			Registry:              registryTrimmed,
+			RegistryRaw:           registry,
+			RegistryHasWhitespace: registryTrimmed != registry,
+			Username:              username,
+			Password:              password,
 		})
 	}
 
@@ -2857,6 +3135,12 @@ func (s *JobService) checkImagePullSecrets(ctx context.Context, identity *jobIde
 
 	namespace := ""
 	useHostSecret := false
+	vclusterName := ""
+	vcNamespace := ""
+	if identity != nil {
+		vclusterName = strings.TrimSpace(identity.VClusterName)
+		vcNamespace = strings.TrimSpace(identity.Namespace)
+	}
 	if identity != nil && strings.TrimSpace(identity.HostNamespace) != "" {
 		namespace = identity.HostNamespace
 		useHostSecret = true
@@ -2872,6 +3156,9 @@ func (s *JobService) checkImagePullSecrets(ctx context.Context, identity *jobIde
 		switch {
 		case useHostSecret:
 			secret, err = s.clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+			if err != nil && apierrors.IsNotFound(err) && s.vcClient != nil && identity != nil && vclusterName != "" && vcNamespace != "" {
+				secret, err = s.vcClient.GetSecret(ctx, vclusterName, vcNamespace, secretName)
+			}
 		case s.vcClient != nil && identity != nil && strings.TrimSpace(identity.VClusterName) != "" && strings.TrimSpace(namespace) != "":
 			secret, err = s.vcClient.GetSecret(ctx, identity.VClusterName, namespace, secretName)
 		default:
@@ -2897,6 +3184,18 @@ func (s *JobService) checkImagePullSecrets(ctx context.Context, identity *jobIde
 		}
 
 		credential := credentials[0]
+		if credential.RegistryHasWhitespace {
+			results = append(results, SecretCheckItem{
+				SecretName: secretName,
+				Registry:   credential.RegistryRaw,
+				Username:   credential.Username,
+				Password:   credential.Password,
+				Status:     "FAIL",
+				Message:    fmt.Sprintf("secret 中 registry 地址 %q 两端存在空格，请去掉空格后重试", credential.RegistryRaw),
+			})
+			continue
+		}
+
 		registry := strings.TrimSpace(credential.Registry)
 		if registry == "" {
 			registry = defaultRegistryHost

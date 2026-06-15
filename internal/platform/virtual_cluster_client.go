@@ -1,11 +1,11 @@
 package platform
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,9 +28,11 @@ const (
 	defaultAPIBaseURL             = "https://management.d.pjlab.org.cn"
 	defaultKubernetesBaseURL      = "https://compute.d.pjlab.org.cn"
 	defaultIAMBaseURL             = "https://iam.d.pjlab.org.cn"
+	defaultMonitorBaseURL         = "https://monitor.d.pjlab.org.cn"
 	defaultCloudAPIBaseURL        = "https://management-cloud.d.pjlab.org.cn"
 	defaultCloudKubernetesBaseURL = "https://compute-cloud.d.pjlab.org.cn"
 	defaultCloudIAMBaseURL        = "https://iam-cloud.d.pjlab.org.cn"
+	defaultCloudMonitorBaseURL    = "https://monitor-cloud.d.pjlab.org.cn"
 	defaultResourceGroup          = "default"
 	defaultRegion                 = "cn-pj-01"
 	defaultPageLimit              = 100
@@ -55,9 +57,12 @@ type clientProfile struct {
 	Name              string
 	AccessKey         string
 	SecretKey         string
+	CMSAccessKey      string
+	CMSSecretKey      string
 	BaseURL           string
 	KubernetesBaseURL string
 	IAMBaseURL        string
+	MonitorBaseURL    string
 	Subscription      string
 	ResourceGroup     string
 	Region            string
@@ -89,7 +94,7 @@ type ECSVirtualMachine struct {
 	CreatorID   string `json:"creator_id"`
 	State       string `json:"state"`
 	ProfileName string `json:"-"`
-	Properties struct {
+	Properties  struct {
 		Hostname           string `json:"hostname"`
 		MachineType        string `json:"machine_type"`
 		VirtualMachineType string `json:"virtual_machine_type"`
@@ -122,9 +127,9 @@ type AISpace struct {
 	State       string `json:"state"`
 	ProfileName string `json:"-"`
 	Properties  struct {
-		Type      string `json:"type"`
-		ImagePath string `json:"image_path"`
-		HostIP    string `json:"host_ip"`
+		Type                     string `json:"type"`
+		ImagePath                string `json:"image_path"`
+		HostIP                   string `json:"host_ip"`
 		VirtualMachineProperties struct {
 			MachineType       string `json:"machine_type"`
 			NetworkInterfaces []struct {
@@ -190,14 +195,41 @@ type storageVolumePageResponse struct {
 	NextPageToken string                  `json:"next_page_token"`
 }
 
+type telemetryResourceListResponse struct {
+	Resources []telemetryResource `json:"resources"`
+}
+
+type telemetryResource struct {
+	RID        string          `json:"rid"`
+	Properties json.RawMessage `json:"properties"`
+}
+
+type queryTokenResponse struct {
+	Token string `json:"token"`
+}
+
+type cmsLogQueryResponse struct {
+	Logs []cmsLogItem `json:"logs"`
+}
+
+type cmsLogItem struct {
+	ObservedTS string         `json:"observed_ts"`
+	Level      string         `json:"level"`
+	Msg        string         `json:"msg"`
+	Resource   map[string]any `json:"resource"`
+}
+
 type config struct {
 	AccessKey         string `json:"access_key"`
 	SecretKey         string `json:"secret_key"`
+	CMSAccessKey      string `json:"cms_access_key"`
+	CMSSecretKey      string `json:"cms_secret_key"`
 	Subscription      string `json:"subscription_id"`
 	Cluster           string `json:"cluster"`
 	BaseURL           string `json:"base_url"`
 	KubernetesBaseURL string `json:"kubernetes_base_url"`
 	IAMBaseURL        string `json:"iam_base_url"`
+	MonitorBaseURL    string `json:"monitor_base_url"`
 	ResourceGroup     string `json:"resource_group"`
 	Region            string `json:"region"`
 }
@@ -210,11 +242,14 @@ type multiProfileConfig struct {
 type ConfigProfile struct {
 	AccessKey         string `json:"access_key"`
 	SecretKey         string `json:"secret_key"`
+	CMSAccessKey      string `json:"cms_access_key"`
+	CMSSecretKey      string `json:"cms_secret_key"`
 	Subscription      string `json:"subscription_id"`
 	Cluster           string `json:"cluster"`
 	BaseURL           string `json:"base_url"`
 	KubernetesBaseURL string `json:"kubernetes_base_url"`
 	IAMBaseURL        string `json:"iam_base_url"`
+	MonitorBaseURL    string `json:"monitor_base_url"`
 	ResourceGroup     string `json:"resource_group"`
 	Region            string `json:"region"`
 }
@@ -222,15 +257,18 @@ type ConfigProfile struct {
 type ConfigSnapshot struct {
 	CurrentProfile    string                   `json:"current_profile,omitempty"`
 	Profiles          map[string]ConfigProfile `json:"profiles,omitempty"`
-	AccessKey         string `json:"access_key"`
-	SecretKey         string `json:"secret_key"`
-	Subscription      string `json:"subscription_id"`
-	Cluster           string `json:"cluster"`
-	BaseURL           string `json:"base_url"`
-	KubernetesBaseURL string `json:"kubernetes_base_url"`
-	IAMBaseURL        string `json:"iam_base_url"`
-	ResourceGroup     string `json:"resource_group"`
-	Region            string `json:"region"`
+	AccessKey         string                   `json:"access_key"`
+	SecretKey         string                   `json:"secret_key"`
+	CMSAccessKey      string                   `json:"cms_access_key"`
+	CMSSecretKey      string                   `json:"cms_secret_key"`
+	Subscription      string                   `json:"subscription_id"`
+	Cluster           string                   `json:"cluster"`
+	BaseURL           string                   `json:"base_url"`
+	KubernetesBaseURL string                   `json:"kubernetes_base_url"`
+	IAMBaseURL        string                   `json:"iam_base_url"`
+	MonitorBaseURL    string                   `json:"monitor_base_url"`
+	ResourceGroup     string                   `json:"resource_group"`
+	Region            string                   `json:"region"`
 }
 
 func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
@@ -251,6 +289,7 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 
 	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
 	iamBaseURL := defaultIAMBaseURLForCluster(cluster)
+	monitorBaseURL := defaultMonitorBaseURLForCluster(cluster)
 	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_BASE_URL")), "/"); override != "" {
 		baseURL = override
 	}
@@ -259,6 +298,9 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 	}
 	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_IAM_BASE_URL")), "/"); override != "" {
 		iamBaseURL = override
+	}
+	if override := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_MONITOR_BASE_URL")), "/"); override != "" {
+		monitorBaseURL = override
 	}
 
 	resourceGroup := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_RESOURCE_GROUP"))
@@ -286,15 +328,18 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 				Name:              "env",
 				AccessKey:         accessKey,
 				SecretKey:         secretKey,
+				CMSAccessKey:      strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_CMS_ACCESS_KEY")),
+				CMSSecretKey:      strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_CMS_SECRET_KEY")),
 				BaseURL:           baseURL,
 				KubernetesBaseURL: kubernetesBaseURL,
 				IAMBaseURL:        iamBaseURL,
+				MonitorBaseURL:    monitorBaseURL,
 				Subscription:      subscription,
 				ResourceGroup:     resourceGroup,
 				Region:            region,
 			},
 		},
-		httpClient:        &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}, true
 }
 
@@ -387,11 +432,14 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 			profile := ConfigProfile{
 				AccessKey:         raw.AccessKey,
 				SecretKey:         raw.SecretKey,
+				CMSAccessKey:      raw.CMSAccessKey,
+				CMSSecretKey:      raw.CMSSecretKey,
 				Subscription:      raw.Subscription,
 				Cluster:           normalizeClusterName(raw.Cluster),
 				BaseURL:           strings.TrimRight(strings.TrimSpace(raw.BaseURL), "/"),
 				KubernetesBaseURL: strings.TrimRight(strings.TrimSpace(raw.KubernetesBaseURL), "/"),
 				IAMBaseURL:        strings.TrimRight(strings.TrimSpace(raw.IAMBaseURL), "/"),
+				MonitorBaseURL:    strings.TrimRight(strings.TrimSpace(raw.MonitorBaseURL), "/"),
 				ResourceGroup:     strings.TrimSpace(raw.ResourceGroup),
 				Region:            strings.TrimSpace(raw.Region),
 			}
@@ -401,11 +449,14 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 		if current, ok := snapshot.Profiles[currentProfile]; ok {
 			snapshot.AccessKey = current.AccessKey
 			snapshot.SecretKey = current.SecretKey
+			snapshot.CMSAccessKey = current.CMSAccessKey
+			snapshot.CMSSecretKey = current.CMSSecretKey
 			snapshot.Subscription = current.Subscription
 			snapshot.Cluster = current.Cluster
 			snapshot.BaseURL = current.BaseURL
 			snapshot.KubernetesBaseURL = current.KubernetesBaseURL
 			snapshot.IAMBaseURL = current.IAMBaseURL
+			snapshot.MonitorBaseURL = current.MonitorBaseURL
 			snapshot.ResourceGroup = current.ResourceGroup
 			snapshot.Region = current.Region
 		}
@@ -432,6 +483,9 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 	if strings.TrimSpace(cfg.IAMBaseURL) == "" {
 		cfg.IAMBaseURL = defaultIAMBaseURLForCluster(cfg.Cluster)
 	}
+	if strings.TrimSpace(cfg.MonitorBaseURL) == "" {
+		cfg.MonitorBaseURL = defaultMonitorBaseURLForCluster(cfg.Cluster)
+	}
 	return &cfg, nil
 }
 
@@ -452,6 +506,12 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 		if strings.TrimSpace(cfg.SecretKey) != "" {
 			current.SecretKey = cfg.SecretKey
 		}
+		if strings.TrimSpace(cfg.CMSAccessKey) != "" {
+			current.CMSAccessKey = cfg.CMSAccessKey
+		}
+		if strings.TrimSpace(cfg.CMSSecretKey) != "" {
+			current.CMSSecretKey = cfg.CMSSecretKey
+		}
 		if strings.TrimSpace(cfg.Subscription) != "" || strings.TrimSpace(cfg.Cluster) != "" {
 			current.Subscription = cfg.Subscription
 		}
@@ -466,6 +526,9 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 		}
 		if strings.TrimSpace(cfg.IAMBaseURL) != "" || strings.TrimSpace(cfg.Cluster) != "" {
 			current.IAMBaseURL = cfg.IAMBaseURL
+		}
+		if strings.TrimSpace(cfg.MonitorBaseURL) != "" || strings.TrimSpace(cfg.Cluster) != "" {
+			current.MonitorBaseURL = cfg.MonitorBaseURL
 		}
 		if strings.TrimSpace(cfg.ResourceGroup) != "" {
 			current.ResourceGroup = cfg.ResourceGroup
@@ -484,11 +547,14 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 			output.Profiles[name] = config{
 				AccessKey:         profile.AccessKey,
 				SecretKey:         profile.SecretKey,
+				CMSAccessKey:      profile.CMSAccessKey,
+				CMSSecretKey:      profile.CMSSecretKey,
 				Subscription:      profile.Subscription,
 				Cluster:           profile.Cluster,
 				BaseURL:           profile.BaseURL,
 				KubernetesBaseURL: profile.KubernetesBaseURL,
 				IAMBaseURL:        profile.IAMBaseURL,
+				MonitorBaseURL:    profile.MonitorBaseURL,
 				ResourceGroup:     profile.ResourceGroup,
 				Region:            profile.Region,
 			}
@@ -518,6 +584,9 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 	}
 	if strings.TrimSpace(cfg.IAMBaseURL) == "" {
 		cfg.IAMBaseURL = defaultIAMBaseURLForCluster(cfg.Cluster)
+	}
+	if strings.TrimSpace(cfg.MonitorBaseURL) == "" {
+		cfg.MonitorBaseURL = defaultMonitorBaseURLForCluster(cfg.Cluster)
 	}
 
 	content, err := json.MarshalIndent(cfg, "", "  ")
@@ -561,6 +630,15 @@ func defaultIAMBaseURLForCluster(cluster string) string {
 	}
 }
 
+func defaultMonitorBaseURLForCluster(cluster string) string {
+	switch normalizeClusterName(cluster) {
+	case ClusterDCloud:
+		return defaultCloudMonitorBaseURL
+	default:
+		return defaultMonitorBaseURL
+	}
+}
+
 func defaultSubscriptionForCluster(cluster string) string {
 	switch normalizeClusterName(cluster) {
 	case ClusterDCloud:
@@ -583,6 +661,7 @@ func makeClientProfile(name string, cfg config) (clientProfile, bool) {
 	}
 	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
 	iamBaseURL := defaultIAMBaseURLForCluster(cluster)
+	monitorBaseURL := defaultMonitorBaseURLForCluster(cluster)
 	if override := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"); override != "" {
 		baseURL = override
 	}
@@ -591,6 +670,9 @@ func makeClientProfile(name string, cfg config) (clientProfile, bool) {
 	}
 	if override := strings.TrimRight(strings.TrimSpace(cfg.IAMBaseURL), "/"); override != "" {
 		iamBaseURL = override
+	}
+	if override := strings.TrimRight(strings.TrimSpace(cfg.MonitorBaseURL), "/"); override != "" {
+		monitorBaseURL = override
 	}
 	resourceGroup := strings.TrimSpace(cfg.ResourceGroup)
 	if resourceGroup == "" {
@@ -604,9 +686,12 @@ func makeClientProfile(name string, cfg config) (clientProfile, bool) {
 		Name:              strings.TrimSpace(name),
 		AccessKey:         accessKey,
 		SecretKey:         secretKey,
+		CMSAccessKey:      strings.TrimSpace(cfg.CMSAccessKey),
+		CMSSecretKey:      strings.TrimSpace(cfg.CMSSecretKey),
 		BaseURL:           baseURL,
 		KubernetesBaseURL: kubernetesBaseURL,
 		IAMBaseURL:        iamBaseURL,
+		MonitorBaseURL:    monitorBaseURL,
 		Subscription:      subscription,
 		ResourceGroup:     resourceGroup,
 		Region:            region,
@@ -640,11 +725,14 @@ func configProfileMapToConfig(values map[string]ConfigProfile) map[string]config
 		result[name] = config{
 			AccessKey:         value.AccessKey,
 			SecretKey:         value.SecretKey,
+			CMSAccessKey:      value.CMSAccessKey,
+			CMSSecretKey:      value.CMSSecretKey,
 			Subscription:      value.Subscription,
 			Cluster:           value.Cluster,
 			BaseURL:           value.BaseURL,
 			KubernetesBaseURL: value.KubernetesBaseURL,
 			IAMBaseURL:        value.IAMBaseURL,
+			MonitorBaseURL:    value.MonitorBaseURL,
 			ResourceGroup:     value.ResourceGroup,
 			Region:            value.Region,
 		}
@@ -669,6 +757,9 @@ func applyConfigProfileDefaults(profile *ConfigProfile) {
 	}
 	if strings.TrimSpace(profile.IAMBaseURL) == "" {
 		profile.IAMBaseURL = defaultIAMBaseURLForCluster(profile.Cluster)
+	}
+	if strings.TrimSpace(profile.MonitorBaseURL) == "" {
+		profile.MonitorBaseURL = defaultMonitorBaseURLForCluster(profile.Cluster)
 	}
 	if strings.TrimSpace(profile.ResourceGroup) == "" {
 		profile.ResourceGroup = defaultResourceGroup
@@ -716,6 +807,18 @@ func (c *VirtualClusterClient) orderedProfiles() []clientProfile {
 		profiles = append(profiles, c.profiles[name])
 	}
 	return profiles
+}
+
+func (c *VirtualClusterClient) orderedCMSProfiles() []clientProfile {
+	profiles := c.orderedProfiles()
+	result := make([]clientProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		if strings.TrimSpace(profile.CMSAccessKey) == "" || strings.TrimSpace(profile.CMSSecretKey) == "" {
+			continue
+		}
+		result = append(result, profile)
+	}
+	return result
 }
 
 func (c *VirtualClusterClient) listECSVirtualMachinesWithProfile(ctx context.Context, profile clientProfile) ([]ECSVirtualMachine, error) {
@@ -1295,10 +1398,20 @@ func (c *VirtualClusterClient) ListEvents(ctx context.Context, vclusterName stri
 	query.Set("fieldSelector", strings.Join(fieldSelector, ","))
 
 	var lastErr error
-	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/events", namespace), query)
+	for _, profile := range c.orderedCMSProfiles() {
+		clusterRef, err := c.cmsClusterRefForProfile(ctx, profile, vclusterName)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		queryToken, err := c.cmsQueryTokenForProfile(ctx, profile, clusterRef)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		reqURL := c.kubernetesClusterURLForProfile(profile, clusterRef, fmt.Sprintf("/api/v1/namespaces/%s/events", namespace), query)
 		var eventList corev1.EventList
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &eventList); err != nil {
+		if err := c.getJSONWithCMSProfileToken(ctx, profile, reqURL, queryToken, &eventList); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1308,36 +1421,228 @@ func (c *VirtualClusterClient) ListEvents(ctx context.Context, vclusterName stri
 }
 
 func (c *VirtualClusterClient) GetPodLogs(ctx context.Context, vclusterName string, namespace string, podName string, tailLines int64) ([]string, error) {
-	query := url.Values{}
-	query.Set("tailLines", fmt.Sprintf("%d", tailLines))
-
-	var (
-		body string
-		err  error
-	)
-	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log", namespace, podName), query)
-		body, err = c.getTextWithProfile(ctx, profile, reqURL)
-		if err == nil {
-			break
+	var lastErr error
+	for _, profile := range c.orderedCMSProfiles() {
+		clusterRef, err := c.cmsClusterRefForProfile(ctx, profile, vclusterName)
+		if err != nil {
+			lastErr = err
+			continue
 		}
+		lines, err := c.queryPodLogsWithCMSProfile(ctx, profile, clusterRef, namespace, podName, tailLines)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return lines, nil
 	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no cms profile available for pod logs")
+}
+
+func (c *VirtualClusterClient) queryPodLogsWithCMSProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, podName string, tailLines int64) ([]string, error) {
+	queryToken, err := c.cmsQueryTokenForProfile(ctx, profile, vclusterName)
 	if err != nil {
 		return nil, err
 	}
 
-	lines := make([]string, 0)
-	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
-		line = strings.TrimRight(line, "\n")
-		if line == "" {
-			continue
-		}
-		lines = append(lines, line)
+	reqURL := c.cmsLogQueryURL(profile, namespace, podName, tailLines)
+	var payload cmsLogQueryResponse
+	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil, queryToken)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode cms log response: %w", err)
+	}
+
+	lines := make([]string, 0, len(payload.Logs))
+	for _, item := range payload.Logs {
+		pod := emptyDash(fmt.Sprintf("%v", item.Resource["k8s.pod.name"]))
+		container := emptyDash(fmt.Sprintf("%v", item.Resource["k8s.container.name"]))
+		level := emptyDash(item.Level)
+		msg := emptyDash(item.Msg)
+		ts := emptyDash(item.ObservedTS)
+		lines = append(lines, fmt.Sprintf("[%s] [%s] [%s/%s] %s", ts, level, pod, container, msg))
 	}
 	if len(lines) == 0 {
 		return []string{"<empty log output>"}, nil
 	}
 	return lines, nil
+}
+
+func (c *VirtualClusterClient) cmsQueryTokenForProfile(ctx context.Context, profile clientProfile, vclusterName string) (string, error) {
+	telemetryRID, err := c.getPrivateTelemetryStationRID(ctx, profile)
+	if err != nil {
+		return "", err
+	}
+	return c.createCMSQueryToken(ctx, profile, telemetryRID, virtualClusterUID(vclusterName))
+}
+
+func (c *VirtualClusterClient) cmsClusterRefForProfile(ctx context.Context, profile clientProfile, vclusterName string) (string, error) {
+	ref := strings.TrimSpace(vclusterName)
+	if ref == "" {
+		return "", fmt.Errorf("virtual cluster identifier is required")
+	}
+
+	items, err := c.listVirtualClustersForProfile(ctx, profile)
+	if err == nil {
+		for _, item := range items {
+			uid := strings.TrimSpace(item.UID)
+			if uid == "" {
+				continue
+			}
+			if ref == uid || ref == "vc-"+uid || ref == strings.TrimSpace(item.Name) || ref == strings.TrimSpace(item.DisplayName) {
+				return "vc-" + uid, nil
+			}
+		}
+	}
+
+	if strings.HasPrefix(ref, "vc-") {
+		return ref, err
+	}
+	if looksLikeClusterUUID(ref) {
+		return "vc-" + ref, err
+	}
+	return ref, err
+}
+
+func looksLikeClusterUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, ch := range value {
+		switch i {
+		case 8, 13, 18, 23:
+			if ch != '-' {
+				return false
+			}
+		default:
+			if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') && (ch < 'A' || ch > 'F') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (c *VirtualClusterClient) getPrivateTelemetryStationRID(ctx context.Context, profile clientProfile) (string, error) {
+	u, _ := url.Parse(profile.BaseURL)
+	u.Path = "/rmh/v1/resources"
+	query := u.Query()
+	query.Set("filter", `resource_type="monitor.ts.v1.telemetryStation"`)
+	u.RawQuery = query.Encode()
+
+	var payload telemetryResourceListResponse
+	if err := c.getJSONWithCMSProfile(ctx, profile, u.String(), &payload); err != nil {
+		return "", err
+	}
+	for _, resource := range payload.Resources {
+		if strings.TrimSpace(resource.RID) == "" {
+			continue
+		}
+		props := parseTelemetryProperties(resource.Properties)
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprintf("%v", props["station_type"])), "PRIVATE") {
+			return strings.TrimSpace(resource.RID), nil
+		}
+	}
+	return "", fmt.Errorf("private telemetryStation rid not found")
+}
+
+func parseTelemetryProperties(raw json.RawMessage) map[string]any {
+	props := map[string]any{}
+	if len(raw) == 0 {
+		return props
+	}
+	if err := json.Unmarshal(raw, &props); err == nil {
+		return props
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		return props
+	}
+	_ = json.Unmarshal([]byte(encoded), &props)
+	return props
+}
+
+func (c *VirtualClusterClient) createCMSQueryToken(ctx context.Context, profile clientProfile, telemetryRID string, vcUUID string) (string, error) {
+	if strings.TrimSpace(telemetryRID) == "" {
+		return "", fmt.Errorf("telemetry station rid is required")
+	}
+	if strings.TrimSpace(vcUUID) == "" {
+		return "", fmt.Errorf("virtual cluster uuid is required")
+	}
+
+	u, _ := url.Parse(profile.MonitorBaseURL)
+	u.Path = fmt.Sprintf("/monitor/ts/data/v1%s/query/token", telemetryRID)
+	body := map[string]any{
+		"expire_time":   time.Now().UTC().Add(30 * 24 * time.Hour).Format("2006-01-02T15:04:05Z"),
+		"scope":         "RESOURCE",
+		"resource_type": "compute.ecp.v1.virtualCluster",
+		"resource_ids":  []string{vcUUID},
+	}
+
+	var payload queryTokenResponse
+	if err := c.postJSONWithCMSProfile(ctx, profile, u.String(), body, &payload); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(payload.Token) == "" {
+		return "", fmt.Errorf("cms query token is empty")
+	}
+	return strings.TrimSpace(payload.Token), nil
+}
+
+func (c *VirtualClusterClient) postJSONWithCMSProfile(ctx context.Context, profile clientProfile, reqURL string, payload any, out any) error {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal request for %s: %w", reqURL, err)
+	}
+	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodPost, reqURL, "application/json", bodyBytes)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	return nil
+}
+
+func (c *VirtualClusterClient) cmsLogQueryURL(profile clientProfile, namespace string, podName string, tailLines int64) string {
+	u, _ := url.Parse(profile.MonitorBaseURL)
+	u.Path = "/query/v1/logs"
+	query := u.Query()
+	query.Set("model_name", "logs.compute.ecp.v1.virtualCluster.logs")
+	for _, dimension := range []string{"resource_type", "resource_id", "id", "ts", "observed_ts", "workload_type", "workload_name", "namespace", "pod", "container", "node", "level", "msg"} {
+		query.Add("dimensions", dimension)
+	}
+	query.Set("filter", fmt.Sprintf(`namespace="%s" AND pod="%s"`, strings.TrimSpace(namespace), strings.TrimSpace(podName)))
+	query.Set("time_dimension.dimension", "observed_ts")
+	query.Set("start", time.Now().UTC().Add(-7*24*time.Hour).Format(time.RFC3339))
+	query.Set("end", time.Now().UTC().Add(5*time.Minute).Format(time.RFC3339))
+	if tailLines <= 0 {
+		tailLines = 10
+	}
+	query.Set("page_size", fmt.Sprintf("%d", tailLines))
+	query.Set("skip", "0")
+	query.Set("order_by", "observed_ts desc")
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+func virtualClusterUID(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "vc-") {
+		return strings.TrimSpace(strings.TrimPrefix(value, "vc-"))
+	}
+	return value
+}
+
+func emptyDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
 }
 
 func (c *VirtualClusterClient) listVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
@@ -1438,6 +1743,14 @@ func (c *VirtualClusterClient) listURLForProfile(profile clientProfile, skip int
 }
 
 func (c *VirtualClusterClient) authHeadersForProfile(profile clientProfile, reqURL string, method string) (map[string]string, error) {
+	return authHeadersForCredentials(profile.AccessKey, profile.SecretKey, reqURL, method)
+}
+
+func (c *VirtualClusterClient) authHeadersForCMSProfile(profile clientProfile, reqURL string, method string) (map[string]string, error) {
+	return authHeadersForCredentials(profile.CMSAccessKey, profile.CMSSecretKey, reqURL, method)
+}
+
+func authHeadersForCredentials(accessKey string, secretKey string, reqURL string, method string) (map[string]string, error) {
 	parsedURL, err := url.Parse(reqURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse auth url: %w", err)
@@ -1451,7 +1764,7 @@ func (c *VirtualClusterClient) authHeadersForProfile(profile clientProfile, reqU
 
 	signContent := fmt.Sprintf("date: %s\nhost: %s\n@request-target: %s %s", dateHeader, parsedURL.Host, strings.ToLower(method), requestTarget)
 
-	mac := hmac.New(sha256.New, []byte(profile.SecretKey))
+	mac := hmac.New(sha256.New, []byte(secretKey))
 	_, _ = mac.Write([]byte(signContent))
 	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
@@ -1459,7 +1772,7 @@ func (c *VirtualClusterClient) authHeadersForProfile(profile clientProfile, reqU
 		"Date":          dateHeader,
 		"Host":          parsedURL.Host,
 		"Accept":        "application/json",
-		"Authorization": fmt.Sprintf(`hmac accesskey="%s", algorithm="hmac-sha256", headers="date host @request-target", signature="%s"`, profile.AccessKey, signature),
+		"Authorization": fmt.Sprintf(`hmac accesskey="%s", algorithm="hmac-sha256", headers="date host @request-target", signature="%s"`, accessKey, signature),
 	}, nil
 }
 
@@ -1498,7 +1811,49 @@ func (c *VirtualClusterClient) getTextWithProfile(ctx context.Context, profile c
 	return string(body), nil
 }
 
+func (c *VirtualClusterClient) getJSONWithCMSProfile(ctx context.Context, profile clientProfile, reqURL string, out any) error {
+	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	return nil
+}
+
+func (c *VirtualClusterClient) getJSONWithCMSProfileToken(ctx context.Context, profile clientProfile, reqURL string, bearerToken string, out any) error {
+	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil, bearerToken)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	return nil
+}
+
+func (c *VirtualClusterClient) getTextWithCMSProfile(ctx context.Context, profile clientProfile, reqURL string, bearerToken string) (string, error) {
+	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil, bearerToken)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 func (c *VirtualClusterClient) doRequestWithProfile(ctx context.Context, profile clientProfile, method string, reqURL string, contentType string, requestBody []byte) ([]byte, error) {
+	return c.doSignedRequest(ctx, profile, method, reqURL, contentType, requestBody, false, "")
+}
+
+func (c *VirtualClusterClient) doRequestWithCMSProfile(ctx context.Context, profile clientProfile, method string, reqURL string, contentType string, requestBody []byte, bearerToken ...string) ([]byte, error) {
+	token := ""
+	if len(bearerToken) > 0 {
+		token = bearerToken[0]
+	}
+	return c.doSignedRequest(ctx, profile, method, reqURL, contentType, requestBody, true, token)
+}
+
+func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clientProfile, method string, reqURL string, contentType string, requestBody []byte, useCMS bool, bearerToken string) ([]byte, error) {
 	var bodyReader io.Reader
 	if len(requestBody) > 0 {
 		bodyReader = bytes.NewReader(requestBody)
@@ -1509,9 +1864,20 @@ func (c *VirtualClusterClient) doRequestWithProfile(ctx context.Context, profile
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
-	headers, err := c.authHeadersForProfile(profile, reqURL, method)
-	if err != nil {
-		return nil, err
+	headers := map[string]string{}
+	if strings.TrimSpace(bearerToken) != "" {
+		headers["Accept"] = "application/json"
+		headers["Authorization"] = "Bearer " + strings.TrimSpace(bearerToken)
+	} else {
+		var err error
+		if useCMS {
+			headers, err = c.authHeadersForCMSProfile(profile, reqURL, method)
+		} else {
+			headers, err = c.authHeadersForProfile(profile, reqURL, method)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)

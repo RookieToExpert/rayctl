@@ -203,6 +203,22 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 		{"PODGROUP", result.PodGroupName},
 		{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
 	}
+	for _, line := range result.Diagnosis {
+		summaryRows = append(summaryRows, []string{"结论", emptyDash(line)})
+	}
+	for _, secret := range result.SecretChecks {
+		summaryRows = append(summaryRows, []string{
+			"镜像账号密码",
+			fmt.Sprintf("%s | 账号=%s | 密码=%s", emptyDash(secret.SecretName), emptyDash(secret.Username), emptyDash(secret.Password)),
+		})
+		summaryRows = append(summaryRows, []string{
+			"镜像密钥结果",
+			emptyDash(secret.Message),
+		})
+	}
+	if strings.TrimSpace(result.Instruction) != "" {
+		summaryRows = append(summaryRows, []string{"下一步", result.Instruction})
+	}
 	if !result.Terminal {
 		summaryRows = append(summaryRows,
 			[]string{"INSPECT POD", result.InspectPod},
@@ -244,40 +260,26 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 	}
 
 	if !result.Terminal {
-		fmt.Fprintln(os.Stdout)
-		podRows := make([][]string, 0, len(result.Pods))
-		for _, pod := range result.Pods {
-			podRows = append(podRows, []string{
-				pod.Name,
-				emptyDash(pod.TaskSpec),
-				emptyDash(pod.TaskIndex),
-				emptyDash(pod.Phase),
-				emptyDash(pod.NodeName),
-			})
+		switch strings.ToLower(strings.TrimSpace(result.Stage)) {
+		case "scheduling":
+			// Keep only the summary and PVC tables when the job has not been scheduled to any pod yet.
+		case "startup", "failed":
+			fmt.Fprintln(os.Stdout)
+			printJobEvidenceTable("POD EVENTS", result.CheckEvidence)
+		default:
+			if shouldShowJobLogs(result) {
+				fmt.Fprintln(os.Stdout)
+				logRows := make([][]string, 0, len(result.RecentLogLines))
+				for _, line := range result.RecentLogLines {
+					logRows = append(logRows, []string{line})
+				}
+				printBoxTableWithMaxWidths(
+					[]string{"LATEST LOGS"},
+					logRows,
+					[]int{110},
+				)
+			}
 		}
-		if len(podRows) == 0 {
-			podRows = [][]string{{"-", "-", "-", "-", "-"}}
-		}
-		printBoxTableWithMaxWidths(
-			[]string{"POD", "TASK", "INDEX", "PHASE", "NODE"},
-			podRows,
-			[]int{48, 12, 8, 12, 24},
-		)
-
-		fmt.Fprintln(os.Stdout)
-		logRows := make([][]string, 0, len(result.RecentLogLines))
-		for _, line := range result.RecentLogLines {
-			logRows = append(logRows, []string{line})
-		}
-		printBoxTableWithMaxWidths(
-			[]string{"LATEST LOGS"},
-			logRows,
-			[]int{110},
-		)
-	}
-
-	if strings.TrimSpace(result.PodGroupName) != "" {
-		fmt.Fprintf(os.Stdout, "For PodGroup diagnosis, switch KUBECONFIG to the target vcluster and run: rayctl job get pg %s\n", result.PodGroupName)
 	}
 
 	if debugTiming {
@@ -298,6 +300,38 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 				{"total", result.Timings.Total.String()},
 			},
 		)
+	}
+}
+
+func printJobEvidenceTable(title string, evidence []service.CheckEvidenceItem) {
+	rows := make([][]string, 0, maxInt(1, len(evidence)))
+	if len(evidence) == 0 {
+		rows = append(rows, []string{"-", "-", "no events"})
+	} else {
+		for _, item := range evidence {
+			rows = append(rows, []string{
+				emptyDash(item.Source),
+				emptyDash(item.Status),
+				emptyDash(item.Detail),
+			})
+		}
+	}
+	printBoxTableWithMaxWidths(
+		[]string{title + " SOURCE", "STATUS", "DETAIL"},
+		rows,
+		[]int{28, 18, 110},
+	)
+}
+
+func shouldShowJobLogs(result *service.JobGetResult) bool {
+	if result == nil || result.Terminal {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(result.Stage)) {
+	case "scheduling", "startup":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -943,7 +977,6 @@ func joinLinesOrDash(values []string) string {
 	}
 	return strings.Join(values, "\n")
 }
-
 
 func formatOptionalDuration(d time.Duration) string {
 	if d <= 0 {
