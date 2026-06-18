@@ -809,6 +809,24 @@ func (c *VirtualClusterClient) orderedProfiles() []clientProfile {
 	return profiles
 }
 
+func (c *VirtualClusterClient) currentClientProfile() (clientProfile, bool) {
+	if len(c.profiles) == 0 {
+		return clientProfile{
+			Name:              firstNonEmpty(c.currentProfile, "default"),
+			AccessKey:         c.accessKey,
+			SecretKey:         c.secretKey,
+			BaseURL:           c.baseURL,
+			KubernetesBaseURL: c.kubernetesBaseURL,
+			IAMBaseURL:        c.iamBaseURL,
+			Subscription:      c.subscription,
+			ResourceGroup:     c.resourceGroup,
+			Region:            c.region,
+		}, true
+	}
+	profile, ok := c.profiles[c.currentProfile]
+	return profile, ok
+}
+
 func (c *VirtualClusterClient) orderedCMSProfiles() []clientProfile {
 	profiles := c.orderedProfiles()
 	result := make([]clientProfile, 0, len(profiles))
@@ -1011,6 +1029,21 @@ func (c *VirtualClusterClient) ListVirtualClusters(ctx context.Context) ([]Virtu
 	return c.listVirtualClusters(ctx)
 }
 
+func (c *VirtualClusterClient) ListCurrentProfileVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+	items, err := c.listVirtualClustersForProfile(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].ProfileName = profile.Name
+	}
+	return items, nil
+}
+
 func (c *VirtualClusterClient) ListECSVirtualMachines(ctx context.Context) ([]ECSVirtualMachine, error) {
 	result := make([]ECSVirtualMachine, 0)
 	seen := make(map[string]struct{})
@@ -1172,6 +1205,38 @@ func (c *VirtualClusterClient) GetVolcanoJob(ctx context.Context, vclusterName s
 			continue
 		}
 		return &obj, nil
+	}
+	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) ListVolcanoJobs(ctx context.Context, vclusterName string, namespace string) ([]unstructured.Unstructured, error) {
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs", namespace), nil)
+		var list unstructured.UnstructuredList
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &list); err != nil {
+			lastErr = err
+			continue
+		}
+		return list.Items, nil
+	}
+	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) ListPods(ctx context.Context, vclusterName string, namespace string) ([]corev1.Pod, error) {
+	query := url.Values{}
+	query.Set("filter", fmt.Sprintf("namespace=%q", namespace))
+	query.Set("order", "name asc")
+
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/api/v1/pods", query)
+		var podList corev1.PodList
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &podList); err != nil {
+			lastErr = err
+			continue
+		}
+		return podList.Items, nil
 	}
 	return nil, lastErr
 }

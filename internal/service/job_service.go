@@ -38,6 +38,7 @@ var (
 		Version:  "v1beta1",
 		Resource: "podgroups",
 	}
+	utcPlus8 = time.FixedZone("UTC+8", 8*60*60)
 )
 
 const (
@@ -109,6 +110,27 @@ type JobGetResult struct {
 	RecentEvents           []EventItem
 	RecentLogLines         []string
 	Timings                JobGetTimings
+}
+
+type JobClusterItem struct {
+	ClusterName    string
+	JobName        string
+	Submitter      string
+	Status         string
+	CreatedAt      string
+	CreatedAtShort string
+	CreatedAtTime  time.Time
+}
+
+type JobClusterListResult struct {
+	ClusterName     string
+	Items           []JobClusterItem
+	ActiveJobCount  int
+	ActivePodCount  int
+	TotalJobCount   int
+	TotalPodCount   int
+	ShowClusterName bool
+	StatusFilter    string
 }
 
 type JobCheckResult struct {
@@ -653,6 +675,217 @@ func (s *JobService) GetJobs(ctx context.Context, identifier string) ([]*JobGetR
 	})
 
 	return results, nil
+}
+
+func (s *JobService) GetClusterJobs(ctx context.Context, identifier string, includeInactive bool, statusFilter string) (*JobClusterListResult, error) {
+	if s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for cluster job listing")
+	}
+
+	targetName, vcRef, _, err := s.resolveClusterTarget(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	list, err := s.vcClient.ListVolcanoJobs(ctx, vcRef, "default")
+	if err != nil {
+		return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", targetName, err)
+	}
+	allPods, err := s.vcClient.ListPods(ctx, vcRef, "default")
+	if err != nil {
+		return nil, fmt.Errorf("list pods for cluster %q: %w", targetName, err)
+	}
+	podsByJob := make(map[string][]corev1.Pod)
+	for _, pod := range allPods {
+		jobName := firstNonEmpty(strings.TrimSpace(pod.Labels["volcano.sh/job-name"]), deriveJobName(pod))
+		if strings.TrimSpace(jobName) == "" {
+			continue
+		}
+		podsByJob[jobName] = append(podsByJob[jobName], pod)
+	}
+
+	items := make([]JobClusterItem, 0, len(list))
+	activeJobCount := 0
+	activePodCount := 0
+	totalJobCount := 0
+	totalPodCount := 0
+	for i := range list {
+		job := &list[i]
+		status := extractVolcanoJobPhase(job)
+		jobName := firstNonEmpty(
+			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"),
+			job.GetName(),
+		)
+		pods := podsByJob[jobName]
+		_, _, activeCount := summarizeJobPods(pods)
+		totalJobCount++
+		totalPodCount += len(pods)
+		if isActiveVolcanoJobPhase(status) {
+			activeJobCount++
+			activePodCount += activeCount
+		}
+		if !includeInactive && !isActiveVolcanoJobPhase(status) {
+			continue
+		}
+		items = append(items, JobClusterItem{
+			ClusterName:    targetName,
+			JobName:        jobName,
+			Submitter:      firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), "-"),
+			Status:         status,
+			CreatedAt:      job.GetCreationTimestamp().Time.In(utcPlus8).Format("2006-01-02 15:04:05"),
+			CreatedAtShort: job.GetCreationTimestamp().Time.In(utcPlus8).Format("01-02 15:04"),
+			CreatedAtTime:  job.GetCreationTimestamp().Time,
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
+			return items[i].CreatedAtTime.After(items[j].CreatedAtTime)
+		}
+		return items[i].JobName < items[j].JobName
+	})
+	items = filterClusterItemsByStatus(items, statusFilter)
+
+	return &JobClusterListResult{
+		ClusterName:    targetName,
+		Items:          items,
+		ActiveJobCount: activeJobCount,
+		ActivePodCount: activePodCount,
+		TotalJobCount:  totalJobCount,
+		TotalPodCount:  totalPodCount,
+		StatusFilter:   normalizeClusterStatusFilter(statusFilter),
+	}, nil
+}
+
+func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeInactive bool, statusFilter string) (*JobClusterListResult, error) {
+	if s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for cluster job listing")
+	}
+
+	vclusters, err := s.vcClient.ListCurrentProfileVirtualClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list current tenant virtual clusters: %w", err)
+	}
+
+	items := make([]JobClusterItem, 0)
+	activeJobCount := 0
+	activePodCount := 0
+	totalJobCount := 0
+	totalPodCount := 0
+
+	for _, vc := range vclusters {
+		clusterName := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
+		vcRef := firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID))
+
+		list, err := s.vcClient.ListVolcanoJobs(ctx, vcRef, "default")
+		if err != nil {
+			return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", clusterName, err)
+		}
+		allPods, err := s.vcClient.ListPods(ctx, vcRef, "default")
+		if err != nil {
+			return nil, fmt.Errorf("list pods for cluster %q: %w", clusterName, err)
+		}
+		podsByJob := make(map[string][]corev1.Pod)
+		for _, pod := range allPods {
+			jobName := firstNonEmpty(strings.TrimSpace(pod.Labels["volcano.sh/job-name"]), deriveJobName(pod))
+			if strings.TrimSpace(jobName) == "" {
+				continue
+			}
+			podsByJob[jobName] = append(podsByJob[jobName], pod)
+		}
+
+		for i := range list {
+			job := &list[i]
+			status := extractVolcanoJobPhase(job)
+			jobName := firstNonEmpty(
+				getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"),
+				job.GetName(),
+			)
+			pods := podsByJob[jobName]
+			_, _, activeCount := summarizeJobPods(pods)
+			totalJobCount++
+			totalPodCount += len(pods)
+			if isActiveVolcanoJobPhase(status) {
+				activeJobCount++
+				activePodCount += activeCount
+			}
+			if !includeInactive && !isActiveVolcanoJobPhase(status) {
+				continue
+			}
+			items = append(items, JobClusterItem{
+				ClusterName:    clusterName,
+				JobName:        jobName,
+				Submitter:      firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), "-"),
+				Status:         status,
+				CreatedAt:      job.GetCreationTimestamp().Time.In(utcPlus8).Format("2006-01-02 15:04:05"),
+				CreatedAtShort: job.GetCreationTimestamp().Time.In(utcPlus8).Format("01-02 15:04"),
+				CreatedAtTime:  job.GetCreationTimestamp().Time,
+			})
+		}
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
+			return items[i].CreatedAtTime.After(items[j].CreatedAtTime)
+		}
+		if items[i].ClusterName != items[j].ClusterName {
+			return items[i].ClusterName < items[j].ClusterName
+		}
+		return items[i].JobName < items[j].JobName
+	})
+	items = filterClusterItemsByStatus(items, statusFilter)
+
+	return &JobClusterListResult{
+		ClusterName:     "当前租户全部分区",
+		Items:           items,
+		ActiveJobCount:  activeJobCount,
+		ActivePodCount:  activePodCount,
+		TotalJobCount:   totalJobCount,
+		TotalPodCount:   totalPodCount,
+		ShowClusterName: true,
+		StatusFilter:    normalizeClusterStatusFilter(statusFilter),
+	}, nil
+}
+
+func normalizeClusterStatusFilter(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "all":
+		return ""
+	case "pending":
+		return "pending"
+	case "running":
+		return "running"
+	case "active":
+		return "active"
+	default:
+		return ""
+	}
+}
+
+func filterClusterItemsByStatus(items []JobClusterItem, statusFilter string) []JobClusterItem {
+	filter := normalizeClusterStatusFilter(statusFilter)
+	if filter == "" {
+		return items
+	}
+	filtered := make([]JobClusterItem, 0, len(items))
+	for _, item := range items {
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		switch filter {
+		case "pending":
+			if status == "pending" {
+				filtered = append(filtered, item)
+			}
+		case "running":
+			if status == "running" {
+				filtered = append(filtered, item)
+			}
+		case "active":
+			if status == "running" || status == "pending" {
+				filtered = append(filtered, item)
+			}
+		}
+	}
+	return filtered
 }
 
 func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResult, error) {
@@ -1807,6 +2040,15 @@ func extractVolcanoJobPhase(job *unstructured.Unstructured) string {
 	))
 }
 
+func isActiveVolcanoJobPhase(phase string) bool {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "running", "pending":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminalVolcanoJobPhase(phase string) bool {
 	switch strings.ToLower(strings.TrimSpace(phase)) {
 	case "aborted", "completed", "failed", "terminated", "succeeded":
@@ -1814,6 +2056,148 @@ func isTerminalVolcanoJobPhase(phase string) bool {
 	default:
 		return false
 	}
+}
+
+func summarizeJobPods(pods []corev1.Pod) (runningCount int, pendingCount int, activeCount int) {
+	for _, pod := range pods {
+		switch pod.Status.Phase {
+		case corev1.PodRunning:
+			runningCount++
+			activeCount++
+		case corev1.PodPending:
+			pendingCount++
+			activeCount++
+		case corev1.PodUnknown:
+			activeCount++
+		}
+	}
+	return runningCount, pendingCount, activeCount
+}
+
+func desiredReplicaTotal(job *unstructured.Unstructured) int {
+	if job == nil {
+		return 0
+	}
+	total := 0
+	tasks, found, err := unstructured.NestedSlice(job.Object, "spec", "tasks")
+	if err == nil && found {
+		for _, task := range tasks {
+			taskMap, ok := task.(map[string]any)
+			if !ok {
+				continue
+			}
+			replicas, found, err := unstructured.NestedInt64(taskMap, "replicas")
+			if err == nil && found {
+				total += int(replicas)
+			}
+		}
+	}
+	if total > 0 {
+		return total
+	}
+	if minAvailable, found, err := unstructured.NestedInt64(job.Object, "spec", "minAvailable"); err == nil && found {
+		return int(minAvailable)
+	}
+	return 0
+}
+
+func (s *JobService) resolveClusterTarget(ctx context.Context, identifier string) (string, string, map[string]struct{}, error) {
+	id := strings.TrimSpace(identifier)
+	if id == "" {
+		return "", "", nil, fmt.Errorf("cluster identifier is required")
+	}
+
+	if s.vcClient == nil {
+		return id, id, clusterRefSet(clusterRefCandidates(id)), nil
+	}
+
+	vclusters, err := s.vcClient.ListVirtualClusters(ctx)
+	if err != nil {
+		return id, id, clusterRefSet(clusterRefCandidates(id)), nil
+	}
+
+	exact := make([]platform.VirtualCluster, 0)
+	fuzzy := make([]platform.VirtualCluster, 0)
+	for _, vc := range vclusters {
+		candidates := clusterRefCandidates(vc.Name, vc.DisplayName, vc.UID, "vc-"+strings.TrimSpace(vc.UID))
+		if clusterCandidateContains(candidates, id, true) {
+			exact = append(exact, vc)
+			continue
+		}
+		if clusterCandidateContains(candidates, id, false) {
+			fuzzy = append(fuzzy, vc)
+		}
+	}
+
+	selected := exact
+	if len(selected) == 0 {
+		selected = fuzzy
+	}
+	if len(selected) == 0 {
+		return id, id, clusterRefSet(clusterRefCandidates(id)), nil
+	}
+	if len(selected) > 1 {
+		names := make([]string, 0, len(selected))
+		for _, vc := range selected {
+			names = append(names, firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID)))
+		}
+		sort.Strings(names)
+		return "", "", nil, fmt.Errorf("multiple clusters matched %q: %s", id, strings.Join(names, ", "))
+	}
+
+	vc := selected[0]
+	display := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
+	return display, firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID)), clusterRefSet(clusterRefCandidates(vc.Name, vc.DisplayName, vc.UID, "vc-"+strings.TrimSpace(vc.UID))), nil
+}
+
+func clusterRefCandidates(values ...string) []string {
+	result := make([]string, 0, len(values)+2)
+	seen := make(map[string]struct{}, len(values)+2)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	for _, value := range values {
+		add(value)
+		if strings.HasPrefix(strings.TrimSpace(value), "vc-") {
+			add(strings.TrimPrefix(strings.TrimSpace(value), "vc-"))
+		} else if looksLikeUUID(strings.TrimSpace(value)) {
+			add("vc-" + strings.TrimSpace(value))
+		}
+	}
+	return result
+}
+
+func clusterRefSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[strings.TrimSpace(value)] = struct{}{}
+	}
+	return result
+}
+
+func clusterCandidateContains(candidates []string, identifier string, exact bool) bool {
+	id := strings.TrimSpace(identifier)
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if exact {
+			if candidate == id {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(candidate, id) {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldAttachJobCheckSummary(status string, terminal bool) bool {

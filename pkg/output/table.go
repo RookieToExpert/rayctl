@@ -9,6 +9,8 @@ import (
 	"unicode"
 
 	"rayctl/internal/service"
+
+	"golang.org/x/term"
 )
 
 type tableOptions struct {
@@ -301,6 +303,82 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 			},
 		)
 	}
+}
+
+func PrintJobClusterList(result *service.JobClusterListResult) {
+	summaryRows := [][]string{
+		{"分区名", emptyDash(result.ClusterName)},
+		{"活跃任务数量", fmt.Sprintf("%d", result.ActiveJobCount)},
+		{"活跃 Pod 数量", fmt.Sprintf("%d", result.ActivePodCount)},
+		{"总任务数量", fmt.Sprintf("%d", result.TotalJobCount)},
+		{"总 Pod 数量", fmt.Sprintf("%d", result.TotalPodCount)},
+	}
+	if strings.TrimSpace(result.StatusFilter) != "" {
+		summaryRows = append(summaryRows, []string{"过滤条件", strings.TrimSpace(result.StatusFilter)})
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		summaryRows,
+		[]int{18, 48},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(summaryRows), 1)...),
+			minWidths:   []int{12, 20},
+		},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	rows := make([][]string, 0, len(result.Items))
+	for _, item := range result.Items {
+		row := []string{}
+		if result.ShowClusterName {
+			row = append(row, emptyDash(item.ClusterName))
+		}
+		createdAt := item.CreatedAt
+		if result.ShowClusterName {
+			createdAt = item.CreatedAtShort
+		}
+		row = append(row,
+			emptyDash(item.JobName),
+			emptyDash(item.Submitter),
+			emptyDash(item.Status),
+			emptyDash(createdAt),
+		)
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		row := []string{}
+		if result.ShowClusterName {
+			row = append(row, "-")
+		}
+		row = append(row, "-", "-", "-", "-")
+		rows = append(rows, row)
+	}
+
+	headers := []string{"任务", "提交人", "状态", "创建时间"}
+	maxWidths := []int{56, 18, 10, 19}
+	minWidths := []int{18, 8, 8, 19}
+	combinedNoWrap := make([][2]int, 0)
+	combinedNoWrap = append(combinedNoWrap, noWrapCellsForSingleColumn(len(rows), 1)...)
+	combinedNoWrap = append(combinedNoWrap, noWrapCellsForSingleColumn(len(rows), 2)...)
+	combinedNoWrap = append(combinedNoWrap, noWrapCellsForSingleColumn(len(rows), 3)...)
+	if result.ShowClusterName {
+		headers = append([]string{"分区名"}, headers...)
+		maxWidths = []int{24, 64, 32, 7, 11}
+		minWidths = []int{12, 20, 10, 7, 11}
+		combinedNoWrap = make([][2]int, 0)
+		combinedNoWrap = append(combinedNoWrap, noWrapCellsForSingleColumn(len(rows), 3)...)
+		combinedNoWrap = append(combinedNoWrap, noWrapCellsForSingleColumn(len(rows), 4)...)
+	}
+
+	printBoxTableWithOptions(
+		headers,
+		rows,
+		maxWidths,
+		tableOptions{
+			noWrapCells: makeNoWrapCells(combinedNoWrap...),
+			minWidths:   minWidths,
+		},
+	)
 }
 
 func printJobEvidenceTable(title string, evidence []service.CheckEvidenceItem) {
@@ -986,12 +1064,17 @@ func formatOptionalDuration(d time.Duration) string {
 }
 
 func terminalWidth() int {
-	if value := strings.TrimSpace(os.Getenv("COLUMNS")); value != "" {
-		if width, err := strconv.Atoi(value); err == nil && width > 0 {
+	for _, fd := range []uintptr{os.Stdout.Fd(), os.Stderr.Fd(), os.Stdin.Fd()} {
+		if width, _, err := term.GetSize(int(fd)); err == nil && width >= 40 {
 			return width
 		}
 	}
-	return 120
+	if value := strings.TrimSpace(os.Getenv("COLUMNS")); value != "" {
+		if width, err := strconv.Atoi(value); err == nil && width >= 40 && width <= 400 {
+			return width
+		}
+	}
+	return 100
 }
 
 func maxInt(a int, b int) int {

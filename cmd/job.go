@@ -73,7 +73,76 @@ func newJobGetCmd() *cobra.Command {
 	}
 
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
+	getCmd.AddCommand(newJobGetClusterCmd())
 	return getCmd
+}
+
+func newJobGetClusterCmd() *cobra.Command {
+	var includeInactive bool
+	var allVC bool
+
+	cmd := &cobra.Command{
+		Use:   "cluster [cluster-name-or-uid] [pending|running|active|all]",
+		Short: "查看某个分区下的任务列表",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if allVC {
+				if len(args) > 1 {
+					return fmt.Errorf("at most one status filter is allowed when using -a")
+				}
+				if len(args) == 1 && !isValidClusterStatusFilter(args[0]) {
+					return fmt.Errorf("unsupported status filter %q", args[0])
+				}
+				return nil
+			}
+			if len(args) == 0 || len(args) > 2 {
+				return fmt.Errorf("expected cluster name with optional status filter")
+			}
+			if len(args) == 2 && !isValidClusterStatusFilter(args[1]) {
+				return fmt.Errorf("unsupported status filter %q", args[1])
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientset, dynamicClient, err := newJobClients()
+			if err != nil {
+				return err
+			}
+
+			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
+			var result *service.JobClusterListResult
+			statusFilter := ""
+			if allVC {
+				if len(args) == 1 {
+					statusFilter = args[0]
+				}
+				result, err = jobService.GetCurrentTenantClusterJobs(context.Background(), includeInactive, statusFilter)
+			} else {
+				if len(args) == 2 {
+					statusFilter = args[1]
+				}
+				result, err = jobService.GetClusterJobs(context.Background(), args[0], includeInactive, statusFilter)
+			}
+			if err != nil {
+				return err
+			}
+			output.PrintJobClusterList(result)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&includeInactive, "all-status", false, "显示包含非 Running/Pending 在内的全部任务")
+	cmd.Flags().BoolVarP(&allVC, "all-vc", "a", false, "查看当前租户下全部分区的任务")
+	return cmd
+}
+
+func isValidClusterStatusFilter(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "pending", "running", "active", "all":
+		return true
+	default:
+		return false
+	}
 }
 
 func virtualClusterUIDFromName(value string) string {
