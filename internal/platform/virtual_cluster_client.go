@@ -147,9 +147,17 @@ type AISpace struct {
 }
 
 type IAMUser struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Username string `json:"username"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Username       string `json:"username"`
+	TenantCode     string `json:"tenant_code"`
+	Status         string `json:"status"`
+	Source         string `json:"source"`
+	ConsoleState   string `json:"console_state"`
+	OpenAPIState   string `json:"open_api_state"`
+	MFAState       string `json:"mfa_state"`
+	CreateTime     string `json:"create_time"`
+	LastLoginTime  string `json:"last_login_time"`
 }
 
 type AIComputeNode struct {
@@ -183,7 +191,9 @@ type aiSpaceListResponse struct {
 }
 
 type iamUserListResponse struct {
-	Users []IAMUser `json:"users"`
+	Users         []IAMUser `json:"users"`
+	NextPageToken string    `json:"next_page_token"`
+	TotalSize     int       `json:"total_size"`
 }
 
 type aiComputeNodeListResponse struct {
@@ -656,7 +666,7 @@ func makeClientProfile(name string, cfg config) (clientProfile, bool) {
 	if subscription == "" {
 		subscription = defaultSubscriptionForCluster(cluster)
 	}
-	if accessKey == "" || secretKey == "" || subscription == "" {
+	if accessKey == "" || secretKey == "" {
 		return clientProfile{}, false
 	}
 	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
@@ -928,6 +938,87 @@ func (c *VirtualClusterClient) resolveUsernamesWithProfile(ctx context.Context, 
 		for _, user := range payload.Users {
 			result[user.ID] = firstNonEmpty(user.Username, user.Name, user.ID)
 		}
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile clientProfile) ([]IAMUser, error) {
+	pageToken := "1"
+	users := make([]IAMUser, 0)
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/idp/v1/users"
+		query := u.Query()
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("page_token", pageToken)
+		query.Set("filter", `(status="valid")`)
+		u.RawQuery = query.Encode()
+
+		var payload iamUserListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.Users) == 0 {
+			break
+		}
+		users = append(users, payload.Users...)
+		if strings.TrimSpace(payload.NextPageToken) == "" || payload.NextPageToken == pageToken {
+			break
+		}
+		pageToken = payload.NextPageToken
+	}
+	return users, nil
+}
+
+func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string) ([]IAMUser, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("user identifier is required")
+	}
+
+	users, err := c.listUsersForProfile(ctx, profile)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+
+	exact := make([]IAMUser, 0)
+	prefix := make([]IAMUser, 0)
+	contains := make([]IAMUser, 0)
+	lowerID := strings.ToLower(identifier)
+	for _, user := range users {
+		username := strings.TrimSpace(user.Username)
+		id := strings.TrimSpace(user.ID)
+		name := strings.TrimSpace(user.Name)
+		switch {
+		case username == identifier || id == identifier:
+			exact = append(exact, user)
+		case strings.HasPrefix(strings.ToLower(username), lowerID) || strings.HasPrefix(strings.ToLower(id), lowerID) || strings.HasPrefix(strings.ToLower(name), lowerID):
+			prefix = append(prefix, user)
+		case strings.Contains(strings.ToLower(username), lowerID) || strings.Contains(strings.ToLower(id), lowerID) || strings.Contains(strings.ToLower(name), lowerID):
+			contains = append(contains, user)
+		}
+	}
+
+	result := exact
+	if len(result) == 0 {
+		result = prefix
+	}
+	if len(result) == 0 {
+		result = contains
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if strings.TrimSpace(result[i].Username) != strings.TrimSpace(result[j].Username) {
+			return strings.TrimSpace(result[i].Username) < strings.TrimSpace(result[j].Username)
+		}
+		return strings.TrimSpace(result[i].ID) < strings.TrimSpace(result[j].ID)
+	})
+	if len(result) == 0 {
+		return nil, fmt.Errorf("user %q not found in current tenant", identifier)
 	}
 	return result, nil
 }
@@ -1367,37 +1458,43 @@ func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragment(ctx cont
 
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		u, _ := url.Parse(profile.BaseURL)
-		u.Path = "/rmh/v1/resources:page"
-		query := u.Query()
+		pageToken := "1"
+		for {
+			u, _ := url.Parse(profile.BaseURL)
+			u.Path = "/rmh/v1/resources:page"
+			query := u.Query()
 
-		filter := fmt.Sprintf(`resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume"  AND %s="*%s*"`, field, fragment)
-		query.Set("filter", filter)
-		query.Set("page_size", "10")
-		query.Set("page_token", "1")
-		u.RawQuery = query.Encode()
+			filter := fmt.Sprintf(`(resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume") AND %s="*%s*"`, field, fragment)
+			query.Set("filter", filter)
+			query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+			query.Set("page_token", pageToken)
+			u.RawQuery = query.Encode()
 
-		var payload storageVolumePageResponse
-		if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
-			lastErr = err
-			continue
-		}
+			var payload storageVolumePageResponse
+			if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
+				lastErr = err
+				break
+			}
 
-		for i := range payload.Resources {
-			resource := &payload.Resources[i]
-			resource.ProfileName = profile.Name
-			if field == "name" {
-				if strings.EqualFold(strings.TrimSpace(resource.Name), fragment) || strings.Contains(strings.TrimSpace(resource.Name), fragment) {
+			for i := range payload.Resources {
+				resource := &payload.Resources[i]
+				resource.ProfileName = profile.Name
+				if field == "name" {
+					if strings.EqualFold(strings.TrimSpace(resource.Name), fragment) || strings.Contains(strings.TrimSpace(resource.Name), fragment) {
+						return resource, nil
+					}
+					continue
+				}
+				if strings.EqualFold(strings.TrimSpace(resource.ID), fragment) || strings.Contains(strings.TrimSpace(resource.ID), fragment) {
 					return resource, nil
 				}
-				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(resource.ID), fragment) || strings.Contains(strings.TrimSpace(resource.ID), fragment) {
-				return resource, nil
+
+			nextPageToken := strings.TrimSpace(payload.NextPageToken)
+			if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
+				break
 			}
-		}
-		if len(payload.Resources) > 0 {
-			return &payload.Resources[0], nil
+			pageToken = nextPageToken
 		}
 	}
 	if lastErr != nil {

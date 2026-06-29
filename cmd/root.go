@@ -20,6 +20,7 @@ func init() {
 	rootCmd.AddCommand(newNodeCmd())
 	rootCmd.AddCommand(newJobCmd())
 	rootCmd.AddCommand(newPVCCmd())
+	rootCmd.AddCommand(newUserCmd())
 }
 
 func Execute() error {

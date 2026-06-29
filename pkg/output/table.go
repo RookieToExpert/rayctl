@@ -381,6 +381,77 @@ func PrintJobClusterList(result *service.JobClusterListResult) {
 	)
 }
 
+func PrintUserDetail(result *service.UserGetResult) {
+	if result == nil {
+		return
+	}ZSH-READY # rayctl pvc check afs-hanyang1
+Error: pvc "afs-hanyang1": pvc "afs-hanyang1" not found
+Usage:
+  rayctl pvc check <pvc-name> [pvc-name...] [flags]
+
+Flags:
+  -h, --help   help for check
+  -l, --long   Show additional detail rows such as tenant
+
+Global Flags:
+  -k, --kubeconfig string   Path to the kubeconfig file (defaults to KUBECONFIG or the hard-coded path in internal/kube/client.go)
+
+pvc "afs-hanyang1": pvc "afs-hanyang1" not found
+ZSH-READY #
+
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"ID", emptyDash(result.ID)},
+			{"USERNAME", emptyDash(result.Username)},
+			{"NAME", emptyDash(result.Name)},
+			{"TENANT CODE", emptyDash(result.TenantCode)},
+			{"STATUS", emptyDash(result.Status)},
+			{"SOURCE", emptyDash(result.Source)},
+		},
+		[]int{14, 72},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+			),
+			minWidths: []int{10, 20},
+		},
+	)
+
+	if len(result.Jobs) == 0 {
+		return
+	}
+
+	fmt.Fprintln(os.Stdout)
+	jobRows := make([][]string, 0, maxInt(1, len(result.Jobs)))
+	for _, job := range result.Jobs {
+		jobRows = append(jobRows, []string{
+			emptyDash(job.ClusterName),
+			emptyDash(job.JobName),
+			emptyDash(job.Status),
+			emptyDash(job.CreatedAtShort),
+		})
+	}
+	printBoxTableWithOptions(
+		[]string{"分区名", "任务", "状态", "创建时间"},
+		jobRows,
+		[]int{24, 64, 10, 11},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(append(
+				noWrapCellsForSingleColumn(len(jobRows), 2),
+				noWrapCellsForSingleColumn(len(jobRows), 3)...,
+			)...),
+			minWidths: []int{12, 20, 7, 11},
+		},
+	)
+}
+
 func printJobEvidenceTable(title string, evidence []service.CheckEvidenceItem) {
 	rows := make([][]string, 0, maxInt(1, len(evidence)))
 	if len(evidence) == 0 {

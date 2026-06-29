@@ -3024,6 +3024,7 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 						current.BackendPV = strings.TrimSpace(current.PVName)
 					}
 				}
+				s.enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx, vclusterName, namespace, pvc, &current)
 			}
 		case hostNamespace != "":
 			pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, ref.ClaimName, metav1.GetOptions{})
@@ -3031,7 +3032,9 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 				current.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
 			}
 		}
-		s.enrichObjectStorageVolumeClaimRef(ctx, hostNamespace, &current)
+		if strings.TrimSpace(current.FrontendVolume) == "" {
+			s.enrichObjectStorageVolumeClaimRef(ctx, hostNamespace, &current)
+		}
 		s.enrichHostVolumeClaimRef(ctx, &current)
 		current.DisplayPV = firstNonEmpty(current.BackendPV, current.PVName)
 		resolved = append(resolved, current)
@@ -3105,6 +3108,41 @@ func (s *JobService) enrichObjectStorageVolumeClaimRef(ctx context.Context, host
 	}
 
 	secret, err := s.clientset.CoreV1().Secrets(hostNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil || secret == nil {
+		return
+	}
+
+	if endpoint := decodeObjectStorageEndpoint(secret); endpoint != "" {
+		ref.FrontendVolume = endpoint
+	}
+}
+
+func (s *JobService) enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx context.Context, vclusterName string, namespace string, pvc *corev1.PersistentVolumeClaim, ref *VolumeClaimRef) {
+	if ref == nil || strings.TrimSpace(ref.FrontendVolume) != "" || s.vcClient == nil || pvc == nil {
+		return
+	}
+
+	vclusterName = strings.TrimSpace(vclusterName)
+	namespace = strings.TrimSpace(namespace)
+	if vclusterName == "" || namespace == "" {
+		return
+	}
+
+	storageClassName := ""
+	if pvc.Spec.StorageClassName != nil {
+		storageClassName = strings.TrimSpace(*pvc.Spec.StorageClassName)
+	}
+	storageClass := strings.TrimSpace(firstNonEmpty(storageClassName, pvc.Annotations["volume.kubernetes.io/storage-provisioner"], pvc.Annotations["volume.beta.kubernetes.io/storage-provisioner"]))
+	if !looksLikeObjectStoragePVC(storageClass, pvc.Annotations) {
+		return
+	}
+
+	secretName := strings.TrimSpace(firstNonEmpty(pvc.Annotations["secretName"], pvc.Annotations["afs.secretName"]))
+	if secretName == "" {
+		return
+	}
+
+	secret, err := s.vcClient.GetSecret(ctx, vclusterName, namespace, secretName)
 	if err != nil || secret == nil {
 		return
 	}
@@ -3552,7 +3590,7 @@ func (s *JobService) checkImagePullSecrets(ctx context.Context, identity *jobIde
 			results = append(results, SecretCheckItem{
 				SecretName: secretName,
 				Status:     "FAIL",
-				Message:    err.Error(),
+				Message:    formatSecretCheckMessage(err, secretName, namespace),
 			})
 			continue
 		}
@@ -3611,6 +3649,23 @@ func (s *JobService) checkImagePullSecrets(ctx context.Context, identity *jobIde
 	}
 
 	return results
+}
+
+func formatSecretCheckMessage(err error, secretName string, namespace string) string {
+	if err == nil {
+		return ""
+	}
+
+	message := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "secret") && strings.Contains(lower, "not found") {
+		ns := strings.TrimSpace(namespace)
+		if ns == "" {
+			return fmt.Sprintf("secret %q 在当前 namespace 不存在，镜像密钥检测不通过", secretName)
+		}
+		return fmt.Sprintf("secret %q 在当前 namespace %q 不存在，镜像密钥检测不通过", secretName, ns)
+	}
+	return message
 }
 
 func verifyDockerLogin(ctx context.Context, registry string, username string, password string) error {

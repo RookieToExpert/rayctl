@@ -164,16 +164,25 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 	listNamespacesBegin := time.Now()
 	targetNamespaces, err := s.listTargetNamespacesForNode(ctx, node)
 	listNamespacesDuration := time.Since(listNamespacesBegin)
-	if err != nil {
-		return nil, err
-	}
 
 	listPodsBegin := time.Now()
-	pods, err := s.listPodsOnNodeInNamespaces(ctx, nodeName, targetNamespaces)
-	listPodsDuration := time.Since(listPodsBegin)
-	if err != nil {
-		return nil, err
+	pods := make([]corev1.Pod, 0)
+	switch {
+	case err == nil && len(targetNamespaces) > 0:
+		pods, err = s.listPodsOnNodeInNamespaces(ctx, nodeName, targetNamespaces)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		// Fallback for VC kubeconfig: host-cluster namespace label mapping is not
+		// available there, so we directly inspect pods visible to the current
+		// kubeconfig on the target node.
+		pods, err = s.listVisiblePodsOnNode(ctx, nodeName)
+		if err != nil {
+			return nil, err
+		}
 	}
+	listPodsDuration := time.Since(listPodsBegin)
 
 	summarizeBegin := time.Now()
 	allocatedCPU, allocatedMemory, allocatedGPU, podNames := summarizePodRequests(pods)
@@ -297,7 +306,7 @@ func (s *NodeService) Uncordon(ctx context.Context, nodeName string) (*NodeMutat
 func (s *NodeService) listTargetNamespacesForNode(ctx context.Context, node *corev1.Node) ([]string, error) {
 	vclusterNamespace := node.Labels[nodeVClusterNamespaceLabelKey]
 	if vclusterNamespace == "" {
-		return nil, fmt.Errorf("node %q is missing label %q", node.Name, nodeVClusterNamespaceLabelKey)
+		return nil, nil
 	}
 
 	namespaces, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
@@ -314,6 +323,32 @@ func (s *NodeService) listTargetNamespacesForNode(ctx context.Context, node *cor
 
 	sort.Strings(items)
 	return items, nil
+}
+
+func (s *NodeService) listVisiblePodsOnNode(ctx context.Context, nodeName string) ([]corev1.Pod, error) {
+	fieldSelector := fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
+	pods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+		FieldSelector: fieldSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list visible pods on node %q: %w", nodeName, err)
+	}
+
+	filtered := make([]corev1.Pod, 0, len(pods.Items))
+	for _, pod := range pods.Items {
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		filtered = append(filtered, pod)
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Namespace == filtered[j].Namespace {
+			return filtered[i].Name < filtered[j].Name
+		}
+		return filtered[i].Namespace < filtered[j].Namespace
+	})
+	return filtered, nil
 }
 
 func (s *NodeService) listPodsOnNodeInNamespaces(ctx context.Context, nodeName string, namespaces []string) ([]corev1.Pod, error) {
