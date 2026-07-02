@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,6 +16,9 @@ const (
 	disallowPrivilegedContainersPolicyName = "disallow-privileged-containers"
 	disallowPrivilegedRuleName             = "privileged-containers"
 	policySelectorLabelKey                 = "vcluster.loft.sh/vcluster-name"
+	policySelectorNamespaceLabelKey        = "vcluster.loft.sh/vcluster-namespace"
+	policyLegacySelectorLabelKey           = "cluster.x-k8s.io/vcluster-name"
+	policyNamespaceLabelPrefix             = "vcluster.loft.sh/ns-label-vc-"
 )
 
 var clusterPolicyGVR = schema.GroupVersionResource{
@@ -37,6 +41,23 @@ type PolicyUpdateResult struct {
 	SelectorValue  string
 	AlreadyPresent bool
 	Updated        bool
+}
+
+type PolicyGetResult struct {
+	PolicyName     string
+	TargetCluster  string
+	TargetUID      string
+	TargetSelector string
+	Matched        bool
+	Items          []PolicyWhitelistItem
+}
+
+type PolicyWhitelistItem struct {
+	ClusterName   string
+	ClusterUID    string
+	Tenant        string
+	SelectorKey   string
+	SelectorValue string
 }
 
 func NewPolicyService(dynamicClient dynamic.Interface, clusterService *ClusterService) *PolicyService {
@@ -96,6 +117,85 @@ func (s *PolicyService) UpdateClusterPolicy(ctx context.Context, policyName stri
 		return nil, fmt.Errorf("update clusterpolicy %q: %w", policyName, err)
 	}
 	return result, nil
+}
+
+func (s *PolicyService) GetClusterPolicy(ctx context.Context, policyName string, clusterIdentifier string) (*PolicyGetResult, error) {
+	policyName = strings.TrimSpace(policyName)
+	if policyName != disallowPrivilegedContainersPolicyName {
+		return nil, fmt.Errorf("当前 policy get 仅支持 %q", disallowPrivilegedContainersPolicyName)
+	}
+	if s.dynamicClient == nil {
+		return nil, fmt.Errorf("policy get requires kubernetes dynamic client")
+	}
+
+	policy, err := s.dynamicClient.Resource(clusterPolicyGVR).Get(ctx, policyName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get clusterpolicy %q: %w", policyName, err)
+	}
+
+	items, err := extractDisallowPrivilegedWhitelist(policy)
+	if err != nil {
+		return nil, err
+	}
+	s.resolvePolicyWhitelistNames(ctx, items)
+	sortPolicyWhitelistItems(items)
+
+	result := &PolicyGetResult{
+		PolicyName: policyName,
+		Items:      items,
+	}
+
+	clusterIdentifier = strings.TrimSpace(clusterIdentifier)
+	if clusterIdentifier == "" {
+		return result, nil
+	}
+	if s.clusterService == nil {
+		return nil, fmt.Errorf("policy get requires cluster service when filtering by vc")
+	}
+
+	clusterResult, err := s.clusterService.Get(ctx, clusterIdentifier)
+	if err != nil {
+		return nil, err
+	}
+
+	controlPlaneNamespace := strings.TrimSpace(clusterResult.ControlPlaneNamespace)
+	result.TargetCluster = clusterResult.ClusterName
+	result.TargetUID = clusterResult.ClusterUID
+	result.TargetSelector = policySelectorLabelKey + "=" + controlPlaneNamespace
+
+	matches := make([]PolicyWhitelistItem, 0)
+	for _, item := range items {
+		if item.ClusterUID != clusterResult.ClusterUID {
+			continue
+		}
+		result.Matched = true
+		matches = append(matches, item)
+	}
+	if len(matches) == 0 {
+		matches = append(matches, PolicyWhitelistItem{
+			ClusterName:   clusterResult.ClusterName,
+			ClusterUID:    clusterResult.ClusterUID,
+			SelectorKey:   policySelectorLabelKey,
+			SelectorValue: controlPlaneNamespace,
+		})
+	}
+	result.Items = matches
+	return result, nil
+}
+
+func sortPolicyWhitelistItems(items []PolicyWhitelistItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].ClusterName != items[j].ClusterName {
+			return items[i].ClusterName < items[j].ClusterName
+		}
+		if items[i].ClusterUID != items[j].ClusterUID {
+			return items[i].ClusterUID < items[j].ClusterUID
+		}
+		if items[i].SelectorKey != items[j].SelectorKey {
+			return items[i].SelectorKey < items[j].SelectorKey
+		}
+		return items[i].SelectorValue < items[j].SelectorValue
+	})
 }
 
 func ensureDisallowPrivilegedPolicyExclusion(policy *unstructured.Unstructured, selectorValue string) (*unstructured.Unstructured, bool, error) {
@@ -187,4 +287,133 @@ func hasNamespaceSelectorExclusion(items []any, selectorKey string, selectorValu
 		}
 	}
 	return false
+}
+
+func extractDisallowPrivilegedWhitelist(policy *unstructured.Unstructured) ([]PolicyWhitelistItem, error) {
+	if policy == nil {
+		return nil, fmt.Errorf("clusterpolicy is required")
+	}
+
+	rules, found, err := unstructured.NestedSlice(policy.Object, "spec", "rules")
+	if err != nil {
+		return nil, fmt.Errorf("read clusterpolicy rules: %w", err)
+	}
+	if !found || len(rules) == 0 {
+		return nil, fmt.Errorf("clusterpolicy %q has no spec.rules", policy.GetName())
+	}
+
+	var ruleMap map[string]any
+	for _, item := range rules {
+		current, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(fmt.Sprintf("%v", current["name"])) == disallowPrivilegedRuleName {
+			ruleMap = current
+			break
+		}
+	}
+	if ruleMap == nil {
+		return nil, fmt.Errorf("clusterpolicy %q has no rule named %q", policy.GetName(), disallowPrivilegedRuleName)
+	}
+
+	anyItems, found, err := unstructured.NestedSlice(ruleMap, "exclude", "any")
+	if err != nil {
+		return nil, fmt.Errorf("read clusterpolicy exclude.any: %w", err)
+	}
+	if !found {
+		return nil, nil
+	}
+
+	result := make([]PolicyWhitelistItem, 0)
+	seen := make(map[string]struct{})
+	for _, item := range anyItems {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		matchLabels, found, err := unstructured.NestedStringMap(itemMap, "resources", "namespaceSelector", "matchLabels")
+		if err == nil && found {
+			for _, selectorKey := range []string{policySelectorLabelKey, policySelectorNamespaceLabelKey, policyLegacySelectorLabelKey} {
+				selectorValue := strings.TrimSpace(matchLabels[selectorKey])
+				uid := uidFromPolicySelectorValue(selectorValue)
+				if uid == "" {
+					continue
+				}
+				appendPolicyWhitelistItem(&result, seen, PolicyWhitelistItem{
+					ClusterUID:    uid,
+					SelectorKey:   selectorKey,
+					SelectorValue: selectorValue,
+				})
+			}
+		}
+
+		matchExpressions, found, err := unstructured.NestedSlice(itemMap, "resources", "selector", "matchExpressions")
+		if err != nil || !found {
+			continue
+		}
+		for _, expr := range matchExpressions {
+			exprMap, ok := expr.(map[string]any)
+			if !ok {
+				continue
+			}
+			selectorKey := strings.TrimSpace(fmt.Sprintf("%v", exprMap["key"]))
+			if !strings.HasPrefix(selectorKey, policyNamespaceLabelPrefix) {
+				continue
+			}
+			uid := strings.TrimPrefix(selectorKey, policyNamespaceLabelPrefix)
+			if uid == "" {
+				continue
+			}
+			operator := strings.TrimSpace(fmt.Sprintf("%v", exprMap["operator"]))
+			if operator == "" || operator == "<nil>" {
+				operator = "Exists"
+			}
+			appendPolicyWhitelistItem(&result, seen, PolicyWhitelistItem{
+				ClusterUID:    uid,
+				SelectorKey:   selectorKey,
+				SelectorValue: operator,
+			})
+		}
+	}
+	return result, nil
+}
+
+func appendPolicyWhitelistItem(result *[]PolicyWhitelistItem, seen map[string]struct{}, item PolicyWhitelistItem) {
+	key := item.ClusterUID + "|" + item.SelectorKey + "|" + item.SelectorValue
+	if _, ok := seen[key]; ok {
+		return
+	}
+	seen[key] = struct{}{}
+	*result = append(*result, item)
+}
+
+func uidFromPolicySelectorValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return strings.TrimPrefix(value, "vc-")
+}
+
+func (s *PolicyService) resolvePolicyWhitelistNames(ctx context.Context, items []PolicyWhitelistItem) {
+	if s == nil || s.clusterService == nil || s.clusterService.vcClient == nil || len(items) == 0 {
+		return
+	}
+	uids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.ClusterUID != "" {
+			uids = append(uids, item.ClusterUID)
+		}
+	}
+	names, tenants, err := s.clusterService.vcClient.ResolveDisplayNamesWithProfiles(ctx, uids)
+	if err != nil {
+		return
+	}
+	for i := range items {
+		uid := items[i].ClusterUID
+		items[i].ClusterName = firstNonEmpty(names[uid], "vc-"+uid)
+		items[i].Tenant = tenants[uid]
+	}
 }
