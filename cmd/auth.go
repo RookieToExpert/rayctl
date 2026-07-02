@@ -18,6 +18,7 @@ func newAuthCmd() *cobra.Command {
 	}
 
 	authCmd.AddCommand(newAuthAFSCmd())
+	authCmd.AddCommand(newAuthUserCmd())
 	return authCmd
 }
 
@@ -38,6 +39,33 @@ func newAuthAFSCmd() *cobra.Command {
 				return err
 			}
 			output.PrintAuthAFSResult(result)
+			return nil
+		},
+	}
+}
+
+func newAuthUserCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "user <username-or-userid>",
+		Short: "查看用户所属组和权限",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+
+			authService := service.NewAuthService(vcClient)
+			results, err := authService.GetUser(context.Background(), args[0])
+			if err != nil {
+				return err
+			}
+			for i, result := range results {
+				if i > 0 {
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
+				output.PrintAuthUserResult(result)
+			}
 			return nil
 		},
 	}

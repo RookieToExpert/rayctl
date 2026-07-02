@@ -488,6 +488,97 @@ func PrintAuthAFSResult(result *service.AuthAFSResult) {
 	)
 }
 
+func PrintAuthUserResult(result *service.AuthUserResult) {
+	if result == nil {
+		return
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"ID", emptyDash(result.ID)},
+			{"USERNAME", emptyDash(result.Username)},
+			{"NAME", emptyDash(result.Name)},
+			{"TENANT CODE", emptyDash(result.TenantCode)},
+			{"STATUS", emptyDash(result.Status)},
+			{"SOURCE", emptyDash(result.Source)},
+			{"用户组数量", strconv.Itoa(len(result.Groups))},
+			{"权限数量", strconv.Itoa(len(result.Permissions))},
+		},
+		[]int{14, 72},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+				[2]int{6, 1},
+				[2]int{7, 1},
+			),
+			minWidths: []int{10, 20},
+		},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	groupRows := make([][]string, 0, maxInt(1, len(result.Groups)))
+	if len(result.Groups) == 0 {
+		groupRows = append(groupRows, []string{"-", "-", "-", "-"})
+	} else {
+		for _, group := range result.Groups {
+			groupRows = append(groupRows, []string{
+				emptyDash(firstNonEmptyOutput(group.DisplayName, group.Name, group.PosixGroupName)),
+				emptyDash(group.PosixGroupName),
+				emptyDash(group.ID),
+				emptyDash(group.Status),
+			})
+		}
+	}
+	groupNoWrap := make([][2]int, 0, len(groupRows))
+	groupNoWrap = append(groupNoWrap, noWrapCellsForSingleColumn(len(groupRows), 3)...)
+	printBoxTableWithOptions(
+		[]string{"GROUP", "POSIX", "ID", "STATUS"},
+		groupRows,
+		[]int{32, 28, 36, 10},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(groupNoWrap...),
+			minWidths:   []int{10, 10, 18, 8},
+		},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	permissionRows := make([][]string, 0, maxInt(1, len(result.Permissions)))
+	if len(result.Permissions) == 0 {
+		permissionRows = append(permissionRows, []string{"-", "-", "-", "-", "-", "-", "-"})
+	} else {
+		for _, item := range result.Permissions {
+			permissionRows = append(permissionRows, []string{
+				emptyDash(item.Source),
+				emptyDash(item.Member),
+				emptyDash(item.Service),
+				emptyDash(item.Scope),
+				emptyDash(item.Roles),
+				emptyDash(item.RoleNames),
+				emptyDash(item.CreateTime),
+			})
+		}
+	}
+	permissionNoWrap := make([][2]int, 0, len(permissionRows)*3)
+	permissionNoWrap = append(permissionNoWrap, noWrapCellsForSingleColumn(len(permissionRows), 0)...)
+	permissionNoWrap = append(permissionNoWrap, noWrapCellsForSingleColumn(len(permissionRows), 2)...)
+	permissionNoWrap = append(permissionNoWrap, noWrapCellsForSingleColumn(len(permissionRows), 6)...)
+	printBoxTableWithOptions(
+		[]string{"SOURCE", "MEMBER", "SERVICE", "SCOPE", "ROLES", "ROLE NAMES", "CREATE TIME"},
+		permissionRows,
+		[]int{8, 24, 10, 56, 28, 28, 19},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(permissionNoWrap...),
+			minWidths:   []int{6, 10, 8, 18, 10, 12, 19},
+		},
+	)
+}
+
 func PrintVCList(result *service.VCListResult) {
 	if result == nil {
 		return
@@ -1423,6 +1514,15 @@ func joinOrDash(values []string) string {
 		return "-"
 	}
 	return strings.Join(values, ", ")
+}
+
+func firstNonEmptyOutput(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func joinLinesOrDash(values []string) string {

@@ -163,6 +163,16 @@ type IAMUser struct {
 	LastLoginTime string `json:"last_login_time"`
 }
 
+type IAMGroup struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	DisplayName    string `json:"display_name"`
+	PosixGroupName string `json:"posix_group_name"`
+	TenantCode     string `json:"tenant_code"`
+	Status         string `json:"status"`
+	CreateTime     string `json:"create_time"`
+}
+
 type IAMBindingPolicy struct {
 	ID             string        `json:"id"`
 	Scope          string        `json:"scope"`
@@ -217,6 +227,12 @@ type iamUserListResponse struct {
 	Users         []IAMUser `json:"users"`
 	NextPageToken string    `json:"next_page_token"`
 	TotalSize     int       `json:"total_size"`
+}
+
+type iamGroupListResponse struct {
+	Groups        []IAMGroup `json:"groups"`
+	NextPageToken string     `json:"next_page_token"`
+	TotalSize     int        `json:"total_size"`
 }
 
 type iamBindingPolicyListResponse struct {
@@ -1048,6 +1064,44 @@ func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string)
 	})
 	if len(result) == 0 {
 		return nil, fmt.Errorf("user %q not found in current tenant", identifier)
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) ListUserGroups(ctx context.Context, userID string) ([]IAMGroup, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user id is required")
+	}
+
+	pageToken := "1"
+	result := make([]IAMGroup, 0)
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = fmt.Sprintf("/iam/idp/v1/users/%s:getGroups", url.PathEscape(userID))
+		query := u.Query()
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("page_token", pageToken)
+		query.Set("order_by", "create_time desc")
+		u.RawQuery = query.Encode()
+
+		var payload iamGroupListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.Groups) == 0 {
+			break
+		}
+		result = append(result, payload.Groups...)
+		nextToken := strings.TrimSpace(payload.NextPageToken)
+		if nextToken == "" || nextToken == pageToken {
+			break
+		}
+		pageToken = nextToken
 	}
 	return result, nil
 }

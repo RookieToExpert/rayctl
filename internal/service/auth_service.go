@@ -30,6 +30,36 @@ type AuthAFSItem struct {
 	CreateTime     string
 }
 
+type AuthUserResult struct {
+	ID          string
+	Username    string
+	Name        string
+	TenantCode  string
+	Status      string
+	Source      string
+	Groups      []AuthGroupItem
+	Permissions []AuthPermissionItem
+}
+
+type AuthGroupItem struct {
+	ID             string
+	Name           string
+	DisplayName    string
+	PosixGroupName string
+	Status         string
+}
+
+type AuthPermissionItem struct {
+	Source     string
+	Member     string
+	Service    string
+	Scope      string
+	Roles      string
+	RoleNames  string
+	PolicyID   string
+	CreateTime string
+}
+
 func NewAuthService(vcClient *platform.VirtualClusterClient) *AuthService {
 	return &AuthService{vcClient: vcClient}
 }
@@ -85,6 +115,68 @@ func (s *AuthService) GetAFS(ctx context.Context, afsName string) (*AuthAFSResul
 	}, nil
 }
 
+func (s *AuthService) GetUser(ctx context.Context, identifier string) ([]*AuthUserResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for auth lookup")
+	}
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("user identifier is required")
+	}
+
+	users, err := s.vcClient.FindUsers(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list binding policies: %w", err)
+	}
+
+	results := make([]*AuthUserResult, 0, len(users))
+	for _, user := range users {
+		groups, err := s.vcClient.ListUserGroups(ctx, user.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list groups for user %q: %w", firstNonEmpty(user.Username, user.ID), err)
+		}
+
+		groupItems := make([]AuthGroupItem, 0, len(groups))
+		groupByID := make(map[string]AuthGroupItem, len(groups))
+		for _, group := range groups {
+			item := AuthGroupItem{
+				ID:             strings.TrimSpace(group.ID),
+				Name:           strings.TrimSpace(group.Name),
+				DisplayName:    strings.TrimSpace(group.DisplayName),
+				PosixGroupName: strings.TrimSpace(group.PosixGroupName),
+				Status:         strings.TrimSpace(group.Status),
+			}
+			groupItems = append(groupItems, item)
+			if item.ID != "" {
+				groupByID[item.ID] = item
+			}
+		}
+		sort.SliceStable(groupItems, func(i, j int) bool {
+			if groupDisplayName(groupItems[i]) != groupDisplayName(groupItems[j]) {
+				return groupDisplayName(groupItems[i]) < groupDisplayName(groupItems[j])
+			}
+			return groupItems[i].ID < groupItems[j].ID
+		})
+
+		permissions := collectUserPermissions(user, groupByID, policies)
+		results = append(results, &AuthUserResult{
+			ID:          user.ID,
+			Username:    user.Username,
+			Name:        user.Name,
+			TenantCode:  user.TenantCode,
+			Status:      user.Status,
+			Source:      user.Source,
+			Groups:      groupItems,
+			Permissions: permissions,
+		})
+	}
+	return results, nil
+}
+
 func extractAFSNameFromScope(scope string) string {
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
@@ -100,6 +192,91 @@ func extractAFSNameFromScope(scope string) string {
 		name = name[:cut]
 	}
 	return strings.TrimSpace(name)
+}
+
+func collectUserPermissions(user platform.IAMUser, groupByID map[string]AuthGroupItem, policies []platform.IAMBindingPolicy) []AuthPermissionItem {
+	userID := strings.TrimSpace(user.ID)
+	items := make([]AuthPermissionItem, 0)
+	seen := make(map[string]struct{})
+	for _, policy := range policies {
+		memberValue := strings.TrimSpace(policy.MemberValue)
+		source := ""
+		member := ""
+		switch {
+		case isIAMUserMember(policy.MemberType) && memberValue == userID:
+			source = "DIRECT"
+			member = firstNonEmpty(user.Username, user.Name, user.ID)
+		case isIAMGroupMember(policy.MemberType):
+			group, ok := groupByID[memberValue]
+			if !ok {
+				continue
+			}
+			source = "GROUP"
+			member = groupDisplayName(group)
+		default:
+			continue
+		}
+
+		roleDisplays, roleNames := extractIAMRoleNames(policy.RoleInfos)
+		item := AuthPermissionItem{
+			Source:     source,
+			Member:     member,
+			Service:    strings.TrimSpace(policy.Service),
+			Scope:      normalizeAuthScope(policy.Scope),
+			Roles:      strings.Join(roleDisplays, ","),
+			RoleNames:  strings.Join(roleNames, ","),
+			PolicyID:   strings.TrimSpace(policy.ID),
+			CreateTime: formatLocalTime(policy.CreateTime),
+		}
+		key := item.Source + "|" + item.Member + "|" + item.Scope + "|" + item.RoleNames + "|" + item.PolicyID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, item)
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Source != items[j].Source {
+			return items[i].Source < items[j].Source
+		}
+		if items[i].Service != items[j].Service {
+			return items[i].Service < items[j].Service
+		}
+		if items[i].Scope != items[j].Scope {
+			return items[i].Scope < items[j].Scope
+		}
+		if items[i].Member != items[j].Member {
+			return items[i].Member < items[j].Member
+		}
+		return items[i].PolicyID < items[j].PolicyID
+	})
+	return items
+}
+
+func groupDisplayName(group AuthGroupItem) string {
+	return firstNonEmpty(group.DisplayName, group.Name, group.PosixGroupName, group.ID)
+}
+
+func isIAMUserMember(memberType string) bool {
+	return strings.EqualFold(strings.TrimSpace(memberType), "USER")
+}
+
+func isIAMGroupMember(memberType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(memberType)) {
+	case "GROUP", "USER_GROUP", "USERGROUP", "GROUPS":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeAuthScope(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if strings.HasPrefix(scope, "/rm/") {
+		return strings.TrimPrefix(scope, "/rm")
+	}
+	return scope
 }
 
 func extractIAMRoleNames(roles []platform.IAMRoleInfo) ([]string, []string) {
