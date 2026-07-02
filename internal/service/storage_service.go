@@ -40,6 +40,13 @@ type PVCCheckResult struct {
 	Items []PVCCheckItemResult
 }
 
+type PVCheckResult struct {
+	HostPVName  string
+	HostPVCName string
+	AFSName     string
+	Tenant      string
+}
+
 type PVCCreateRequest struct {
 	Name       string
 	Namespace  string
@@ -192,6 +199,47 @@ func (s *StorageService) CheckPVC(ctx context.Context, pvcName string) (*PVCChec
 	})
 
 	return &PVCCheckResult{Items: items}, nil
+}
+
+func (s *StorageService) CheckPV(ctx context.Context, identifier string) (*PVCheckResult, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("pv name or uid is required")
+	}
+
+	hostPVName := identifier
+	if !strings.HasPrefix(strings.ToLower(hostPVName), "pvc-") {
+		hostPVName = "pvc-" + hostPVName
+	}
+
+	pv, err := s.clientset.CoreV1().PersistentVolumes().Get(ctx, hostPVName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get host pv %q: %w", hostPVName, err)
+	}
+
+	hostPVCName := "-"
+	resourceUID := ""
+	if pv.Spec.ClaimRef != nil {
+		hostPVCName = firstNonEmpty(strings.TrimSpace(pv.Spec.ClaimRef.Name), "-")
+		resourceUID = extractResourceUIDFromName(strings.TrimSpace(pv.Spec.ClaimRef.Name))
+	}
+
+	afsName := "-"
+	tenant := "-"
+	if resourceUID != "" && s.vcClient != nil {
+		resource, resourceErr := s.vcClient.FindStorageVolumeResourceByUID(ctx, resourceUID)
+		if resourceErr == nil && resource != nil {
+			afsName = firstNonEmpty(resource.Name, resource.DisplayName, resource.ID, "-")
+			tenant = firstNonEmpty(strings.TrimSpace(resource.ProfileName), "-")
+		}
+	}
+
+	return &PVCheckResult{
+		HostPVName:  pv.Name,
+		HostPVCName: hostPVCName,
+		AFSName:     afsName,
+		Tenant:      tenant,
+	}, nil
 }
 
 func (s *StorageService) findHostVolumesForAFS(ctx context.Context, resourceUID string) ([]string, []string, error) {

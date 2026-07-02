@@ -72,6 +72,8 @@ type VirtualCluster struct {
 	UID         string `json:"uid"`
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
+	Region      string `json:"region"`
+	State       string `json:"state"`
 	ProfileName string `json:"-"`
 }
 
@@ -147,17 +149,17 @@ type AISpace struct {
 }
 
 type IAMUser struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	Username       string `json:"username"`
-	TenantCode     string `json:"tenant_code"`
-	Status         string `json:"status"`
-	Source         string `json:"source"`
-	ConsoleState   string `json:"console_state"`
-	OpenAPIState   string `json:"open_api_state"`
-	MFAState       string `json:"mfa_state"`
-	CreateTime     string `json:"create_time"`
-	LastLoginTime  string `json:"last_login_time"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Username      string `json:"username"`
+	TenantCode    string `json:"tenant_code"`
+	Status        string `json:"status"`
+	Source        string `json:"source"`
+	ConsoleState  string `json:"console_state"`
+	OpenAPIState  string `json:"open_api_state"`
+	MFAState      string `json:"mfa_state"`
+	CreateTime    string `json:"create_time"`
+	LastLoginTime string `json:"last_login_time"`
 }
 
 type AIComputeNode struct {

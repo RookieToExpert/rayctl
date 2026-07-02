@@ -384,21 +384,7 @@ func PrintJobClusterList(result *service.JobClusterListResult) {
 func PrintUserDetail(result *service.UserGetResult) {
 	if result == nil {
 		return
-	}ZSH-READY # rayctl pvc check afs-hanyang1
-Error: pvc "afs-hanyang1": pvc "afs-hanyang1" not found
-Usage:
-  rayctl pvc check <pvc-name> [pvc-name...] [flags]
-
-Flags:
-  -h, --help   help for check
-  -l, --long   Show additional detail rows such as tenant
-
-Global Flags:
-  -k, --kubeconfig string   Path to the kubeconfig file (defaults to KUBECONFIG or the hard-coded path in internal/kube/client.go)
-
-pvc "afs-hanyang1": pvc "afs-hanyang1" not found
-ZSH-READY #
-
+	}
 
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
@@ -448,6 +434,176 @@ ZSH-READY #
 				noWrapCellsForSingleColumn(len(jobRows), 3)...,
 			)...),
 			minWidths: []int{12, 20, 7, 11},
+		},
+	)
+}
+
+func PrintVCList(result *service.VCListResult) {
+	if result == nil {
+		return
+	}
+
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	if len(result.Items) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-"})
+	} else {
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.Name),
+				emptyDash(item.UID),
+				emptyDash(item.Tenant),
+				emptyDash(item.Region),
+				emptyDash(item.State),
+			})
+		}
+	}
+
+	printBoxTableWithOptions(
+		[]string{"VC", "UID", "TENANT", "REGION", "STATE"},
+		rows,
+		[]int{32, 36, 18, 12, 12},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(append(
+				noWrapCellsForSingleColumn(len(rows), 1),
+				noWrapCellsForSingleColumn(len(rows), 3)...,
+			)...),
+			minWidths: []int{18, 36, 8, 8, 8},
+		},
+	)
+}
+
+func PrintVCDetail(result *service.VCDetailResult) {
+	if result == nil {
+		return
+	}
+
+	rows := [][]string{
+		{"VC", emptyDash(result.Name)},
+		{"UID", emptyDash(result.UID)},
+		{"TENANT", emptyDash(result.Tenant)},
+		{"REGION", emptyDash(result.Region)},
+		{"STATE", emptyDash(result.State)},
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		rows,
+		[]int{12, 72},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
+			minWidths:   []int{8, 24},
+		},
+	)
+}
+
+func PrintClusterDetail(result *service.ClusterGetResult) {
+	if result == nil {
+		return
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"分区名", emptyDash(result.ClusterName)},
+			{"VC UID", emptyDash(result.ClusterUID)},
+			{"控制面 namespace", emptyDash(result.ControlPlaneNamespace)},
+			{"资源 namespace 数量", fmt.Sprintf("%d", result.ResourceNamespaceCount)},
+		},
+		[]int{20, 84},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+			),
+			minWidths: []int{16, 32},
+		},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	rows := make([][]string, 0, maxInt(1, len(result.ResourceNamespaces)))
+	if len(result.ResourceNamespaces) == 0 {
+		rows = append(rows, []string{"-", "-"})
+	} else {
+		for _, item := range result.ResourceNamespaces {
+			rows = append(rows, []string{
+				emptyDash(item.ResourceNamespace),
+				emptyDash(item.VirtualNamespace),
+			})
+		}
+	}
+
+	printBoxTableWithOptions(
+		[]string{"RESOURCE NAMESPACE", "VIRTUAL NAMESPACE"},
+		rows,
+		[]int{36, 48},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(append(
+				noWrapCellsForSingleColumn(len(rows), 0),
+				noWrapCellsForSingleColumn(len(rows), 1)...,
+			)...),
+			minWidths: []int{24, 24},
+		},
+	)
+}
+
+func PrintPolicyUpdateResult(result *service.PolicyUpdateResult) {
+	if result == nil {
+		return
+	}
+
+	status := "updated"
+	if result.AlreadyPresent {
+		status = "already exists"
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"POLICY", emptyDash(result.PolicyName)},
+			{"VC", emptyDash(result.ClusterName)},
+			{"VC UID", emptyDash(result.ClusterUID)},
+			{"RULE", emptyDash(result.RuleName)},
+			{"SELECTOR", emptyDash(result.SelectorKey + "=" + result.SelectorValue)},
+			{"RESULT", status},
+		},
+		[]int{14, 96},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+			),
+			minWidths: []int{10, 28},
+		},
+	)
+}
+
+func PrintPVCheckDetail(result *service.PVCheckResult) {
+	if result == nil {
+		return
+	}
+
+	rows := [][]string{
+		{"HOST PV", emptyDash(result.HostPVName)},
+		{"HOST PVC", emptyDash(result.HostPVCName)},
+		{"AFS", emptyDash(result.AFSName)},
+	}
+	if strings.TrimSpace(result.Tenant) != "" && strings.TrimSpace(result.Tenant) != "-" {
+		rows = append(rows, []string{"TENANT", emptyDash(result.Tenant)})
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		rows,
+		[]int{12, 88},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
+			minWidths:   []int{10, 28},
 		},
 	)
 }

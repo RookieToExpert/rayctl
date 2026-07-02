@@ -18,9 +18,12 @@ func init() {
 	rootCmd.AddCommand(newClusterCmd())
 	rootCmd.AddCommand(newECSCmd())
 	rootCmd.AddCommand(newNodeCmd())
+	rootCmd.AddCommand(newPolicyCmd())
+	rootCmd.AddCommand(newPVCmd())
 	rootCmd.AddCommand(newJobCmd())
 	rootCmd.AddCommand(newPVCCmd())
 	rootCmd.AddCommand(newUserCmd())
+	rootCmd.AddCommand(newVCCmd())
 }
 
 func Execute() error {
