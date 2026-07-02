@@ -19,6 +19,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -1618,6 +1619,51 @@ func (c *VirtualClusterClient) GetPersistentVolume(ctx context.Context, vcluster
 	return nil, lastErr
 }
 
+func (c *VirtualClusterClient) ListClusterRoleBindings(ctx context.Context, vclusterName string, labelSelector string) ([]rbacv1.ClusterRoleBinding, error) {
+	return c.listClusterRoleBindingsWithProfiles(ctx, c.orderedProfiles(), vclusterName, labelSelector, "")
+}
+
+func (c *VirtualClusterClient) ListClusterRoleBindingsForProfile(ctx context.Context, profileName string, vclusterName string, labelSelector string) ([]rbacv1.ClusterRoleBinding, error) {
+	return c.ListClusterRoleBindingsForProfileToken(ctx, profileName, vclusterName, labelSelector, "")
+}
+
+func (c *VirtualClusterClient) ListClusterRoleBindingsForProfileToken(ctx context.Context, profileName string, vclusterName string, labelSelector string, bearerToken string) ([]rbacv1.ClusterRoleBinding, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return c.listClusterRoleBindingsWithProfiles(ctx, c.orderedProfiles(), vclusterName, labelSelector, bearerToken)
+	}
+	profile, ok := c.profiles[profileName]
+	if !ok {
+		return c.listClusterRoleBindingsWithProfiles(ctx, c.orderedProfiles(), vclusterName, labelSelector, bearerToken)
+	}
+	return c.listClusterRoleBindingsWithProfiles(ctx, []clientProfile{profile}, vclusterName, labelSelector, bearerToken)
+}
+
+func (c *VirtualClusterClient) listClusterRoleBindingsWithProfiles(ctx context.Context, profiles []clientProfile, vclusterName string, labelSelector string, bearerToken string) ([]rbacv1.ClusterRoleBinding, error) {
+	query := url.Values{}
+	if strings.TrimSpace(labelSelector) != "" {
+		query.Set("labelSelector", strings.TrimSpace(labelSelector))
+	}
+
+	var lastErr error
+	for _, profile := range profiles {
+		reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings", query)
+		var list rbacv1.ClusterRoleBindingList
+		var err error
+		if strings.TrimSpace(bearerToken) != "" {
+			err = c.getJSONWithBearerProfile(ctx, profile, reqURL, bearerToken, &list)
+		} else {
+			err = c.getJSONWithProfile(ctx, profile, reqURL, &list)
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return list.Items, nil
+	}
+	return nil, lastErr
+}
+
 func (c *VirtualClusterClient) ListStorageVolumeResources(ctx context.Context, zone string) ([]StorageVolumeResource, error) {
 	resources := make([]StorageVolumeResource, 0)
 	seen := make(map[string]struct{})
@@ -2216,6 +2262,17 @@ func (c *VirtualClusterClient) getJSONWithCMSProfile(ctx context.Context, profil
 
 func (c *VirtualClusterClient) getJSONWithCMSProfileToken(ctx context.Context, profile clientProfile, reqURL string, bearerToken string, out any) error {
 	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil, bearerToken)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	return nil
+}
+
+func (c *VirtualClusterClient) getJSONWithBearerProfile(ctx context.Context, profile clientProfile, reqURL string, bearerToken string, out any) error {
+	body, err := c.doSignedRequest(ctx, profile, http.MethodGet, reqURL, "", nil, false, bearerToken)
 	if err != nil {
 		return err
 	}

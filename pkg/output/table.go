@@ -640,6 +640,63 @@ func PrintAuthGroupResult(result *service.AuthGroupResult) {
 	)
 }
 
+func PrintRBACGetResult(result *service.RBACGetResult) {
+	if result == nil {
+		return
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"VC", emptyDash(result.ClusterName)},
+			{"VC UID", emptyDash(result.ClusterUID)},
+			{"CLUSTER REF", emptyDash(result.ClusterRef)},
+			{"PROFILE", emptyDash(result.ProfileName)},
+			{"SELECTOR", emptyDash(result.LabelSelector)},
+			{"绑定数量", strconv.Itoa(len(result.Items))},
+		},
+		[]int{14, 96},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+			),
+			minWidths: []int{10, 24},
+		},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	if len(result.Items) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-"})
+	} else {
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.Name),
+				emptyDash(item.Role),
+				emptyDash(item.Subjects),
+				emptyDash(item.CreatedAt),
+			})
+		}
+	}
+	noWrapCells := make([][2]int, 0, len(rows)*2)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 1)...)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 3)...)
+	printBoxTableWithOptions(
+		[]string{"BINDING", "ROLE", "SUBJECTS", "CREATE TIME"},
+		rows,
+		[]int{48, 36, 56, 19},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   []int{16, 14, 18, 19},
+		},
+	)
+}
+
 func PrintVCList(result *service.VCListResult) {
 	if result == nil {
 		return

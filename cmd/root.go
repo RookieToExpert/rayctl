@@ -21,6 +21,7 @@ func init() {
 	rootCmd.AddCommand(newNodeCmd())
 	rootCmd.AddCommand(newPolicyCmd())
 	rootCmd.AddCommand(newPVCmd())
+	rootCmd.AddCommand(newRBACCmd())
 	rootCmd.AddCommand(newJobCmd())
 	rootCmd.AddCommand(newPVCCmd())
 	rootCmd.AddCommand(newUserCmd())
