@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,6 +163,26 @@ type IAMUser struct {
 	LastLoginTime string `json:"last_login_time"`
 }
 
+type IAMBindingPolicy struct {
+	ID             string        `json:"id"`
+	Scope          string        `json:"scope"`
+	MemberType     string        `json:"member_type"`
+	MemberName     string        `json:"member_name"`
+	MemberIdentify string        `json:"member_identify"`
+	MemberValue    string        `json:"member_value"`
+	Level          string        `json:"level"`
+	Service        string        `json:"service"`
+	CreateTime     string        `json:"create_time"`
+	UpdateTime     string        `json:"update_time"`
+	RoleInfos      []IAMRoleInfo `json:"role_infos"`
+}
+
+type IAMRoleInfo struct {
+	DisplayName      string `json:"display_name"`
+	RoleName         string `json:"role_name"`
+	AvailableService string `json:"available_service"`
+}
+
 type AIComputeNode struct {
 	ID          string `json:"id"`
 	UID         string `json:"uid"`
@@ -196,6 +217,12 @@ type iamUserListResponse struct {
 	Users         []IAMUser `json:"users"`
 	NextPageToken string    `json:"next_page_token"`
 	TotalSize     int       `json:"total_size"`
+}
+
+type iamBindingPolicyListResponse struct {
+	Policies      []IAMBindingPolicy `json:"policies"`
+	NextPageToken string             `json:"next_page_token"`
+	TotalSize     int                `json:"total_size"`
 }
 
 type aiComputeNodeListResponse struct {
@@ -1021,6 +1048,49 @@ func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string)
 	})
 	if len(result) == 0 {
 		return nil, fmt.Errorf("user %q not found in current tenant", identifier)
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) ListIAMBindingPolicies(ctx context.Context) ([]IAMBindingPolicy, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+
+	pageToken := "1"
+	result := make([]IAMBindingPolicy, 0)
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/authz/v1/bindingPolicies"
+		query := u.Query()
+		query.Set("page_token", pageToken)
+		query.Set("pageSize", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("order_by", "create_time desc")
+		u.RawQuery = query.Encode()
+
+		var payload iamBindingPolicyListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.Policies) == 0 {
+			break
+		}
+		result = append(result, payload.Policies...)
+
+		nextToken := strings.TrimSpace(payload.NextPageToken)
+		if nextToken != "" && nextToken != pageToken {
+			pageToken = nextToken
+			continue
+		}
+		if len(payload.Policies) < defaultPageLimit {
+			break
+		}
+		current, err := strconv.Atoi(pageToken)
+		if err != nil {
+			break
+		}
+		pageToken = strconv.Itoa(current + 1)
 	}
 	return result, nil
 }

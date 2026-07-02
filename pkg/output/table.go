@@ -438,6 +438,56 @@ func PrintUserDetail(result *service.UserGetResult) {
 	)
 }
 
+func PrintAuthAFSResult(result *service.AuthAFSResult) {
+	if result == nil {
+		return
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"AFS", emptyDash(result.AFSName)},
+			{"授权数量", strconv.Itoa(len(result.Items))},
+		},
+		[]int{14, 64},
+		tableOptions{
+			noWrapCells: makeNoWrapCells([2]int{0, 1}, [2]int{1, 1}),
+			minWidths:   []int{10, 20},
+		},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	if len(result.Items) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-", "-"})
+	} else {
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.MemberType),
+				emptyDash(item.MemberName),
+				emptyDash(item.MemberIdentify),
+				emptyDash(item.MemberValue),
+				emptyDash(item.Roles),
+				emptyDash(item.RoleNames),
+				emptyDash(item.CreateTime),
+			})
+		}
+	}
+
+	noWrapCells := make([][2]int, 0, len(rows)*2)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 0)...)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 6)...)
+	printBoxTableWithOptions(
+		[]string{"TYPE", "NAME", "IDENTIFY", "ID", "ROLES", "ROLE NAMES", "CREATE TIME"},
+		rows,
+		[]int{8, 28, 28, 36, 36, 36, 19},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   []int{6, 10, 10, 18, 12, 12, 19},
+		},
+	)
+}
+
 func PrintVCList(result *service.VCListResult) {
 	if result == nil {
 		return
