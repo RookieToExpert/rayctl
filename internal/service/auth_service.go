@@ -41,6 +41,16 @@ type AuthUserResult struct {
 	Permissions []AuthPermissionItem
 }
 
+type AuthGroupResult struct {
+	ID             string
+	Name           string
+	DisplayName    string
+	PosixGroupName string
+	TenantCode     string
+	Status         string
+	Permissions    []AuthPermissionItem
+}
+
 type AuthGroupItem struct {
 	ID             string
 	Name           string
@@ -177,6 +187,46 @@ func (s *AuthService) GetUser(ctx context.Context, identifier string) ([]*AuthUs
 	return results, nil
 }
 
+func (s *AuthService) GetGroups(ctx context.Context, identifier string) ([]*AuthGroupResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for auth lookup")
+	}
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("group identifier is required")
+	}
+
+	groups, err := s.vcClient.FindGroups(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list binding policies: %w", err)
+	}
+
+	results := make([]*AuthGroupResult, 0, len(groups))
+	for _, group := range groups {
+		item := AuthGroupItem{
+			ID:             strings.TrimSpace(group.ID),
+			Name:           strings.TrimSpace(group.Name),
+			DisplayName:    strings.TrimSpace(group.DisplayName),
+			PosixGroupName: strings.TrimSpace(group.PosixGroupName),
+			Status:         strings.TrimSpace(group.Status),
+		}
+		results = append(results, &AuthGroupResult{
+			ID:             item.ID,
+			Name:           item.Name,
+			DisplayName:    item.DisplayName,
+			PosixGroupName: item.PosixGroupName,
+			TenantCode:     strings.TrimSpace(group.TenantCode),
+			Status:         item.Status,
+			Permissions:    collectGroupPermissions(item, policies),
+		})
+	}
+	return results, nil
+}
+
 func extractAFSNameFromScope(scope string) string {
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
@@ -252,6 +302,75 @@ func collectUserPermissions(user platform.IAMUser, groupByID map[string]AuthGrou
 		return items[i].PolicyID < items[j].PolicyID
 	})
 	return items
+}
+
+func collectGroupPermissions(group AuthGroupItem, policies []platform.IAMBindingPolicy) []AuthPermissionItem {
+	items := make([]AuthPermissionItem, 0)
+	seen := make(map[string]struct{})
+	for _, policy := range policies {
+		if !isIAMGroupMember(policy.MemberType) {
+			continue
+		}
+		if !policyMatchesGroup(policy, group) {
+			continue
+		}
+		roleDisplays, roleNames := extractIAMRoleNames(policy.RoleInfos)
+		item := AuthPermissionItem{
+			Source:     "GROUP",
+			Member:     groupDisplayName(group),
+			Service:    strings.TrimSpace(policy.Service),
+			Scope:      normalizeAuthScope(policy.Scope),
+			Roles:      strings.Join(roleDisplays, ","),
+			RoleNames:  strings.Join(roleNames, ","),
+			PolicyID:   strings.TrimSpace(policy.ID),
+			CreateTime: formatLocalTime(policy.CreateTime),
+		}
+		key := item.Member + "|" + item.Scope + "|" + item.RoleNames + "|" + item.PolicyID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, item)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Service != items[j].Service {
+			return items[i].Service < items[j].Service
+		}
+		if items[i].Scope != items[j].Scope {
+			return items[i].Scope < items[j].Scope
+		}
+		if items[i].RoleNames != items[j].RoleNames {
+			return items[i].RoleNames < items[j].RoleNames
+		}
+		return items[i].PolicyID < items[j].PolicyID
+	})
+	return items
+}
+
+func policyMatchesGroup(policy platform.IAMBindingPolicy, group AuthGroupItem) bool {
+	candidates := []string{
+		group.ID,
+		group.Name,
+		group.DisplayName,
+		group.PosixGroupName,
+	}
+	values := []string{
+		policy.MemberValue,
+		policy.MemberName,
+		policy.MemberIdentify,
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) == candidate {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func groupDisplayName(group AuthGroupItem) string {

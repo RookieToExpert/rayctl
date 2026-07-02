@@ -1106,6 +1106,110 @@ func (c *VirtualClusterClient) ListUserGroups(ctx context.Context, userID string
 	return result, nil
 }
 
+func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile clientProfile) ([]IAMGroup, error) {
+	pageToken := "1"
+	result := make([]IAMGroup, 0)
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/idp/v1/groups"
+		query := u.Query()
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("page_token", pageToken)
+		query.Set("order_by", "create_time desc")
+		u.RawQuery = query.Encode()
+
+		var payload iamGroupListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.Groups) == 0 {
+			break
+		}
+		result = append(result, payload.Groups...)
+		nextToken := strings.TrimSpace(payload.NextPageToken)
+		if nextToken == "" || nextToken == pageToken {
+			break
+		}
+		pageToken = nextToken
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) FindGroups(ctx context.Context, identifier string) ([]IAMGroup, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("group identifier is required")
+	}
+
+	groups, err := c.listGroupsForProfile(ctx, profile)
+	if err != nil {
+		return nil, fmt.Errorf("list groups: %w", err)
+	}
+
+	exact := make([]IAMGroup, 0)
+	prefix := make([]IAMGroup, 0)
+	contains := make([]IAMGroup, 0)
+	normalized := strings.ToLower(identifier)
+	for _, group := range groups {
+		fields := []string{
+			strings.TrimSpace(group.ID),
+			strings.TrimSpace(group.Name),
+			strings.TrimSpace(group.DisplayName),
+			strings.TrimSpace(group.PosixGroupName),
+		}
+		matchedExact := false
+		matchedPrefix := false
+		matchedContains := false
+		for _, field := range fields {
+			if field == "" {
+				continue
+			}
+			lower := strings.ToLower(field)
+			switch {
+			case lower == normalized:
+				matchedExact = true
+			case strings.HasPrefix(lower, normalized):
+				matchedPrefix = true
+			case strings.Contains(lower, normalized):
+				matchedContains = true
+			}
+		}
+		switch {
+		case matchedExact:
+			exact = append(exact, group)
+		case matchedPrefix:
+			prefix = append(prefix, group)
+		case matchedContains:
+			contains = append(contains, group)
+		}
+	}
+
+	result := exact
+	if len(result) == 0 {
+		result = prefix
+	}
+	if len(result) == 0 {
+		result = contains
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := firstNonEmpty(result[i].DisplayName, result[i].Name, result[i].PosixGroupName, result[i].ID)
+		right := firstNonEmpty(result[j].DisplayName, result[j].Name, result[j].PosixGroupName, result[j].ID)
+		if left != right {
+			return left < right
+		}
+		return strings.TrimSpace(result[i].ID) < strings.TrimSpace(result[j].ID)
+	})
+	if len(result) == 0 {
+		return nil, fmt.Errorf("group %q not found in current tenant", identifier)
+	}
+	return result, nil
+}
+
 func (c *VirtualClusterClient) ListIAMBindingPolicies(ctx context.Context) ([]IAMBindingPolicy, error) {
 	profile, ok := c.currentClientProfile()
 	if !ok {
