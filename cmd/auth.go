@@ -1,101 +1,556 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"rayctl/internal/platform"
 	"rayctl/internal/service"
+	authsession "rayctl/internal/session"
 	"rayctl/pkg/output"
 )
 
 func newAuthCmd() *cobra.Command {
 	authCmd := &cobra.Command{
 		Use:   "auth",
-		Short: "查询平台资源授权信息",
+		Short: "查询和更新平台资源授权信息",
 	}
 
-	authCmd.AddCommand(newAuthAFSCmd())
-	authCmd.AddCommand(newAuthGroupsCmd())
-	authCmd.AddCommand(newAuthUserCmd())
+	authCmd.AddCommand(newAuthCheckCmd())
+	authCmd.AddCommand(newAuthGrantCmd())
+	authCmd.AddCommand(newAuthLoginCmd())
+	authCmd.AddCommand(newAuthLogoutCmd())
+	authCmd.AddCommand(newAuthTokenCmd())
+
+	legacyAFS := newAuthCheckAFSCmd()
+	legacyAFS.Deprecated = "请使用 rayctl auth check afs <afs-name>"
+	legacyUser := newAuthCheckUserCmd()
+	legacyUser.Deprecated = "请使用 rayctl auth check user <username-or-userid>"
+	legacyGroups := newAuthCheckGroupsCmd()
+	legacyGroups.Deprecated = "请使用 rayctl auth check groups <group-name-or-id>"
+	authCmd.AddCommand(legacyAFS, legacyUser, legacyGroups)
+
 	return authCmd
 }
 
-func newAuthAFSCmd() *cobra.Command {
+func newAuthCheckCmd() *cobra.Command {
+	checkCmd := &cobra.Command{
+		Use:   "check",
+		Short: "查看用户、用户组、AFS 的授权信息",
+	}
+	checkCmd.AddCommand(newAuthCheckAFSCmd())
+	checkCmd.AddCommand(newAuthCheckGroupsCmd())
+	checkCmd.AddCommand(newAuthCheckUserCmd())
+	return checkCmd
+}
+
+func newAuthGrantCmd() *cobra.Command {
+	grantCmd := &cobra.Command{
+		Use:   "grant",
+		Short: "给资源新增授权",
+	}
+	grantCmd.AddCommand(newAuthGrantAFSCmd())
+	return grantCmd
+}
+
+func newAuthCheckAFSCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "afs <afs-name>",
 		Short: "查看 AFS 归属的用户/用户组授权",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
-			}
-
-			authService := service.NewAuthService(vcClient)
-			result, err := authService.GetAFS(context.Background(), args[0])
-			if err != nil {
-				return err
-			}
-			output.PrintAuthAFSResult(result)
-			return nil
-		},
+		RunE:  runAuthCheckAFS,
 	}
 }
 
-func newAuthGroupsCmd() *cobra.Command {
+func newAuthCheckGroupsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "groups <group-name-or-id>",
 		Aliases: []string{"group"},
 		Short:   "查看用户组信息和权限",
 		Args:    cobra.ExactArgs(1),
+		RunE:    runAuthCheckGroups,
+	}
+}
+
+func newAuthCheckUserCmd() *cobra.Command {
+	var long bool
+	cmd := &cobra.Command{
+		Use:   "user <username-or-userid>",
+		Short: "查看用户所属组和权限",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAuthCheckUser(cmd, args, long)
+		},
+	}
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 member/source/service/role names/create time 等详细权限信息")
+	return cmd
+}
+
+func newAuthGrantAFSCmd() *cobra.Command {
+	var user string
+	var group string
+	var role string
+	var scope string
+	var dryRun bool
+	var yes bool
+	var bearerToken string
+	var debugAuth bool
+
+	cmd := &cobra.Command{
+		Use:   "afs <afs-name>",
+		Short: "给 AFS 授权用户或用户组",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			memberType := ""
+			memberIdentifier := ""
+			if strings.TrimSpace(user) != "" {
+				memberType = "USER"
+				memberIdentifier = user
+			}
+			if strings.TrimSpace(group) != "" {
+				if memberType != "" {
+					return fmt.Errorf("--user 和 --group 只能二选一")
+				}
+				memberType = "GROUP"
+				memberIdentifier = group
+			}
+			if memberType == "" {
+				return fmt.Errorf("请使用 --user 或 --group 指定授权对象")
+			}
+
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
 
+			req := service.AuthGrantAFSRequest{
+				AFSName:          args[0],
+				Scope:            scope,
+				MemberType:       memberType,
+				MemberIdentifier: memberIdentifier,
+				Role:             role,
+				DryRun:           dryRun,
+			}
+
 			authService := service.NewAuthService(vcClient)
-			results, err := authService.GetGroups(context.Background(), args[0])
+			preflightReq := req
+			preflightReq.DryRun = true
+			result, err := authService.GrantAFS(context.Background(), preflightReq)
 			if err != nil {
 				return err
 			}
-			for i, result := range results {
-				if i > 0 {
-					fmt.Fprintln(cmd.OutOrStdout())
-				}
-				output.PrintAuthGroupResult(result)
+			if result.Result == "already exists" || dryRun {
+				output.PrintAuthGrantAFSResult(result)
+				return nil
 			}
+
+			if !yes {
+				fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"将给 AFS %s 授权 %s %s，角色 %s，是否继续? (y/N): ",
+					result.AFSName,
+					result.MemberType,
+					firstNonEmptyAuthValue(result.MemberIdentify, result.MemberName, result.MemberValue),
+					result.RoleName,
+				)
+				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if err != nil {
+					return err
+				}
+				if !isYes(line) {
+					fmt.Fprintln(cmd.OutOrStdout(), "已取消授权。")
+					return nil
+				}
+			}
+
+			req.DryRun = false
+			token, source, err := bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+			if err != nil {
+				return err
+			}
+			req.BearerToken = token
+			if debugAuth {
+				fmt.Fprintf(cmd.ErrOrStderr(), "auth grant debug: bearer source=%s %s\n", source, bearerDebugSummary(token))
+			}
+			result, err = authService.GrantAFS(context.Background(), req)
+			if err != nil {
+				return err
+			}
+			output.PrintAuthGrantAFSResult(result)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&user, "user", "u", "", "授权给用户 username 或 user id")
+	cmd.Flags().StringVarP(&group, "group", "g", "", "授权给用户组 name 或 group id")
+	cmd.Flags().StringVarP(&role, "role", "r", "editor", "AFS 角色: editor/reader/owner 或完整 role_name")
+	cmd.Flags().StringVarP(&scope, "scope", "s", "", "手动指定资源 scope，默认根据 AFS 名自动解析")
+	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "控制台 Bearer token；也可用 RAYCTL_BEARER_TOKEN")
+	cmd.Flags().BoolVar(&debugAuth, "debug-auth", false, "打印脱敏授权调试信息，例如 token 来源")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只展示将要提交的授权 payload，不真正写入")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "跳过确认直接写入")
+	return cmd
+}
+
+func newAuthLoginCmd() *cobra.Command {
+	var username string
+	var tenantCode string
+	var debugLogin bool
+	var bearerToken string
+	var passwordStdin bool
+
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "登录控制台并缓存 Bearer token",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+			if strings.TrimSpace(bearerToken) != "" {
+				item, err := saveBearerSessionForCommand(cmd, vcClient, username, tenantCode, bearerToken)
+				if err != nil {
+					return err
+				}
+				_, expires := authsession.TokenStatus(*item)
+				fmt.Fprintf(cmd.OutOrStdout(), "登录成功: profile=%s username=%s expires=%s\n", sessionProfileName(vcClient), firstNonEmptyAuthValue(item.Username), expires)
+				return nil
+			}
+			item, err := loginForCommand(context.Background(), cmd, vcClient, username, tenantCode, debugLogin, passwordStdin)
+			if err != nil {
+				return err
+			}
+			_, expires := authsession.TokenStatus(*item)
+			fmt.Fprintf(cmd.OutOrStdout(), "登录成功: profile=%s username=%s expires=%s\n", sessionProfileName(vcClient), item.Username, expires)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&username, "username", "u", "", "登录账号，默认读取 PJLAB_USERNAME 或交互输入")
+	cmd.Flags().StringVar(&tenantCode, "tenant-code", "", "登录租户代码，默认读取 PJLAB_TENANT_CODE 或使用 username")
+	cmd.Flags().BoolVar(&debugLogin, "debug-login", false, "打印脱敏登录调试信息，不输出密码或 token")
+	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "直接缓存控制台 Bearer token，不走账号密码登录")
+	cmd.Flags().BoolVar(&passwordStdin, "password-stdin", false, "从标准输入读取密码，适合包含特殊字符的密码")
+	return cmd
+}
+
+func newAuthLogoutCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout",
+		Short: "删除当前 profile 的登录缓存",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+			store, err := authsession.Load("")
+			if err != nil {
+				return err
+			}
+			profile := sessionProfileName(vcClient)
+			delete(store.Profiles, profile)
+			if err := authsession.Save("", store); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "已退出登录: profile=%s\n", profile)
 			return nil
 		},
 	}
 }
 
-func newAuthUserCmd() *cobra.Command {
+func newAuthTokenCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "user <username-or-userid>",
-		Short: "查看用户所属组和权限",
-		Args:  cobra.ExactArgs(1),
+		Use:   "token",
+		Short: "查看当前 profile 的登录态状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
-
-			authService := service.NewAuthService(vcClient)
-			results, err := authService.GetUser(context.Background(), args[0])
+			store, err := authsession.Load("")
 			if err != nil {
 				return err
 			}
-			for i, result := range results {
-				if i > 0 {
-					fmt.Fprintln(cmd.OutOrStdout())
-				}
-				output.PrintAuthUserResult(result)
-			}
+			profile := sessionProfileName(vcClient)
+			item := store.Profiles[profile]
+			status, expires := authsession.TokenStatus(item)
+			fmt.Fprintf(cmd.OutOrStdout(), "profile=%s username=%s status=%s expires=%s session=%s\n",
+				profile,
+				firstNonEmptyAuthValue(item.Username),
+				status,
+				expires,
+				authsession.DefaultPath(),
+			)
 			return nil
 		},
 	}
+}
+
+func runAuthCheckAFS(cmd *cobra.Command, args []string) error {
+	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+	if !ok {
+		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	}
+
+	authService := service.NewAuthService(vcClient)
+	result, err := authService.GetAFS(context.Background(), args[0])
+	if err != nil {
+		return err
+	}
+	output.PrintAuthAFSResult(result)
+	return nil
+}
+
+func runAuthCheckGroups(cmd *cobra.Command, args []string) error {
+	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+	if !ok {
+		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	}
+
+	authService := service.NewAuthService(vcClient)
+	results, err := authService.GetGroups(context.Background(), args[0])
+	if err != nil {
+		return err
+	}
+	for i, result := range results {
+		if i > 0 {
+			fmt.Fprintln(cmd.OutOrStdout())
+		}
+		output.PrintAuthGroupResult(result)
+	}
+	return nil
+}
+
+func runAuthCheckUser(cmd *cobra.Command, args []string, long bool) error {
+	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+	if !ok {
+		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	}
+
+	authService := service.NewAuthService(vcClient)
+	results, err := authService.GetUser(context.Background(), args[0])
+	if err != nil {
+		return err
+	}
+	for i, result := range results {
+		if i > 0 {
+			fmt.Fprintln(cmd.OutOrStdout())
+		}
+		output.PrintAuthUserResult(result, long)
+	}
+	return nil
+}
+
+func bearerTokenForCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, explicitToken string) (string, error) {
+	if token := firstNonEmptyAuthValueNoDash(explicitToken, rbacBearerToken()); token != "" {
+		return strings.TrimPrefix(token, "Bearer "), nil
+	}
+
+	store, err := authsession.Load("")
+	if err != nil {
+		return "", err
+	}
+	profile := sessionProfileName(vcClient)
+	if token, ok := authsession.ValidToken(store.Profiles[profile]); ok {
+		return token, nil
+	}
+
+	item, err := loginForCommand(ctx, cmd, vcClient, "", "", false, false)
+	if err != nil {
+		return "", err
+	}
+	token, ok := authsession.ValidToken(*item)
+	if !ok {
+		return "", fmt.Errorf("login succeeded but token is not usable")
+	}
+	return token, nil
+}
+
+func bearerTokenForAuthGrantCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, explicitToken string) (string, string, error) {
+	if token := strings.TrimSpace(explicitToken); token != "" {
+		return strings.TrimPrefix(token, "Bearer "), "--bearer-token", nil
+	}
+	if token := strings.TrimSpace(os.Getenv("RAYCTL_BEARER_TOKEN")); token != "" {
+		return strings.TrimPrefix(token, "Bearer "), "RAYCTL_BEARER_TOKEN", nil
+	}
+
+	store, err := authsession.Load("")
+	if err != nil {
+		return "", "", err
+	}
+	profile := sessionProfileName(vcClient)
+	if token, ok := authsession.ValidAccessToken(store.Profiles[profile]); ok {
+		return token, "session/access_token", nil
+	}
+
+	item, err := loginForCommand(ctx, cmd, vcClient, "", "", false, false)
+	if err != nil {
+		return "", "", err
+	}
+	token, ok := authsession.ValidAccessToken(*item)
+	if !ok {
+		return "", "", fmt.Errorf("login succeeded but token is not usable")
+	}
+	return token, "login/access_token", nil
+}
+
+func bearerDebugSummary(token string) string {
+	token = strings.TrimPrefix(strings.TrimSpace(token), "Bearer ")
+	if token == "" {
+		return "sha256=- jwt=empty ext=-"
+	}
+	sum := sha256.Sum256([]byte(token))
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return fmt.Sprintf("sha256=%x jwt=invalid ext=-", sum[:6])
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fmt.Sprintf("sha256=%x jwt=payload-decode-failed ext=-", sum[:6])
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Sprintf("sha256=%x jwt=payload-json-failed ext=-", sum[:6])
+	}
+	extValue, ok := claims["ext"]
+	if !ok {
+		return fmt.Sprintf("sha256=%x jwt=ok ext=missing", sum[:6])
+	}
+	switch extValue.(type) {
+	case map[string]interface{}:
+		return fmt.Sprintf("sha256=%x jwt=ok ext=object", sum[:6])
+	case string:
+		return fmt.Sprintf("sha256=%x jwt=ok ext=string", sum[:6])
+	default:
+		return fmt.Sprintf("sha256=%x jwt=ok ext=%T", sum[:6], extValue)
+	}
+}
+
+func saveBearerSessionForCommand(cmd *cobra.Command, vcClient *platform.VirtualClusterClient, username string, tenantCode string, bearerToken string) (*authsession.ProfileSession, error) {
+	username = firstNonEmptyAuthValueNoDash(username, os.Getenv("PJLAB_USERNAME"))
+	tenantCode = firstNonEmptyAuthValueNoDash(tenantCode, os.Getenv("PJLAB_TENANT_CODE"))
+	if tenantCode == "" {
+		tenantCode = username
+	}
+	item := authsession.NewBearerSession(vcClient.CurrentSigninURL(), username, tenantCode, bearerToken)
+	if _, ok := authsession.ValidToken(item); !ok {
+		return nil, fmt.Errorf("bearer token is empty or expired")
+	}
+	store, err := authsession.Load("")
+	if err != nil {
+		return nil, err
+	}
+	profile := sessionProfileName(vcClient)
+	store.Profiles[profile] = item
+	if err := authsession.Save("", store); err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func loginForCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, username string, tenantCode string, debugLogin bool, passwordStdin bool) (*authsession.ProfileSession, error) {
+	username = firstNonEmptyAuthValueNoDash(username, os.Getenv("PJLAB_USERNAME"))
+	tenantCode = firstNonEmptyAuthValueNoDash(tenantCode, os.Getenv("PJLAB_TENANT_CODE"))
+	password := strings.TrimSpace(os.Getenv("PJLAB_PASSWORD"))
+	reader := bufio.NewReader(cmd.InOrStdin())
+	if username == "" {
+		fmt.Fprint(cmd.OutOrStdout(), "Username: ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		username = strings.TrimSpace(line)
+	}
+	if password == "" {
+		if passwordStdin {
+			bytes, err := io.ReadAll(cmd.InOrStdin())
+			if err != nil {
+				return nil, err
+			}
+			password = strings.TrimRight(string(bytes), "\r\n")
+		} else if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return nil, fmt.Errorf("password is required; set PJLAB_PASSWORD or run in an interactive terminal")
+		} else {
+			fmt.Fprint(cmd.OutOrStdout(), "Password: ")
+			bytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Fprintln(cmd.OutOrStdout())
+			if err != nil {
+				return nil, err
+			}
+			password = string(bytes)
+		}
+	}
+	if tenantCode == "" {
+		tenantCode = username
+	}
+
+	signinURL := vcClient.CurrentSigninURL()
+	loginOptions := make([]authsession.LoginOption, 0, 1)
+	if debugLogin || isTruthyEnv("RAYCTL_AUTH_DEBUG") {
+		loginOptions = append(loginOptions, authsession.WithDebug(cmd.ErrOrStderr()))
+	}
+	// Account/password login uses the tenant/root-account page by default. That
+	// frontend payload intentionally omits tenant_code; tenantCode is kept only
+	// as session metadata and for bearer-token cache mode.
+	item, err := authsession.Login(ctx, signinURL, vcClient.CurrentIAMBaseURL(), username, password, "", loginOptions...)
+	if err != nil {
+		return nil, err
+	}
+	item.TenantCode = tenantCode
+	store, err := authsession.Load("")
+	if err != nil {
+		return nil, err
+	}
+	profile := sessionProfileName(vcClient)
+	store.Profiles[profile] = *item
+	if err := authsession.Save("", store); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func isTruthyEnv(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionProfileName(vcClient *platform.VirtualClusterClient) string {
+	if vcClient == nil {
+		return "default"
+	}
+	if name := strings.TrimSpace(vcClient.CurrentProfileName()); name != "" {
+		return name
+	}
+	return "default"
+}
+
+func firstNonEmptyAuthValue(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "-"
+}
+
+func firstNonEmptyAuthValueNoDash(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

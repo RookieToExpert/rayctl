@@ -189,9 +189,75 @@ type IAMBindingPolicy struct {
 }
 
 type IAMRoleInfo struct {
+	ID               string `json:"id"`
 	DisplayName      string `json:"display_name"`
 	RoleName         string `json:"role_name"`
 	AvailableService string `json:"available_service"`
+}
+
+type IAMSetPolicyRequest struct {
+	Scope          string                `json:"scope,omitempty"`
+	MemberType     string                `json:"member_type,omitempty"`
+	MemberValue    string                `json:"member_value,omitempty"`
+	RoleIDs        []string              `json:"role_ids,omitempty"`
+	ExcludeMembers []string              `json:"exclude_members"`
+	Condition      IAMPolicyCondition    `json:"condition"`
+	MemberValues   []string              `json:"member_values,omitempty"`
+	Policies       []IAMSetPolicyPayload `json:"policies,omitempty"`
+}
+
+type IAMSetPolicyPayload struct {
+	Scope          string             `json:"scope"`
+	RoleIDs        []string           `json:"role_ids"`
+	ExcludeMembers []string           `json:"exclude_members"`
+	Condition      IAMPolicyCondition `json:"condition"`
+}
+
+type IAMPolicyCondition struct {
+	DateNotEquals         []string `json:"date_not_equals"`
+	DateLessThan          []string `json:"date_less_than"`
+	DateLessThanEquals    []string `json:"date_less_than_equals"`
+	DateGreaterThan       []string `json:"date_greater_than"`
+	DateGreaterThanEquals []string `json:"date_greater_than_equals"`
+	StringEquals          []string `json:"string_equals"`
+}
+
+type IAMSetPolicyResponse struct {
+	ID       string             `json:"id"`
+	PolicyID string             `json:"policy_id"`
+	Policy   IAMBindingPolicy   `json:"policy"`
+	Policies []IAMBindingPolicy `json:"policies"`
+}
+
+type IAMBatchCreatePoliciesRequest struct {
+	Policies []IAMBatchCreatePolicy `json:"policies"`
+}
+
+type IAMBatchCreatePolicy struct {
+	Scope          string                 `json:"scope"`
+	RoleIDs        []string               `json:"role_ids"`
+	Members        []IAMBatchCreateMember `json:"members"`
+	ExcludeMembers []IAMBatchCreateMember `json:"exclude_members"`
+	Level          string                 `json:"level"`
+	Condition      *IAMPolicyCondition    `json:"condition,omitempty"`
+}
+
+type IAMBatchCreateMember struct {
+	MemberType  string `json:"member_type"`
+	MemberValue string `json:"member_value"`
+}
+
+type IAMBatchCreatePoliciesResponse struct {
+	PolicyItems []IAMBatchCreatePolicyItem `json:"policy_item"`
+}
+
+type IAMBatchCreatePolicyItem struct {
+	Member             IAMBatchCreateMember `json:"member"`
+	CreatePolicyStatus string               `json:"create_policy_status"`
+	RoleID             string               `json:"role_id"`
+	Scope              string               `json:"scope"`
+	PolicyID           string               `json:"policy_id"`
+	ID                 string               `json:"id"`
 }
 
 type AIComputeNode struct {
@@ -240,6 +306,14 @@ type iamBindingPolicyListResponse struct {
 	Policies      []IAMBindingPolicy `json:"policies"`
 	NextPageToken string             `json:"next_page_token"`
 	TotalSize     int                `json:"total_size"`
+}
+
+type iamRoleListResponse struct {
+	Roles         []IAMRoleInfo `json:"roles"`
+	RoleInfos     []IAMRoleInfo `json:"role_infos"`
+	Items         []IAMRoleInfo `json:"items"`
+	NextPageToken string        `json:"next_page_token"`
+	TotalSize     int           `json:"total_size"`
 }
 
 type aiComputeNodeListResponse struct {
@@ -471,6 +545,35 @@ func DefaultConfigPath() string {
 	return defaultConfigPath
 }
 
+func (c *VirtualClusterClient) CurrentProfileName() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.currentProfile)
+}
+
+func (c *VirtualClusterClient) CurrentSigninURL() string {
+	if c == nil {
+		return "https://signin.d.pjlab.org.cn/oauth2/token"
+	}
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return "https://signin.d.pjlab.org.cn/oauth2/token"
+	}
+	return signinURLFromIAMBaseURL(profile.IAMBaseURL)
+}
+
+func (c *VirtualClusterClient) CurrentIAMBaseURL() string {
+	if c == nil {
+		return defaultIAMBaseURL
+	}
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return defaultIAMBaseURL
+	}
+	return strings.TrimRight(strings.TrimSpace(profile.IAMBaseURL), "/")
+}
+
 func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 	content, err := os.ReadFile(filepath.Clean(configPath))
 	if err != nil {
@@ -684,6 +787,34 @@ func defaultIAMBaseURLForCluster(cluster string) string {
 	default:
 		return defaultIAMBaseURL
 	}
+}
+
+func signinURLFromIAMBaseURL(iamBaseURL string) string {
+	iamBaseURL = strings.TrimRight(strings.TrimSpace(iamBaseURL), "/")
+	if iamBaseURL == "" {
+		return "https://signin.d.pjlab.org.cn/oauth2/token"
+	}
+	parsed, err := url.Parse(iamBaseURL)
+	if err != nil || parsed.Host == "" {
+		return "https://signin.d.pjlab.org.cn/oauth2/token"
+	}
+	host := parsed.Host
+	switch {
+	case strings.HasPrefix(host, "iam."):
+		host = "signin." + strings.TrimPrefix(host, "iam.")
+	case strings.HasPrefix(host, "iam-"):
+		host = "signin-" + strings.TrimPrefix(host, "iam-")
+	default:
+		host = "signin." + host
+	}
+	parsed.Host = host
+	parsed.Path = "/oauth2/token"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	if parsed.Scheme == "" {
+		parsed.Scheme = "https"
+	}
+	return parsed.String()
 }
 
 func defaultMonitorBaseURLForCluster(cluster string) string {
@@ -1252,6 +1383,99 @@ func (c *VirtualClusterClient) ListIAMBindingPolicies(ctx context.Context) ([]IA
 		pageToken = strconv.Itoa(current + 1)
 	}
 	return result, nil
+}
+
+func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+
+	pageToken := "1"
+	result := make([]IAMRoleInfo, 0)
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/authz/v1/roles"
+		query := u.Query()
+		query.Set("page_size", "200")
+		query.Set("page_token", pageToken)
+		query.Set("filter", "")
+		u.RawQuery = query.Encode()
+
+		var payload iamRoleListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		roles := payload.Roles
+		if len(roles) == 0 {
+			roles = payload.RoleInfos
+		}
+		if len(roles) == 0 {
+			roles = payload.Items
+		}
+		if len(roles) == 0 {
+			break
+		}
+		result = append(result, roles...)
+		nextToken := strings.TrimSpace(payload.NextPageToken)
+		if nextToken != "" && nextToken != pageToken {
+			pageToken = nextToken
+			continue
+		}
+		if len(roles) < 200 {
+			break
+		}
+		current, err := strconv.Atoi(pageToken)
+		if err != nil {
+			break
+		}
+		pageToken = strconv.Itoa(current + 1)
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) SetIAMPolicy(ctx context.Context, payload IAMSetPolicyRequest, bearerToken string) (*IAMSetPolicyResponse, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+
+	u, _ := url.Parse(profile.IAMBaseURL)
+	u.Path = "/iam/authz/v1/Policies:setUserPolicy"
+
+	var out IAMSetPolicyResponse
+	var err error
+	if strings.TrimSpace(bearerToken) != "" {
+		err = c.postJSONWithBearerProfile(ctx, profile, u.String(), payload, strings.TrimSpace(bearerToken), &out)
+	} else {
+		err = c.postJSONWithProfile(ctx, profile, u.String(), payload, &out)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *VirtualClusterClient) BatchCreateIAMPolicies(ctx context.Context, payload IAMBatchCreatePoliciesRequest, bearerToken string) (*IAMBatchCreatePoliciesResponse, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+
+	u, _ := url.Parse(profile.IAMBaseURL)
+	u.Path = "/iam/authz/v1/policies:batchCreate"
+
+	var out IAMBatchCreatePoliciesResponse
+	var err error
+	if strings.TrimSpace(bearerToken) != "" {
+		err = c.postJSONWithBearerProfile(ctx, profile, u.String(), payload, strings.TrimSpace(bearerToken), &out)
+	} else {
+		err = c.postJSONWithProfile(ctx, profile, u.String(), payload, &out)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *VirtualClusterClient) listStorageVolumeResourcesWithProfile(ctx context.Context, profile clientProfile, zone string) ([]StorageVolumeResource, error) {
@@ -2234,6 +2458,25 @@ func (c *VirtualClusterClient) postJSONWithProfile(ctx context.Context, profile 
 	body, err := c.doRequestWithProfile(ctx, profile, http.MethodPost, reqURL, "application/json", bodyBytes)
 	if err != nil {
 		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	return nil
+}
+
+func (c *VirtualClusterClient) postJSONWithBearerProfile(ctx context.Context, profile clientProfile, reqURL string, payload any, bearerToken string, out any) error {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal request for %s: %w", reqURL, err)
+	}
+
+	body, err := c.doSignedRequest(ctx, profile, http.MethodPost, reqURL, "application/json", bodyBytes, false, bearerToken)
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return nil
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("decode response from %s: %w", reqURL, err)

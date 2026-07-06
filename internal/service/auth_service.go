@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -68,6 +69,30 @@ type AuthPermissionItem struct {
 	RoleNames  string
 	PolicyID   string
 	CreateTime string
+}
+
+type AuthGrantAFSRequest struct {
+	AFSName          string
+	Scope            string
+	MemberType       string
+	MemberIdentifier string
+	Role             string
+	DryRun           bool
+	BearerToken      string
+}
+
+type AuthGrantAFSResult struct {
+	AFSName        string
+	Scope          string
+	MemberType     string
+	MemberName     string
+	MemberIdentify string
+	MemberValue    string
+	RoleName       string
+	RoleID         string
+	Result         string
+	PolicyID       string
+	Payload        string
 }
 
 func NewAuthService(vcClient *platform.VirtualClusterClient) *AuthService {
@@ -227,6 +252,120 @@ func (s *AuthService) GetGroups(ctx context.Context, identifier string) ([]*Auth
 	return results, nil
 }
 
+func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*AuthGrantAFSResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for auth grant")
+	}
+	afsName := strings.TrimSpace(req.AFSName)
+	scope := strings.TrimSpace(req.Scope)
+	if afsName == "" && scope == "" {
+		return nil, fmt.Errorf("afs name or scope is required")
+	}
+
+	memberType := strings.ToUpper(strings.TrimSpace(req.MemberType))
+	if memberType != "USER" && memberType != "GROUP" {
+		return nil, fmt.Errorf("member type must be USER or GROUP")
+	}
+	memberName, memberIdentify, memberValue, err := s.resolveGrantMember(ctx, memberType, req.MemberIdentifier)
+	if err != nil {
+		return nil, err
+	}
+
+	if scope == "" {
+		resource, err := s.vcClient.FindStorageVolumeResource(ctx, afsName)
+		if err != nil {
+			return nil, fmt.Errorf("resolve afs scope: %w", err)
+		}
+		scope = ensureRMScope(resource.RID)
+		if afsName == "" {
+			afsName = strings.TrimSpace(resource.Name)
+		}
+	}
+	if afsName == "" {
+		afsName = extractAFSNameFromScope(scope)
+	}
+	if scope == "" {
+		return nil, fmt.Errorf("afs scope is empty")
+	}
+
+	roleName, roleID, err := s.resolveAFSRole(ctx, req.Role)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &AuthGrantAFSResult{
+		AFSName:        afsName,
+		Scope:          scope,
+		MemberType:     memberType,
+		MemberName:     memberName,
+		MemberIdentify: memberIdentify,
+		MemberValue:    memberValue,
+		RoleName:       roleName,
+		RoleID:         roleID,
+	}
+
+	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list binding policies: %w", err)
+	}
+	if policyID := existingGrantPolicyID(policies, scope, memberType, memberValue, roleName); policyID != "" {
+		result.Result = "already exists"
+		result.PolicyID = policyID
+		return result, nil
+	}
+
+	payload := platform.IAMBatchCreatePoliciesRequest{
+		Policies: []platform.IAMBatchCreatePolicy{
+			{
+				Scope:   scope,
+				RoleIDs: []string{roleID},
+				Members: []platform.IAMBatchCreateMember{
+					{
+						MemberType:  memberType,
+						MemberValue: memberValue,
+					},
+				},
+				ExcludeMembers: []platform.IAMBatchCreateMember{},
+				Level:          "resources",
+			},
+		},
+	}
+	payloadBytes, _ := json.MarshalIndent(payload, "", "  ")
+	result.Payload = string(payloadBytes)
+	if req.DryRun {
+		result.Result = "dry-run"
+		return result, nil
+	}
+
+	resp, err := s.vcClient.BatchCreateIAMPolicies(ctx, payload, req.BearerToken)
+	if err != nil {
+		if strings.Contains(err.Error(), "novaoperation.operationService.auth") {
+			if strings.TrimSpace(req.BearerToken) != "" {
+				return nil, fmt.Errorf("set user policy denied: 当前控制台登录态缺少 novaoperation.operationService.auth，或 Bearer token 类型不符合控制台写接口要求: %w", err)
+			}
+			return nil, fmt.Errorf("set user policy denied: 当前 AK/SK 缺少 novaoperation.operationService.auth；这个写接口需要具备该 operation 权限的 AK/SK，或使用控制台 Bearer token（--bearer-token 或 RAYCTL_BEARER_TOKEN）: %w", err)
+		}
+		return nil, fmt.Errorf("set user policy: %w", err)
+	}
+	result.Result = "created"
+	if len(resp.PolicyItems) > 0 {
+		item := resp.PolicyItems[0]
+		result.PolicyID = firstNonEmpty(item.PolicyID, item.ID)
+		status := strings.TrimSpace(item.CreatePolicyStatus)
+		if status != "" {
+			switch strings.ToUpper(status) {
+			case "ROLE_EXIST":
+				result.Result = "already exists"
+			case "SUCCESS", "CREATED", "CREATE_SUCCESS":
+				result.Result = "created"
+			default:
+				result.Result = status
+			}
+		}
+	}
+	return result, nil
+}
+
 func extractAFSNameFromScope(scope string) string {
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
@@ -242,6 +381,116 @@ func extractAFSNameFromScope(scope string) string {
 		name = name[:cut]
 	}
 	return strings.TrimSpace(name)
+}
+
+func (s *AuthService) resolveGrantMember(ctx context.Context, memberType string, identifier string) (string, string, string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", "", "", fmt.Errorf("member identifier is required")
+	}
+	switch memberType {
+	case "USER":
+		users, err := s.vcClient.FindUsers(ctx, identifier)
+		if err != nil {
+			return "", "", "", err
+		}
+		if len(users) != 1 {
+			return "", "", "", fmt.Errorf("user %q matched %d users, please use exact username or id", identifier, len(users))
+		}
+		user := users[0]
+		return strings.TrimSpace(user.Name), strings.TrimSpace(user.Username), strings.TrimSpace(user.ID), nil
+	case "GROUP":
+		groups, err := s.vcClient.FindGroups(ctx, identifier)
+		if err != nil {
+			return "", "", "", err
+		}
+		if len(groups) != 1 {
+			return "", "", "", fmt.Errorf("group %q matched %d groups, please use exact group name or id", identifier, len(groups))
+		}
+		group := groups[0]
+		return firstNonEmpty(group.DisplayName, group.Name), firstNonEmpty(group.PosixGroupName, group.Name), strings.TrimSpace(group.ID), nil
+	default:
+		return "", "", "", fmt.Errorf("unsupported member type %q", memberType)
+	}
+}
+
+func (s *AuthService) resolveAFSRole(ctx context.Context, role string) (string, string, error) {
+	roleName := normalizeAFSRoleName(role)
+	if roleName == "" {
+		return "", "", fmt.Errorf("role is required")
+	}
+	roles, err := s.vcClient.ListIAMRoles(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("list roles: %w", err)
+	}
+	for _, item := range roles {
+		if strings.TrimSpace(item.RoleName) != roleName {
+			continue
+		}
+		if strings.TrimSpace(item.ID) == "" {
+			return "", "", fmt.Errorf("role %q has empty id", roleName)
+		}
+		return roleName, strings.TrimSpace(item.ID), nil
+	}
+	return "", "", fmt.Errorf("role %q not found", roleName)
+}
+
+func normalizeAFSRoleName(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "", "editor", "edit", "developer", "dev":
+		return "afs.volumeEditor"
+	case "reader", "read", "viewer", "view":
+		return "afs.volumeReader"
+	case "owner":
+		return "afs.volumeOwner"
+	default:
+		return strings.TrimSpace(role)
+	}
+}
+
+func ensureRMScope(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return ""
+	}
+	if strings.HasPrefix(scope, "/rm/") {
+		return scope
+	}
+	if strings.HasPrefix(scope, "/subscriptions/") {
+		return "/rm" + scope
+	}
+	return scope
+}
+
+func emptyIAMPolicyCondition() platform.IAMPolicyCondition {
+	return platform.IAMPolicyCondition{
+		DateNotEquals:         []string{},
+		DateLessThan:          []string{},
+		DateLessThanEquals:    []string{},
+		DateGreaterThan:       []string{},
+		DateGreaterThanEquals: []string{},
+		StringEquals:          []string{},
+	}
+}
+
+func existingGrantPolicyID(policies []platform.IAMBindingPolicy, scope string, memberType string, memberValue string, roleName string) string {
+	for _, policy := range policies {
+		if !strings.EqualFold(strings.TrimSpace(policy.MemberType), strings.TrimSpace(memberType)) {
+			continue
+		}
+		if strings.TrimSpace(policy.MemberValue) != strings.TrimSpace(memberValue) {
+			continue
+		}
+		if normalizeAuthScope(policy.Scope) != normalizeAuthScope(scope) && ensureRMScope(policy.Scope) != ensureRMScope(scope) {
+			continue
+		}
+		for _, role := range policy.RoleInfos {
+			if strings.TrimSpace(role.RoleName) == roleName {
+				return strings.TrimSpace(policy.ID)
+			}
+		}
+	}
+	return ""
 }
 
 func collectUserPermissions(user platform.IAMUser, groupByID map[string]AuthGroupItem, policies []platform.IAMBindingPolicy) []AuthPermissionItem {
@@ -287,14 +536,22 @@ func collectUserPermissions(user platform.IAMUser, groupByID map[string]AuthGrou
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].Source != items[j].Source {
-			return items[i].Source < items[j].Source
+		scopeI := authScopeSortKey(items[i].Scope)
+		scopeJ := authScopeSortKey(items[j].Scope)
+		if scopeI != scopeJ {
+			return scopeI < scopeJ
+		}
+		if items[i].Roles != items[j].Roles {
+			return items[i].Roles < items[j].Roles
+		}
+		if items[i].RoleNames != items[j].RoleNames {
+			return items[i].RoleNames < items[j].RoleNames
 		}
 		if items[i].Service != items[j].Service {
 			return items[i].Service < items[j].Service
 		}
-		if items[i].Scope != items[j].Scope {
-			return items[i].Scope < items[j].Scope
+		if items[i].Source != items[j].Source {
+			return items[i].Source < items[j].Source
 		}
 		if items[i].Member != items[j].Member {
 			return items[i].Member < items[j].Member
@@ -394,6 +651,50 @@ func normalizeAuthScope(scope string) string {
 	scope = strings.TrimSpace(scope)
 	if strings.HasPrefix(scope, "/rm/") {
 		return strings.TrimPrefix(scope, "/rm")
+	}
+	return scope
+}
+
+func authScopeSortKey(scope string) string {
+	scope = strings.TrimSpace(scope)
+	scope = strings.TrimPrefix(scope, "/rm")
+	scope = strings.Trim(scope, "/")
+	if scope == "" {
+		return "租户级"
+	}
+	parts := strings.Split(scope, "/")
+	if len(parts) == 1 {
+		switch strings.ToLower(parts[0]) {
+		case "tenant", "tenants":
+			return "租户级"
+		}
+	}
+	if len(parts) >= 2 {
+		switch parts[0] {
+		case "managementGroups", "managementgroups":
+			if len(parts) == 2 {
+				return "管理组"
+			}
+			return parts[len(parts)-1]
+		case "subscriptions":
+			if len(parts) == 2 {
+				return "订阅级"
+			}
+			if len(parts) == 4 && parts[2] == "resourceGroups" {
+				return "资源组 " + parts[3]
+			}
+			if len(parts) == 6 && parts[2] == "resourceGroups" && parts[4] == "zones" {
+				return "可用区 " + parts[5]
+			}
+			if len(parts) == 6 && parts[2] == "resourceGroups" && parts[4] == "regions" {
+				return "地域 " + parts[5]
+			}
+			if len(parts) > 4 {
+				return parts[len(parts)-1]
+			}
+		case "tenants", "tenant":
+			return "租户级"
+		}
 	}
 	return scope
 }

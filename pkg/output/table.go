@@ -488,7 +488,7 @@ func PrintAuthAFSResult(result *service.AuthAFSResult) {
 	)
 }
 
-func PrintAuthUserResult(result *service.AuthUserResult) {
+func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
 	if result == nil {
 		return
 	}
@@ -522,6 +522,29 @@ func PrintAuthUserResult(result *service.AuthUserResult) {
 	)
 
 	fmt.Fprintln(os.Stdout)
+	permissionRows := make([][]string, 0, maxInt(1, len(result.Permissions)))
+	if !long {
+		if len(result.Permissions) == 0 {
+			permissionRows = append(permissionRows, []string{"-", "-"})
+		} else {
+			for _, item := range result.Permissions {
+				permissionRows = append(permissionRows, []string{
+					emptyDash(formatAuthScopeForDisplay(item.Scope)),
+					emptyDash(item.Roles),
+				})
+			}
+		}
+		printBoxTableWithOptions(
+			[]string{"SCOPE", "ROLES"},
+			permissionRows,
+			[]int{56, 36},
+			tableOptions{
+				minWidths: []int{18, 10},
+			},
+		)
+		return
+	}
+
 	groupRows := make([][]string, 0, maxInt(1, len(result.Groups)))
 	if len(result.Groups) == 0 {
 		groupRows = append(groupRows, []string{"-", "-", "-", "-"})
@@ -548,7 +571,7 @@ func PrintAuthUserResult(result *service.AuthUserResult) {
 	)
 
 	fmt.Fprintln(os.Stdout)
-	permissionRows := make([][]string, 0, maxInt(1, len(result.Permissions)))
+	permissionRows = make([][]string, 0, maxInt(1, len(result.Permissions)))
 	if len(result.Permissions) == 0 {
 		permissionRows = append(permissionRows, []string{"-", "-", "-", "-", "-", "-", "-"})
 	} else {
@@ -557,7 +580,7 @@ func PrintAuthUserResult(result *service.AuthUserResult) {
 				emptyDash(item.Source),
 				emptyDash(item.Member),
 				emptyDash(item.Service),
-				emptyDash(item.Scope),
+				emptyDash(formatAuthScopeForDisplay(item.Scope)),
 				emptyDash(item.Roles),
 				emptyDash(item.RoleNames),
 				emptyDash(item.CreateTime),
@@ -577,6 +600,53 @@ func PrintAuthUserResult(result *service.AuthUserResult) {
 			minWidths:   []int{6, 10, 8, 18, 10, 12, 19},
 		},
 	)
+}
+
+func formatAuthScopeForDisplay(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" || scope == "-" {
+		return scope
+	}
+	scope = strings.TrimPrefix(scope, "/rm")
+	scope = strings.Trim(scope, "/")
+	if scope == "" {
+		return "租户级"
+	}
+	parts := strings.Split(scope, "/")
+	if len(parts) == 1 {
+		switch strings.ToLower(parts[0]) {
+		case "tenant", "tenants":
+			return "租户级"
+		}
+	}
+	if len(parts) >= 2 {
+		switch parts[0] {
+		case "managementGroups", "managementgroups":
+			if len(parts) == 2 {
+				return "管理组"
+			}
+			return parts[len(parts)-1]
+		case "subscriptions":
+			if len(parts) == 2 {
+				return "订阅级"
+			}
+			if len(parts) == 4 && parts[2] == "resourceGroups" {
+				return "资源组 " + parts[3]
+			}
+			if len(parts) == 6 && parts[2] == "resourceGroups" && parts[4] == "zones" {
+				return "可用区 " + parts[5]
+			}
+			if len(parts) == 6 && parts[2] == "resourceGroups" && parts[4] == "regions" {
+				return "地域 " + parts[5]
+			}
+			if len(parts) > 4 {
+				return parts[len(parts)-1]
+			}
+		case "tenants", "tenant":
+			return "租户级"
+		}
+	}
+	return scope
 }
 
 func PrintAuthGroupResult(result *service.AuthGroupResult) {
@@ -636,6 +706,55 @@ func PrintAuthGroupResult(result *service.AuthGroupResult) {
 		tableOptions{
 			noWrapCells: makeNoWrapCells(permissionNoWrap...),
 			minWidths:   []int{10, 8, 18, 10, 12, 19},
+		},
+	)
+}
+
+func PrintAuthGrantAFSResult(result *service.AuthGrantAFSResult) {
+	if result == nil {
+		return
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"AFS", emptyDash(result.AFSName)},
+			{"SCOPE", emptyDash(result.Scope)},
+			{"MEMBER TYPE", emptyDash(result.MemberType)},
+			{"MEMBER NAME", emptyDash(result.MemberName)},
+			{"MEMBER IDENTIFY", emptyDash(result.MemberIdentify)},
+			{"MEMBER ID", emptyDash(result.MemberValue)},
+			{"ROLE", emptyDash(result.RoleName)},
+			{"ROLE ID", emptyDash(result.RoleID)},
+			{"RESULT", emptyDash(result.Result)},
+			{"POLICY ID", emptyDash(result.PolicyID)},
+		},
+		[]int{16, 104},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{2, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+				[2]int{6, 1},
+				[2]int{7, 1},
+				[2]int{8, 1},
+				[2]int{9, 1},
+			),
+			minWidths: []int{12, 28},
+		},
+	)
+
+	if strings.TrimSpace(result.Payload) == "" {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions(
+		[]string{"PAYLOAD"},
+		[][]string{{result.Payload}},
+		[]int{120},
+		tableOptions{
+			minWidths: []int{40},
 		},
 	)
 }

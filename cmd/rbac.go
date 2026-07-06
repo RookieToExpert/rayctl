@@ -36,8 +36,13 @@ func newRBACGetCmd() *cobra.Command {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
 
+			ctx := context.Background()
+			bearerToken, err := bearerTokenForCommand(ctx, cmd, vcClient, "")
+			if err != nil {
+				return err
+			}
 			rbacService := service.NewRBACService(vcClient)
-			result, err := rbacService.Get(context.Background(), args[0], selector, rbacBearerToken())
+			result, err := rbacService.Get(ctx, args[0], selector, bearerToken)
 			if err != nil {
 				return err
 			}
