@@ -84,7 +84,10 @@ type StorageVolumeResource struct {
 	RID                      string `json:"rid"`
 	Name                     string `json:"name"`
 	DisplayName              string `json:"display_name"`
+	Type                     string `json:"type"`
+	ResourceType             string `json:"resource_type"`
 	Zone                     string `json:"zone"`
+	Region                   string `json:"region"`
 	ResourceGroupName        string `json:"resource_group_name"`
 	ResourceGroupDisplayName string `json:"resource_group_display_name"`
 	ProfileName              string `json:"-"`
@@ -1944,6 +1947,76 @@ func (c *VirtualClusterClient) FindStorageVolumeResource(ctx context.Context, id
 		return resource, nil
 	}
 	return c.findStorageVolumeResourceByFieldFragment(ctx, "name", identifier)
+}
+
+func (c *VirtualClusterClient) FindResourceByName(ctx context.Context, name string, resourceKinds ...string) (*StorageVolumeResource, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("resource name is required")
+	}
+
+	kindSet := make(map[string]struct{}, len(resourceKinds))
+	for _, kind := range resourceKinds {
+		kind = strings.Trim(strings.TrimSpace(kind), "/")
+		if kind != "" {
+			kindSet[kind] = struct{}{}
+		}
+	}
+
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		pageToken := "1"
+		for {
+			u, _ := url.Parse(profile.BaseURL)
+			u.Path = "/rmh/v1/resources:page"
+			query := u.Query()
+			query.Set("filter", fmt.Sprintf(`name="%s"`, name))
+			query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+			query.Set("page_token", pageToken)
+			u.RawQuery = query.Encode()
+
+			var payload storageVolumePageResponse
+			if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
+				lastErr = err
+				break
+			}
+
+			for i := range payload.Resources {
+				resource := &payload.Resources[i]
+				resource.ProfileName = profile.Name
+				if !strings.EqualFold(strings.TrimSpace(resource.Name), name) {
+					continue
+				}
+				if len(kindSet) > 0 && !resourceRIDHasAnyKind(resource.RID, kindSet) {
+					continue
+				}
+				return resource, nil
+			}
+
+			nextPageToken := strings.TrimSpace(payload.NextPageToken)
+			if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
+				break
+			}
+			pageToken = nextPageToken
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	if len(resourceKinds) > 0 {
+		return nil, fmt.Errorf("resource %q with kind %q not found", name, strings.Join(resourceKinds, ","))
+	}
+	return nil, fmt.Errorf("resource %q not found", name)
+}
+
+func resourceRIDHasAnyKind(rid string, kinds map[string]struct{}) bool {
+	ridParts := strings.Split(strings.Trim(rid, "/"), "/")
+	for _, part := range ridParts {
+		if _, ok := kinds[part]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *VirtualClusterClient) findStorageVolumeResourceByFragment(ctx context.Context, fragment string) (*StorageVolumeResource, error) {

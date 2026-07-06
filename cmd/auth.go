@@ -60,6 +60,10 @@ func newAuthGrantCmd() *cobra.Command {
 		Short: "给资源新增授权",
 	}
 	grantCmd.AddCommand(newAuthGrantAFSCmd())
+	grantCmd.AddCommand(newAuthGrantResourceCmd("vc", "vc <vc-name>", "给 VC 授权用户或用户组", "VC 角色: user/admin 或完整 role_name"))
+	grantCmd.AddCommand(newAuthGrantResourceCmd("ccr", "ccr <namespace-name>", "给 CCR namespace 授权用户或用户组", "CCR 角色: user/imageUser/owner 或完整 role_name"))
+	grantCmd.AddCommand(newAuthGrantResourceCmd("subnet", "subnet <subnet-name>", "给 Subnet 授权用户或用户组", "Subnet 角色: reader/editor 或完整 role_name"))
+	grantCmd.AddCommand(newAuthGrantResourceCmd("ais", "ais <ais-name>", "给开发机 AI Space 授权用户或用户组", "AIS 角色: owner 或完整 role_name"))
 	return grantCmd
 }
 
@@ -97,8 +101,13 @@ func newAuthCheckUserCmd() *cobra.Command {
 }
 
 func newAuthGrantAFSCmd() *cobra.Command {
+	return newAuthGrantResourceCmd("afs", "afs <afs-name>", "给 AFS 授权用户或用户组", "AFS 角色: editor/reader/owner 或完整 role_name")
+}
+
+func newAuthGrantResourceCmd(resourceType string, use string, short string, roleHelp string) *cobra.Command {
 	var user string
 	var group string
+	var name string
 	var role string
 	var scope string
 	var dryRun bool
@@ -107,10 +116,21 @@ func newAuthGrantAFSCmd() *cobra.Command {
 	var debugAuth bool
 
 	cmd := &cobra.Command{
-		Use:   "afs <afs-name>",
-		Short: "给 AFS 授权用户或用户组",
-		Args:  cobra.ExactArgs(1),
+		Use:   use,
+		Short: short,
+		Args:  cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			resourceName := strings.TrimSpace(name)
+			if len(args) > 0 {
+				if resourceName != "" {
+					return fmt.Errorf("资源名参数和 --name 只能二选一")
+				}
+				resourceName = strings.TrimSpace(args[0])
+			}
+			if resourceName == "" && strings.TrimSpace(scope) == "" {
+				return fmt.Errorf("请指定资源名或 --scope")
+			}
+
 			memberType := ""
 			memberIdentifier := ""
 			if strings.TrimSpace(user) != "" {
@@ -134,7 +154,8 @@ func newAuthGrantAFSCmd() *cobra.Command {
 			}
 
 			req := service.AuthGrantAFSRequest{
-				AFSName:          args[0],
+				ResourceType:     resourceType,
+				ResourceName:     resourceName,
 				Scope:            scope,
 				MemberType:       memberType,
 				MemberIdentifier: memberIdentifier,
@@ -157,8 +178,9 @@ func newAuthGrantAFSCmd() *cobra.Command {
 			if !yes {
 				fmt.Fprintf(
 					cmd.OutOrStdout(),
-					"将给 AFS %s 授权 %s %s，角色 %s，是否继续? (y/N): ",
-					result.AFSName,
+					"将给 %s %s 授权 %s %s，角色 %s，是否继续? (y/N): ",
+					result.ResourceType,
+					firstNonEmptyAuthValue(result.ResourceName, result.AFSName),
 					result.MemberType,
 					firstNonEmptyAuthValue(result.MemberIdentify, result.MemberName, result.MemberValue),
 					result.RoleName,
@@ -191,10 +213,11 @@ func newAuthGrantAFSCmd() *cobra.Command {
 		},
 	}
 
+	cmd.Flags().StringVar(&name, "name", "", "资源名称；也可以直接作为位置参数传入")
 	cmd.Flags().StringVarP(&user, "user", "u", "", "授权给用户 username 或 user id")
 	cmd.Flags().StringVarP(&group, "group", "g", "", "授权给用户组 name 或 group id")
-	cmd.Flags().StringVarP(&role, "role", "r", "editor", "AFS 角色: editor/reader/owner 或完整 role_name")
-	cmd.Flags().StringVarP(&scope, "scope", "s", "", "手动指定资源 scope，默认根据 AFS 名自动解析")
+	cmd.Flags().StringVarP(&role, "role", "r", "", roleHelp)
+	cmd.Flags().StringVarP(&scope, "scope", "s", "", "手动指定资源 scope，默认根据资源名自动解析")
 	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "控制台 Bearer token；也可用 RAYCTL_BEARER_TOKEN")
 	cmd.Flags().BoolVar(&debugAuth, "debug-auth", false, "打印脱敏授权调试信息，例如 token 来源")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只展示将要提交的授权 payload，不真正写入")

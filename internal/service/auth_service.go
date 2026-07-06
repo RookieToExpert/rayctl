@@ -72,7 +72,8 @@ type AuthPermissionItem struct {
 }
 
 type AuthGrantAFSRequest struct {
-	AFSName          string
+	ResourceType     string
+	ResourceName     string
 	Scope            string
 	MemberType       string
 	MemberIdentifier string
@@ -82,6 +83,8 @@ type AuthGrantAFSRequest struct {
 }
 
 type AuthGrantAFSResult struct {
+	ResourceType   string
+	ResourceName   string
 	AFSName        string
 	Scope          string
 	MemberType     string
@@ -256,10 +259,14 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for auth grant")
 	}
-	afsName := strings.TrimSpace(req.AFSName)
+	resourceType := normalizeGrantResourceType(req.ResourceType)
+	if resourceType == "" {
+		resourceType = "afs"
+	}
+	resourceName := strings.TrimSpace(req.ResourceName)
 	scope := strings.TrimSpace(req.Scope)
-	if afsName == "" && scope == "" {
-		return nil, fmt.Errorf("afs name or scope is required")
+	if resourceName == "" && scope == "" {
+		return nil, fmt.Errorf("%s name or scope is required", resourceType)
 	}
 
 	memberType := strings.ToUpper(strings.TrimSpace(req.MemberType))
@@ -272,29 +279,31 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 	}
 
 	if scope == "" {
-		resource, err := s.vcClient.FindStorageVolumeResource(ctx, afsName)
+		resource, err := s.findGrantResource(ctx, resourceType, resourceName)
 		if err != nil {
-			return nil, fmt.Errorf("resolve afs scope: %w", err)
+			return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
 		}
 		scope = ensureRMScope(resource.RID)
-		if afsName == "" {
-			afsName = strings.TrimSpace(resource.Name)
+		if resourceName == "" {
+			resourceName = strings.TrimSpace(resource.Name)
 		}
 	}
-	if afsName == "" {
-		afsName = extractAFSNameFromScope(scope)
+	if resourceName == "" {
+		resourceName = extractResourceNameFromScope(scope)
 	}
 	if scope == "" {
-		return nil, fmt.Errorf("afs scope is empty")
+		return nil, fmt.Errorf("%s scope is empty", resourceType)
 	}
 
-	roleName, roleID, err := s.resolveAFSRole(ctx, req.Role)
+	roleName, roleID, err := s.resolveGrantRole(ctx, resourceType, req.Role)
 	if err != nil {
 		return nil, err
 	}
 
 	result := &AuthGrantAFSResult{
-		AFSName:        afsName,
+		ResourceType:   strings.ToUpper(resourceType),
+		ResourceName:   resourceName,
+		AFSName:        resourceName,
 		Scope:          scope,
 		MemberType:     memberType,
 		MemberName:     memberName,
@@ -367,16 +376,20 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 }
 
 func extractAFSNameFromScope(scope string) string {
+	return extractResourceNameFromScope(scope)
+}
+
+func extractResourceNameFromScope(scope string) string {
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
 		return ""
 	}
-	marker := "/virtualVolumes/"
-	index := strings.Index(scope, marker)
-	if index < 0 {
+	scope = strings.Trim(scope, "/")
+	if scope == "" {
 		return ""
 	}
-	name := scope[index+len(marker):]
+	parts := strings.Split(scope, "/")
+	name := parts[len(parts)-1]
 	if cut := strings.IndexAny(name, "/?#"); cut >= 0 {
 		name = name[:cut]
 	}
@@ -415,7 +428,11 @@ func (s *AuthService) resolveGrantMember(ctx context.Context, memberType string,
 }
 
 func (s *AuthService) resolveAFSRole(ctx context.Context, role string) (string, string, error) {
-	roleName := normalizeAFSRoleName(role)
+	return s.resolveGrantRole(ctx, "afs", role)
+}
+
+func (s *AuthService) resolveGrantRole(ctx context.Context, resourceType string, role string) (string, string, error) {
+	roleName := normalizeGrantRoleName(resourceType, role)
 	if roleName == "" {
 		return "", "", fmt.Errorf("role is required")
 	}
@@ -436,15 +453,103 @@ func (s *AuthService) resolveAFSRole(ctx context.Context, role string) (string, 
 }
 
 func normalizeAFSRoleName(role string) string {
+	return normalizeGrantRoleName("afs", role)
+}
+
+func normalizeGrantRoleName(resourceType string, role string) string {
+	resourceType = normalizeGrantResourceType(resourceType)
 	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "", "editor", "edit", "developer", "dev":
-		return "afs.volumeEditor"
-	case "reader", "read", "viewer", "view":
-		return "afs.volumeReader"
-	case "owner":
-		return "afs.volumeOwner"
+	case "":
+		switch resourceType {
+		case "afs":
+			return "afs.volumeEditor"
+		case "vc":
+			return "ecp.clusterUser"
+		case "ccr":
+			return "ccr.namespaceUser"
+		case "subnet":
+			return "vpc.reader"
+		case "ais":
+			return "ais.instanceOwner"
+		default:
+			return ""
+		}
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(role))
+	switch resourceType {
+	case "afs":
+		switch normalized {
+		case "editor", "edit", "developer", "dev":
+			return "afs.volumeEditor"
+		case "reader", "read", "viewer", "view":
+			return "afs.volumeReader"
+		case "owner":
+			return "afs.volumeOwner"
+		}
+	case "vc":
+		switch normalized {
+		case "user", "clusteruser", "cluster-user":
+			return "ecp.clusterUser"
+		case "admin", "clusteradmin", "cluster-admin":
+			return "ecp.clusterAdmin"
+		}
+	case "ccr":
+		switch normalized {
+		case "user", "namespaceuser", "namespace-user":
+			return "ccr.namespaceUser"
+		case "imageuser", "image-user", "image":
+			return "ccr.imageUser"
+		case "owner", "namespaceowner", "namespace-owner":
+			return "ccr.namespaceOwner"
+		}
+	case "subnet":
+		switch normalized {
+		case "reader", "read", "viewer", "view":
+			return "vpc.reader"
+		case "editor", "edit":
+			return "vpc.editor"
+		}
+	case "ais":
+		switch normalized {
+		case "owner", "instanceowner", "instance-owner":
+			return "ais.instanceOwner"
+		}
+	}
+	return strings.TrimSpace(role)
+}
+
+func normalizeGrantResourceType(resourceType string) string {
+	switch strings.ToLower(strings.TrimSpace(resourceType)) {
+	case "", "afs", "aoss", "volume", "virtualvolume", "virtual-volume":
+		return "afs"
+	case "vc", "cluster", "virtualcluster", "virtual-cluster":
+		return "vc"
+	case "ccr", "namespace", "ns":
+		return "ccr"
+	case "subnet":
+		return "subnet"
+	case "ais", "ai", "aispace", "ai-space", "ai_spaces":
+		return "ais"
 	default:
-		return strings.TrimSpace(role)
+		return strings.ToLower(strings.TrimSpace(resourceType))
+	}
+}
+
+func (s *AuthService) findGrantResource(ctx context.Context, resourceType string, name string) (*platform.StorageVolumeResource, error) {
+	switch normalizeGrantResourceType(resourceType) {
+	case "afs":
+		return s.vcClient.FindStorageVolumeResource(ctx, name)
+	case "vc":
+		return s.vcClient.FindResourceByName(ctx, name, "virtualClusters")
+	case "ccr":
+		return s.vcClient.FindResourceByName(ctx, name, "namespaces")
+	case "subnet":
+		return s.vcClient.FindResourceByName(ctx, name, "subnets")
+	case "ais":
+		return s.vcClient.FindResourceByName(ctx, name, "aiSpaces")
+	default:
+		return nil, fmt.Errorf("unsupported resource type %q", resourceType)
 	}
 }
 

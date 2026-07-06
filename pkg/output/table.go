@@ -715,20 +715,28 @@ func PrintAuthGrantAFSResult(result *service.AuthGrantAFSResult) {
 		return
 	}
 
+	resourceRows := [][]string{
+		{"RESOURCE TYPE", emptyDash(result.ResourceType)},
+		{"RESOURCE", emptyDash(firstNonEmptyOutput(result.ResourceName, result.AFSName))},
+	}
+	if strings.EqualFold(strings.TrimSpace(result.ResourceType), "AFS") || strings.TrimSpace(result.ResourceType) == "" {
+		resourceRows = [][]string{{"AFS", emptyDash(firstNonEmptyOutput(result.AFSName, result.ResourceName))}}
+	}
+	rows := append(resourceRows, [][]string{
+		{"SCOPE", emptyDash(result.Scope)},
+		{"MEMBER TYPE", emptyDash(result.MemberType)},
+		{"MEMBER NAME", emptyDash(result.MemberName)},
+		{"MEMBER IDENTIFY", emptyDash(result.MemberIdentify)},
+		{"MEMBER ID", emptyDash(result.MemberValue)},
+		{"ROLE", emptyDash(result.RoleName)},
+		{"ROLE ID", emptyDash(result.RoleID)},
+		{"RESULT", emptyDash(result.Result)},
+		{"POLICY ID", emptyDash(result.PolicyID)},
+	}...)
+
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
-		[][]string{
-			{"AFS", emptyDash(result.AFSName)},
-			{"SCOPE", emptyDash(result.Scope)},
-			{"MEMBER TYPE", emptyDash(result.MemberType)},
-			{"MEMBER NAME", emptyDash(result.MemberName)},
-			{"MEMBER IDENTIFY", emptyDash(result.MemberIdentify)},
-			{"MEMBER ID", emptyDash(result.MemberValue)},
-			{"ROLE", emptyDash(result.RoleName)},
-			{"ROLE ID", emptyDash(result.RoleID)},
-			{"RESULT", emptyDash(result.Result)},
-			{"POLICY ID", emptyDash(result.PolicyID)},
-		},
+		rows,
 		[]int{16, 104},
 		tableOptions{
 			noWrapCells: makeNoWrapCells(
