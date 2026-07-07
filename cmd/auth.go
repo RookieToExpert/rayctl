@@ -47,9 +47,13 @@ func newAuthCmd() *cobra.Command {
 func newAuthCheckCmd() *cobra.Command {
 	checkCmd := &cobra.Command{
 		Use:   "check",
-		Short: "查看用户、用户组、AFS 的授权信息",
+		Short: "查看用户、用户组、资源的授权信息",
 	}
 	checkCmd.AddCommand(newAuthCheckAFSCmd())
+	checkCmd.AddCommand(newAuthCheckResourceCmd("vc", "vc <vc-name>", "查看 VC 归属的用户/用户组授权"))
+	checkCmd.AddCommand(newAuthCheckResourceCmd("ccr", "ccr <namespace-name>", "查看 CCR namespace 归属的用户/用户组授权"))
+	checkCmd.AddCommand(newAuthCheckResourceCmd("subnet", "subnet <subnet-name>", "查看 Subnet 归属的用户/用户组授权"))
+	checkCmd.AddCommand(newAuthCheckResourceCmd("ais", "ais <ais-name>", "查看开发机 AI Space 归属的用户/用户组授权"))
 	checkCmd.AddCommand(newAuthCheckGroupsCmd())
 	checkCmd.AddCommand(newAuthCheckUserCmd())
 	return checkCmd
@@ -79,11 +83,17 @@ func newAuthRemoveCmd() *cobra.Command {
 }
 
 func newAuthCheckAFSCmd() *cobra.Command {
+	return newAuthCheckResourceCmd("afs", "afs <afs-name>", "查看 AFS 归属的用户/用户组授权")
+}
+
+func newAuthCheckResourceCmd(resourceType string, use string, short string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "afs <afs-name>",
-		Short: "查看 AFS 归属的用户/用户组授权",
+		Use:   use,
+		Short: short,
 		Args:  cobra.ExactArgs(1),
-		RunE:  runAuthCheckAFS,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAuthCheckResource(cmd, resourceType, args[0])
+		},
 	}
 }
 
@@ -451,13 +461,17 @@ func newAuthTokenCmd() *cobra.Command {
 }
 
 func runAuthCheckAFS(cmd *cobra.Command, args []string) error {
+	return runAuthCheckResource(cmd, "afs", args[0])
+}
+
+func runAuthCheckResource(cmd *cobra.Command, resourceType string, resourceName string) error {
 	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 	if !ok {
 		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 	}
 
 	authService := service.NewAuthService(vcClient)
-	result, err := authService.GetAFS(context.Background(), args[0])
+	result, err := authService.GetResourceAuth(context.Background(), resourceType, resourceName)
 	if err != nil {
 		return err
 	}

@@ -16,8 +16,11 @@ type AuthService struct {
 }
 
 type AuthAFSResult struct {
-	AFSName string
-	Items   []AuthAFSItem
+	ResourceType string
+	ResourceName string
+	Scope        string
+	AFSName      string
+	Items        []AuthAFSItem
 }
 
 type AuthAFSItem struct {
@@ -103,13 +106,31 @@ func NewAuthService(vcClient *platform.VirtualClusterClient) *AuthService {
 }
 
 func (s *AuthService) GetAFS(ctx context.Context, afsName string) (*AuthAFSResult, error) {
+	return s.GetResourceAuth(ctx, "afs", afsName)
+}
+
+func (s *AuthService) GetResourceAuth(ctx context.Context, resourceType string, resourceName string) (*AuthAFSResult, error) {
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for auth lookup")
 	}
-	afsName = strings.TrimSpace(afsName)
-	if afsName == "" {
-		return nil, fmt.Errorf("afs name is required")
+	resourceType = normalizeGrantResourceType(resourceType)
+	if resourceType == "" {
+		resourceType = "afs"
 	}
+	resourceName = strings.TrimSpace(resourceName)
+	if resourceName == "" {
+		return nil, fmt.Errorf("%s name is required", resourceType)
+	}
+
+	resource, err := s.findGrantResource(ctx, resourceType, resourceName)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
+	}
+	scope := ensureRMScope(resource.RID)
+	if scope == "" {
+		return nil, fmt.Errorf("%s scope is empty", resourceType)
+	}
+	resourceName = firstNonEmpty(strings.TrimSpace(resource.Name), resourceName)
 
 	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
 	if err != nil {
@@ -118,7 +139,7 @@ func (s *AuthService) GetAFS(ctx context.Context, afsName string) (*AuthAFSResul
 
 	items := make([]AuthAFSItem, 0)
 	for _, policy := range policies {
-		if extractAFSNameFromScope(policy.Scope) != afsName {
+		if normalizeAuthScope(policy.Scope) != normalizeAuthScope(scope) && ensureRMScope(policy.Scope) != scope {
 			continue
 		}
 		roleDisplays, roleNames := extractIAMRoleNames(policy.RoleInfos)
@@ -148,8 +169,11 @@ func (s *AuthService) GetAFS(ctx context.Context, afsName string) (*AuthAFSResul
 	})
 
 	return &AuthAFSResult{
-		AFSName: afsName,
-		Items:   items,
+		ResourceType: strings.ToUpper(resourceType),
+		ResourceName: resourceName,
+		Scope:        scope,
+		AFSName:      resourceName,
+		Items:        items,
 	}, nil
 }
 

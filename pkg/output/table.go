@@ -443,15 +443,24 @@ func PrintAuthAFSResult(result *service.AuthAFSResult) {
 		return
 	}
 
+	resourceRows := [][]string{
+		{"RESOURCE TYPE", emptyDash(result.ResourceType)},
+		{"RESOURCE", emptyDash(firstNonEmptyOutput(result.ResourceName, result.AFSName))},
+	}
+	if strings.EqualFold(strings.TrimSpace(result.ResourceType), "AFS") || strings.TrimSpace(result.ResourceType) == "" {
+		resourceRows = [][]string{{"AFS", emptyDash(firstNonEmptyOutput(result.AFSName, result.ResourceName))}}
+	}
+	summaryRows := append(resourceRows, [][]string{
+		{"SCOPE", emptyDash(formatAuthScopeForDisplay(result.Scope))},
+		{"授权数量", strconv.Itoa(len(result.Items))},
+	}...)
+
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
-		[][]string{
-			{"AFS", emptyDash(result.AFSName)},
-			{"授权数量", strconv.Itoa(len(result.Items))},
-		},
+		summaryRows,
 		[]int{14, 64},
 		tableOptions{
-			noWrapCells: makeNoWrapCells([2]int{0, 1}, [2]int{1, 1}),
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(summaryRows), 1)...),
 			minWidths:   []int{10, 20},
 		},
 	)
