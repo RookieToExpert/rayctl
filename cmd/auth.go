@@ -98,13 +98,18 @@ func newAuthCheckResourceCmd(resourceType string, use string, short string) *cob
 }
 
 func newAuthCheckGroupsCmd() *cobra.Command {
-	return &cobra.Command{
+	var long bool
+	cmd := &cobra.Command{
 		Use:     "groups <group-name-or-id>",
 		Aliases: []string{"group"},
 		Short:   "查看用户组信息和权限",
 		Args:    cobra.ExactArgs(1),
-		RunE:    runAuthCheckGroups,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAuthCheckGroups(cmd, args, long)
+		},
 	}
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 source/service/role names/create time 等详细权限信息")
+	return cmd
 }
 
 func newAuthCheckUserCmd() *cobra.Command {
@@ -479,7 +484,7 @@ func runAuthCheckResource(cmd *cobra.Command, resourceType string, resourceName 
 	return nil
 }
 
-func runAuthCheckGroups(cmd *cobra.Command, args []string) error {
+func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool) error {
 	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 	if !ok {
 		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
@@ -494,7 +499,7 @@ func runAuthCheckGroups(cmd *cobra.Command, args []string) error {
 		if i > 0 {
 			fmt.Fprintln(cmd.OutOrStdout())
 		}
-		output.PrintAuthGroupResult(result)
+		output.PrintAuthGroupResult(result, long)
 	}
 	return nil
 }

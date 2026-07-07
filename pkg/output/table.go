@@ -658,7 +658,7 @@ func formatAuthScopeForDisplay(scope string) string {
 	return scope
 }
 
-func PrintAuthGroupResult(result *service.AuthGroupResult) {
+func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 	if result == nil {
 		return
 	}
@@ -691,14 +691,36 @@ func PrintAuthGroupResult(result *service.AuthGroupResult) {
 
 	fmt.Fprintln(os.Stdout)
 	permissionRows := make([][]string, 0, maxInt(1, len(result.Permissions)))
+	if !long {
+		if len(result.Permissions) == 0 {
+			permissionRows = append(permissionRows, []string{"-", "-"})
+		} else {
+			for _, item := range result.Permissions {
+				permissionRows = append(permissionRows, []string{
+					emptyDash(formatAuthScopeForDisplay(item.Scope)),
+					emptyDash(item.Roles),
+				})
+			}
+		}
+		printBoxTableWithOptions(
+			[]string{"SCOPE", "ROLES"},
+			permissionRows,
+			[]int{56, 36},
+			tableOptions{
+				minWidths: []int{18, 10},
+			},
+		)
+		return
+	}
+
 	if len(result.Permissions) == 0 {
 		permissionRows = append(permissionRows, []string{"-", "-", "-", "-", "-", "-"})
 	} else {
 		for _, item := range result.Permissions {
 			permissionRows = append(permissionRows, []string{
-				emptyDash(item.Member),
+				emptyDash(item.Source),
 				emptyDash(item.Service),
-				emptyDash(item.Scope),
+				emptyDash(formatAuthScopeForDisplay(item.Scope)),
 				emptyDash(item.Roles),
 				emptyDash(item.RoleNames),
 				emptyDash(item.CreateTime),
@@ -706,15 +728,16 @@ func PrintAuthGroupResult(result *service.AuthGroupResult) {
 		}
 	}
 	permissionNoWrap := make([][2]int, 0, len(permissionRows)*2)
+	permissionNoWrap = append(permissionNoWrap, noWrapCellsForSingleColumn(len(permissionRows), 0)...)
 	permissionNoWrap = append(permissionNoWrap, noWrapCellsForSingleColumn(len(permissionRows), 1)...)
 	permissionNoWrap = append(permissionNoWrap, noWrapCellsForSingleColumn(len(permissionRows), 5)...)
 	printBoxTableWithOptions(
-		[]string{"GROUP", "SERVICE", "SCOPE", "ROLES", "ROLE NAMES", "CREATE TIME"},
+		[]string{"SOURCE", "SERVICE", "SCOPE", "ROLES", "ROLE NAMES", "CREATE TIME"},
 		permissionRows,
-		[]int{24, 10, 64, 28, 28, 19},
+		[]int{8, 10, 56, 28, 28, 19},
 		tableOptions{
 			noWrapCells: makeNoWrapCells(permissionNoWrap...),
-			minWidths:   []int{10, 8, 18, 10, 12, 19},
+			minWidths:   []int{6, 8, 18, 10, 12, 19},
 		},
 	)
 }
