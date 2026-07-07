@@ -29,6 +29,7 @@ func newAuthCmd() *cobra.Command {
 	authCmd.AddCommand(newAuthCheckCmd())
 	authCmd.AddCommand(newAuthGrantCmd())
 	authCmd.AddCommand(newAuthRemoveCmd())
+	authCmd.AddCommand(newAuthRolesCmd())
 	authCmd.AddCommand(newAuthLoginCmd())
 	authCmd.AddCommand(newAuthLogoutCmd())
 	authCmd.AddCommand(newAuthTokenCmd())
@@ -80,6 +81,19 @@ func newAuthRemoveCmd() *cobra.Command {
 	removeCmd.AddCommand(newAuthRemoveResourceCmd("subnet", "subnet <subnet-name>", "移除 Subnet 授权", "Subnet 角色: reader/editor 或完整 role_name"))
 	removeCmd.AddCommand(newAuthRemoveResourceCmd("ais", "ais <ais-name>", "移除开发机 AI Space 授权", "AIS 角色: owner 或完整 role_name"))
 	return removeCmd
+}
+
+func newAuthRolesCmd() *cobra.Command {
+	rolesCmd := &cobra.Command{
+		Use:   "roles",
+		Short: "查看资源可授权角色",
+	}
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("afs", "afs", "查看 AFS 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("vc", "vc", "查看 VC 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("ccr", "ccr", "查看 CCR namespace 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("subnet", "subnet", "查看 Subnet 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("ais", "ais", "查看开发机 AI Space 可授权角色"))
+	return rolesCmd
 }
 
 func newAuthCheckAFSCmd() *cobra.Command {
@@ -369,6 +383,29 @@ func newAuthRemoveResourceCmd(resourceType string, use string, short string, rol
 	cmd.Flags().BoolVar(&debugAuth, "debug-auth", false, "打印脱敏授权调试信息，例如 token 来源")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只展示将要移除的授权，不真正写入")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "跳过确认直接移除")
+	return cmd
+}
+
+func newAuthRolesResourceCmd(resourceType string, use string, short string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+
+			authService := service.NewAuthService(vcClient)
+			result, err := authService.GetResourceRoles(context.Background(), resourceType)
+			if err != nil {
+				return err
+			}
+			output.PrintAuthRolesResult(result)
+			return nil
+		},
+	}
 	return cmd
 }
 

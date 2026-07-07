@@ -101,6 +101,27 @@ type AuthGrantAFSResult struct {
 	Payload        string
 }
 
+type AuthRolesResult struct {
+	ResourceType string
+	ResourceName string
+	Scope        string
+	Items        []AuthRoleItem
+}
+
+type AuthRoleItem struct {
+	Alias       string
+	RoleName    string
+	DisplayName string
+	Description string
+	RoleID      string
+	Service     string
+}
+
+type authRoleDefinition struct {
+	Alias    string
+	RoleName string
+}
+
 func NewAuthService(vcClient *platform.VirtualClusterClient) *AuthService {
 	return &AuthService{vcClient: vcClient}
 }
@@ -173,6 +194,48 @@ func (s *AuthService) GetResourceAuth(ctx context.Context, resourceType string, 
 		ResourceName: resourceName,
 		Scope:        scope,
 		AFSName:      resourceName,
+		Items:        items,
+	}, nil
+}
+
+func (s *AuthService) GetResourceRoles(ctx context.Context, resourceType string) (*AuthRolesResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for auth roles")
+	}
+	resourceType = normalizeGrantResourceType(resourceType)
+	if resourceType == "" {
+		resourceType = "afs"
+	}
+	defs := grantRoleDefinitions(resourceType)
+	if len(defs) == 0 {
+		return nil, fmt.Errorf("unsupported resource type %q", resourceType)
+	}
+	roles, err := s.vcClient.ListIAMRoles(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	roleByName := make(map[string]platform.IAMRoleInfo, len(roles))
+	for _, role := range roles {
+		roleName := strings.TrimSpace(role.RoleName)
+		if roleName == "" {
+			continue
+		}
+		roleByName[roleName] = role
+	}
+	items := make([]AuthRoleItem, 0, len(defs))
+	for _, def := range defs {
+		role := roleByName[def.RoleName]
+		items = append(items, AuthRoleItem{
+			Alias:       def.Alias,
+			RoleName:    def.RoleName,
+			DisplayName: strings.TrimSpace(role.DisplayName),
+			Description: strings.TrimSpace(role.Description),
+			RoleID:      strings.TrimSpace(role.ID),
+			Service:     strings.TrimSpace(role.AvailableService),
+		})
+	}
+	return &AuthRolesResult{
+		ResourceType: strings.ToUpper(resourceType),
 		Items:        items,
 	}, nil
 }
@@ -569,6 +632,39 @@ func normalizeAFSRoleName(role string) string {
 	return normalizeGrantRoleName("afs", role)
 }
 
+func grantRoleDefinitions(resourceType string) []authRoleDefinition {
+	switch normalizeGrantResourceType(resourceType) {
+	case "afs":
+		return []authRoleDefinition{
+			{Alias: "editor", RoleName: "afs.volumeEditor"},
+			{Alias: "reader", RoleName: "afs.volumeReader"},
+			{Alias: "owner", RoleName: "afs.volumeOwner"},
+		}
+	case "vc":
+		return []authRoleDefinition{
+			{Alias: "user", RoleName: "ecp.clusterUser"},
+			{Alias: "admin", RoleName: "ecp.clusterAdmin"},
+		}
+	case "ccr":
+		return []authRoleDefinition{
+			{Alias: "user", RoleName: "ccr.namespaceUser"},
+			{Alias: "imageUser", RoleName: "ccr.imageUser"},
+			{Alias: "owner", RoleName: "ccr.namespaceOwner"},
+		}
+	case "subnet":
+		return []authRoleDefinition{
+			{Alias: "reader", RoleName: "vpc.reader"},
+			{Alias: "editor", RoleName: "vpc.editor"},
+		}
+	case "ais":
+		return []authRoleDefinition{
+			{Alias: "owner", RoleName: "ais.instanceOwner"},
+		}
+	default:
+		return nil
+	}
+}
+
 func normalizeGrantRoleName(resourceType string, role string) string {
 	resourceType = normalizeGrantResourceType(resourceType)
 	switch strings.ToLower(strings.TrimSpace(role)) {
@@ -630,6 +726,30 @@ func normalizeGrantRoleName(resourceType string, role string) string {
 		}
 	}
 	return strings.TrimSpace(role)
+}
+
+func grantRoleAlias(resourceType string, roleName string) string {
+	resourceType = normalizeGrantResourceType(resourceType)
+	roleName = strings.TrimSpace(roleName)
+	for _, def := range grantRoleDefinitions(resourceType) {
+		if def.RoleName == roleName {
+			return def.Alias
+		}
+	}
+	return roleName
+}
+
+func shouldHideOwnRole(displayName string, roleName string) bool {
+	hidden := strings.TrimSpace(displayName)
+	if hidden == "" {
+		hidden = strings.TrimSpace(roleName)
+	}
+	switch hidden {
+	case "所有 get 权限", "所有 list 权限":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeGrantResourceType(resourceType string) string {

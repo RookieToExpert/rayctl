@@ -194,6 +194,7 @@ type IAMBindingPolicy struct {
 type IAMRoleInfo struct {
 	ID               string `json:"id"`
 	DisplayName      string `json:"display_name"`
+	Description      string `json:"description"`
 	RoleName         string `json:"role_name"`
 	AvailableService string `json:"available_service"`
 }
@@ -1453,6 +1454,60 @@ func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo,
 			continue
 		}
 		if len(roles) < 200 {
+			break
+		}
+		current, err := strconv.Atoi(pageToken)
+		if err != nil {
+			break
+		}
+		pageToken = strconv.Itoa(current + 1)
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string, bearerToken string) ([]IAMRoleInfo, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return nil, fmt.Errorf("scope is required")
+	}
+
+	pageToken := "1"
+	result := make([]IAMRoleInfo, 0)
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/authz/v1/roles:own"
+		query := u.Query()
+		query.Set("page_size", "100")
+		query.Set("page_token", pageToken)
+		query.Set("scope", scope)
+		query.Set("level", "resources")
+		u.RawQuery = query.Encode()
+
+		var payload iamRoleListResponse
+		if err := c.getJSONWithBearerProfile(ctx, profile, u.String(), bearerToken, &payload); err != nil {
+			return nil, err
+		}
+		roles := payload.Roles
+		if len(roles) == 0 {
+			roles = payload.RoleInfos
+		}
+		if len(roles) == 0 {
+			roles = payload.Items
+		}
+		if len(roles) == 0 {
+			break
+		}
+		result = append(result, roles...)
+		nextToken := strings.TrimSpace(payload.NextPageToken)
+		if nextToken != "" && nextToken != pageToken {
+			pageToken = nextToken
+			continue
+		}
+		if len(roles) < 100 {
 			break
 		}
 		current, err := strconv.Atoi(pageToken)

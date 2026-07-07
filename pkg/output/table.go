@@ -799,6 +799,36 @@ func PrintAuthGrantAFSResult(result *service.AuthGrantAFSResult) {
 	)
 }
 
+func PrintAuthRolesResult(result *service.AuthRolesResult) {
+	if result == nil {
+		return
+	}
+
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	if len(result.Items) == 0 {
+		rows = append(rows, []string{"-", "-", "-"})
+	} else {
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.Alias),
+				emptyDash(item.DisplayName),
+				emptyDash(item.Description),
+			})
+		}
+	}
+	noWrapCells := make([][2]int, 0, len(rows))
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 0)...)
+	printBoxTableWithOptions(
+		[]string{"ALIAS", "DISPLAY NAME", "DESCRIPTION"},
+		rows,
+		[]int{16, 32, 64},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   []int{8, 12, 18},
+		},
+	)
+}
+
 func PrintRBACGetResult(result *service.RBACGetResult) {
 	if result == nil {
 		return
