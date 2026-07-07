@@ -263,6 +263,33 @@ type IAMBatchCreatePolicyItem struct {
 	ID                 string               `json:"id"`
 }
 
+type IAMMemberRelationPoliciesRequest struct {
+	MemberType  string `json:"member_type,omitempty"`
+	MemberValue string `json:"member_value,omitempty"`
+	MemberID    string `json:"member_id,omitempty"`
+	PageSize    int    `json:"page_size,omitempty"`
+	PageToken   string `json:"page_token,omitempty"`
+}
+
+type IAMMemberRelationPoliciesResponse struct {
+	Policies      []IAMBindingPolicy        `json:"policies"`
+	PolicyItems   []IAMMemberRelationPolicy `json:"policy_item"`
+	Items         []IAMMemberRelationPolicy `json:"items"`
+	NextPageToken string                    `json:"next_page_token"`
+}
+
+type IAMMemberRelationPolicy struct {
+	ID             string        `json:"id"`
+	PolicyID       string        `json:"policy_id"`
+	Scope          string        `json:"scope"`
+	MemberType     string        `json:"member_type"`
+	MemberValue    string        `json:"member_value"`
+	MemberName     string        `json:"member_name"`
+	MemberIdentify string        `json:"member_identify"`
+	RoleID         string        `json:"role_id"`
+	RoleInfos      []IAMRoleInfo `json:"role_infos"`
+}
+
 type AIComputeNode struct {
 	ID          string `json:"id"`
 	UID         string `json:"uid"`
@@ -1481,6 +1508,61 @@ func (c *VirtualClusterClient) BatchCreateIAMPolicies(ctx context.Context, paylo
 	return &out, nil
 }
 
+func (c *VirtualClusterClient) MemberRelationIAMPolicies(ctx context.Context, payload IAMMemberRelationPoliciesRequest, bearerToken string) (*IAMMemberRelationPoliciesResponse, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+
+	u, _ := url.Parse(profile.IAMBaseURL)
+	u.Path = "/iam/authz/v1/policies:memberRelationPolicies"
+
+	var out IAMMemberRelationPoliciesResponse
+	var err error
+	if strings.TrimSpace(bearerToken) != "" {
+		err = c.postJSONWithBearerProfile(ctx, profile, u.String(), payload, strings.TrimSpace(bearerToken), &out)
+	} else {
+		err = c.postJSONWithProfile(ctx, profile, u.String(), payload, &out)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *VirtualClusterClient) DeleteIAMPolicy(ctx context.Context, policyID string, memberID string, memberType string, bearerToken string) error {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return fmt.Errorf("no current platform profile available")
+	}
+	policyID = strings.TrimSpace(policyID)
+	memberID = strings.TrimSpace(memberID)
+	memberType = strings.ToUpper(strings.TrimSpace(memberType))
+	if policyID == "" {
+		return fmt.Errorf("policy id is required")
+	}
+	if memberID == "" {
+		return fmt.Errorf("member id is required")
+	}
+	if memberType == "" {
+		return fmt.Errorf("member type is required")
+	}
+
+	u, _ := url.Parse(profile.IAMBaseURL)
+	u.Path = "/iam/authz/v1/policies/" + url.PathEscape(policyID)
+	query := u.Query()
+	query.Set("policy_id", policyID)
+	query.Set("member_id", memberID)
+	query.Set("member_type", memberType)
+	u.RawQuery = query.Encode()
+
+	if strings.TrimSpace(bearerToken) != "" {
+		return c.deleteWithBearerProfile(ctx, profile, u.String(), strings.TrimSpace(bearerToken))
+	}
+	_, err := c.doRequestWithProfile(ctx, profile, http.MethodDelete, u.String(), "", nil)
+	return err
+}
+
 func (c *VirtualClusterClient) listStorageVolumeResourcesWithProfile(ctx context.Context, profile clientProfile, zone string) ([]StorageVolumeResource, error) {
 	pageToken := "1"
 	resources := make([]StorageVolumeResource, 0)
@@ -2555,6 +2637,11 @@ func (c *VirtualClusterClient) postJSONWithBearerProfile(ctx context.Context, pr
 		return fmt.Errorf("decode response from %s: %w", reqURL, err)
 	}
 	return nil
+}
+
+func (c *VirtualClusterClient) deleteWithBearerProfile(ctx context.Context, profile clientProfile, reqURL string, bearerToken string) error {
+	_, err := c.doSignedRequest(ctx, profile, http.MethodDelete, reqURL, "", nil, false, bearerToken)
+	return err
 }
 
 func (c *VirtualClusterClient) getTextWithProfile(ctx context.Context, profile clientProfile, reqURL string) (string, error) {

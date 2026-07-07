@@ -375,6 +375,95 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 	return result, nil
 }
 
+func (s *AuthService) RemoveAFS(ctx context.Context, req AuthGrantAFSRequest) (*AuthGrantAFSResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for auth remove")
+	}
+	resourceType := normalizeGrantResourceType(req.ResourceType)
+	if resourceType == "" {
+		resourceType = "afs"
+	}
+	resourceName := strings.TrimSpace(req.ResourceName)
+	scope := strings.TrimSpace(req.Scope)
+	if resourceName == "" && scope == "" {
+		return nil, fmt.Errorf("%s name or scope is required", resourceType)
+	}
+
+	memberType := strings.ToUpper(strings.TrimSpace(req.MemberType))
+	if memberType != "USER" && memberType != "GROUP" {
+		return nil, fmt.Errorf("member type must be USER or GROUP")
+	}
+	memberName, memberIdentify, memberValue, err := s.resolveGrantMember(ctx, memberType, req.MemberIdentifier)
+	if err != nil {
+		return nil, err
+	}
+
+	if scope == "" {
+		resource, err := s.findGrantResource(ctx, resourceType, resourceName)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
+		}
+		scope = ensureRMScope(resource.RID)
+		if resourceName == "" {
+			resourceName = strings.TrimSpace(resource.Name)
+		}
+	}
+	if resourceName == "" {
+		resourceName = extractResourceNameFromScope(scope)
+	}
+	if scope == "" {
+		return nil, fmt.Errorf("%s scope is empty", resourceType)
+	}
+
+	roleName, roleID, err := s.resolveGrantRole(ctx, resourceType, req.Role)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &AuthGrantAFSResult{
+		ResourceType:   strings.ToUpper(resourceType),
+		ResourceName:   resourceName,
+		AFSName:        resourceName,
+		Scope:          scope,
+		MemberType:     memberType,
+		MemberName:     memberName,
+		MemberIdentify: memberIdentify,
+		MemberValue:    memberValue,
+		RoleName:       roleName,
+		RoleID:         roleID,
+	}
+
+	relationPayload := platform.IAMMemberRelationPoliciesRequest{
+		MemberType:  memberType,
+		MemberValue: memberValue,
+		MemberID:    memberValue,
+		PageSize:    200,
+		PageToken:   "1",
+	}
+	payloadBytes, _ := json.MarshalIndent(relationPayload, "", "  ")
+	result.Payload = string(payloadBytes)
+
+	resp, err := s.vcClient.MemberRelationIAMPolicies(ctx, relationPayload, req.BearerToken)
+	if err != nil {
+		return nil, fmt.Errorf("list member relation policies: %w", err)
+	}
+	policyID := findRemovePolicyID(resp, scope, memberType, memberValue, roleName, roleID)
+	if policyID == "" {
+		result.Result = "not found"
+		return result, nil
+	}
+	result.PolicyID = policyID
+	if req.DryRun {
+		result.Result = "dry-run"
+		return result, nil
+	}
+	if err := s.vcClient.DeleteIAMPolicy(ctx, policyID, memberValue, memberType, req.BearerToken); err != nil {
+		return nil, fmt.Errorf("delete policy: %w", err)
+	}
+	result.Result = "removed"
+	return result, nil
+}
+
 func extractAFSNameFromScope(scope string) string {
 	return extractResourceNameFromScope(scope)
 }
@@ -596,6 +685,53 @@ func existingGrantPolicyID(policies []platform.IAMBindingPolicy, scope string, m
 		}
 	}
 	return ""
+}
+
+func findRemovePolicyID(resp *platform.IAMMemberRelationPoliciesResponse, scope string, memberType string, memberValue string, roleName string, roleID string) string {
+	if resp == nil {
+		return ""
+	}
+	for _, policy := range resp.Policies {
+		if !policyMatchesRemoveTarget(policy.ID, policy.Scope, policy.MemberType, policy.MemberValue, policy.RoleInfos, "", scope, memberType, memberValue, roleName, roleID) {
+			continue
+		}
+		return strings.TrimSpace(policy.ID)
+	}
+	for _, item := range append(resp.PolicyItems, resp.Items...) {
+		policyID := firstNonEmpty(item.PolicyID, item.ID)
+		if !policyMatchesRemoveTarget(policyID, item.Scope, item.MemberType, item.MemberValue, item.RoleInfos, item.RoleID, scope, memberType, memberValue, roleName, roleID) {
+			continue
+		}
+		return strings.TrimSpace(policyID)
+	}
+	return ""
+}
+
+func policyMatchesRemoveTarget(policyID string, policyScope string, policyMemberType string, policyMemberValue string, roles []platform.IAMRoleInfo, policyRoleID string, scope string, memberType string, memberValue string, roleName string, roleID string) bool {
+	if strings.TrimSpace(policyID) == "" {
+		return false
+	}
+	if normalizeAuthScope(policyScope) != normalizeAuthScope(scope) && ensureRMScope(policyScope) != ensureRMScope(scope) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(policyMemberType), strings.TrimSpace(memberType)) {
+		return false
+	}
+	if strings.TrimSpace(policyMemberValue) != strings.TrimSpace(memberValue) {
+		return false
+	}
+	if strings.TrimSpace(policyRoleID) != "" && strings.TrimSpace(policyRoleID) == strings.TrimSpace(roleID) {
+		return true
+	}
+	for _, role := range roles {
+		if strings.TrimSpace(role.ID) == strings.TrimSpace(roleID) {
+			return true
+		}
+		if strings.TrimSpace(role.RoleName) == strings.TrimSpace(roleName) {
+			return true
+		}
+	}
+	return false
 }
 
 func collectUserPermissions(user platform.IAMUser, groupByID map[string]AuthGroupItem, policies []platform.IAMBindingPolicy) []AuthPermissionItem {

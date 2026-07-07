@@ -28,6 +28,7 @@ func newAuthCmd() *cobra.Command {
 
 	authCmd.AddCommand(newAuthCheckCmd())
 	authCmd.AddCommand(newAuthGrantCmd())
+	authCmd.AddCommand(newAuthRemoveCmd())
 	authCmd.AddCommand(newAuthLoginCmd())
 	authCmd.AddCommand(newAuthLogoutCmd())
 	authCmd.AddCommand(newAuthTokenCmd())
@@ -65,6 +66,16 @@ func newAuthGrantCmd() *cobra.Command {
 	grantCmd.AddCommand(newAuthGrantResourceCmd("subnet", "subnet <subnet-name>", "给 Subnet 授权用户或用户组", "Subnet 角色: reader/editor 或完整 role_name"))
 	grantCmd.AddCommand(newAuthGrantResourceCmd("ais", "ais <ais-name>", "给开发机 AI Space 授权用户或用户组", "AIS 角色: owner 或完整 role_name"))
 	return grantCmd
+}
+
+func newAuthRemoveCmd() *cobra.Command {
+	removeCmd := newAuthRemoveResourceCmd("afs", "remove [afs-name]", "移除资源授权", "AFS 角色: editor/reader/owner 或完整 role_name")
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("afs", "afs <afs-name>", "移除 AFS 授权", "AFS 角色: editor/reader/owner 或完整 role_name"))
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("vc", "vc <vc-name>", "移除 VC 授权", "VC 角色: user/admin 或完整 role_name"))
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("ccr", "ccr <namespace-name>", "移除 CCR namespace 授权", "CCR 角色: user/imageUser/owner 或完整 role_name"))
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("subnet", "subnet <subnet-name>", "移除 Subnet 授权", "Subnet 角色: reader/editor 或完整 role_name"))
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("ais", "ais <ais-name>", "移除开发机 AI Space 授权", "AIS 角色: owner 或完整 role_name"))
+	return removeCmd
 }
 
 func newAuthCheckAFSCmd() *cobra.Command {
@@ -222,6 +233,127 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 	cmd.Flags().BoolVar(&debugAuth, "debug-auth", false, "打印脱敏授权调试信息，例如 token 来源")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只展示将要提交的授权 payload，不真正写入")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "跳过确认直接写入")
+	return cmd
+}
+
+func newAuthRemoveResourceCmd(resourceType string, use string, short string, roleHelp string) *cobra.Command {
+	var user string
+	var group string
+	var name string
+	var role string
+	var scope string
+	var dryRun bool
+	var yes bool
+	var bearerToken string
+	var debugAuth bool
+
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  cobra.RangeArgs(0, 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resourceName := strings.TrimSpace(name)
+			if len(args) > 0 {
+				if resourceName != "" {
+					return fmt.Errorf("资源名参数和 --name 只能二选一")
+				}
+				resourceName = strings.TrimSpace(args[0])
+			}
+			if resourceName == "" && strings.TrimSpace(scope) == "" {
+				return fmt.Errorf("请指定资源名或 --scope")
+			}
+
+			memberType := ""
+			memberIdentifier := ""
+			if strings.TrimSpace(user) != "" {
+				memberType = "USER"
+				memberIdentifier = user
+			}
+			if strings.TrimSpace(group) != "" {
+				if memberType != "" {
+					return fmt.Errorf("--user 和 --group 只能二选一")
+				}
+				memberType = "GROUP"
+				memberIdentifier = group
+			}
+			if memberType == "" {
+				return fmt.Errorf("请使用 --user 或 --group 指定授权对象")
+			}
+
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+
+			token, source, err := bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+			if err != nil {
+				return err
+			}
+			if debugAuth {
+				fmt.Fprintf(cmd.ErrOrStderr(), "auth remove debug: bearer source=%s %s\n", source, bearerDebugSummary(token))
+			}
+
+			req := service.AuthGrantAFSRequest{
+				ResourceType:     resourceType,
+				ResourceName:     resourceName,
+				Scope:            scope,
+				MemberType:       memberType,
+				MemberIdentifier: memberIdentifier,
+				Role:             role,
+				DryRun:           true,
+				BearerToken:      token,
+			}
+
+			authService := service.NewAuthService(vcClient)
+			result, err := authService.RemoveAFS(context.Background(), req)
+			if err != nil {
+				return err
+			}
+			if result.Result == "not found" || dryRun {
+				output.PrintAuthGrantAFSResult(result)
+				return nil
+			}
+
+			if !yes {
+				fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"将移除 %s %s 对 %s %s 的角色 %s 授权，policy %s，是否继续? (y/N): ",
+					result.ResourceType,
+					firstNonEmptyAuthValue(result.ResourceName, result.AFSName),
+					result.MemberType,
+					firstNonEmptyAuthValue(result.MemberIdentify, result.MemberName, result.MemberValue),
+					result.RoleName,
+					result.PolicyID,
+				)
+				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if err != nil {
+					return err
+				}
+				if !isYes(line) {
+					fmt.Fprintln(cmd.OutOrStdout(), "已取消移除授权。")
+					return nil
+				}
+			}
+
+			req.DryRun = false
+			result, err = authService.RemoveAFS(context.Background(), req)
+			if err != nil {
+				return err
+			}
+			output.PrintAuthGrantAFSResult(result)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "资源名称；也可以直接作为位置参数传入")
+	cmd.Flags().StringVarP(&user, "user", "u", "", "移除用户 username 或 user id 的授权")
+	cmd.Flags().StringVarP(&group, "group", "g", "", "移除用户组 name 或 group id 的授权")
+	cmd.Flags().StringVarP(&role, "role", "r", "", roleHelp)
+	cmd.Flags().StringVarP(&scope, "scope", "s", "", "手动指定资源 scope，默认根据资源名自动解析")
+	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "控制台 Bearer token；也可用 RAYCTL_BEARER_TOKEN")
+	cmd.Flags().BoolVar(&debugAuth, "debug-auth", false, "打印脱敏授权调试信息，例如 token 来源")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只展示将要移除的授权，不真正写入")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "跳过确认直接移除")
 	return cmd
 }
 
