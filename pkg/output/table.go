@@ -1031,6 +1031,68 @@ func PrintPolicyUpdateResult(result *service.PolicyUpdateResult) {
 	)
 }
 
+func PrintECPWorkloadLogs(result *service.ECPWorkloadLogResult) {
+	if result == nil {
+		return
+	}
+
+	summaryRows := [][]string{
+		{"VC", emptyDash(result.VCluster)},
+		{"PROFILE", emptyDash(result.ProfileName)},
+		{"TYPE", emptyDash(result.WorkloadType)},
+		{"NAME", emptyDash(result.WorkloadName)},
+		{"SINCE", formatOptionalDuration(result.Since)},
+		{"COUNT", strconv.Itoa(len(result.Items))},
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		summaryRows,
+		[]int{12, 72},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1},
+				[2]int{1, 1},
+				[2]int{2, 1},
+				[2]int{3, 1},
+				[2]int{4, 1},
+				[2]int{5, 1},
+			),
+			minWidths: []int{8, 24},
+		},
+	)
+
+	rows := make([][]string, 0, maxInt(len(result.Items), 1))
+	noWrapCells := make([][2]int, 0, len(result.Items)*5)
+	if len(result.Items) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "no logs"})
+	} else {
+		for rowIdx, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.Time),
+				emptyDash(item.Level),
+				emptyDash(item.WorkloadName),
+				emptyDash(item.Pod),
+				emptyDash(item.Container),
+				emptyDash(item.Message),
+			})
+			for _, colIdx := range []int{0, 1, 2, 3, 4} {
+				noWrapCells = append(noWrapCells, [2]int{rowIdx, colIdx})
+			}
+		}
+	}
+
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions(
+		[]string{"TIME", "LEVEL", "WORKLOAD", "POD", "CONTAINER", "MESSAGE"},
+		rows,
+		[]int{19, 5, 36, 48, 24, 120},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   []int{19, 5, 18, 18, 12, 24},
+		},
+	)
+}
+
 func PrintPolicyGetResult(result *service.PolicyGetResult) {
 	if result == nil {
 		return

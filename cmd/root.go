@@ -18,6 +18,7 @@ func init() {
 	rootCmd.AddCommand(newAuthCmd())
 	rootCmd.AddCommand(newClusterCmd())
 	rootCmd.AddCommand(newECSCmd())
+	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newNodeCmd())
 	rootCmd.AddCommand(newPolicyCmd())
 	rootCmd.AddCommand(newPVCmd())

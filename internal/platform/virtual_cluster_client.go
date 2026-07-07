@@ -370,14 +370,52 @@ type queryTokenResponse struct {
 }
 
 type cmsLogQueryResponse struct {
-	Logs []cmsLogItem `json:"logs"`
+	Logs  []cmsLogItem `json:"logs"`
+	Items []cmsLogItem `json:"items"`
+	Data  []cmsLogItem `json:"data"`
 }
 
 type cmsLogItem struct {
-	ObservedTS string         `json:"observed_ts"`
-	Level      string         `json:"level"`
-	Msg        string         `json:"msg"`
-	Resource   map[string]any `json:"resource"`
+	Timestamp    string         `json:"ts"`
+	ObservedTS   string         `json:"observed_ts"`
+	Level        string         `json:"level"`
+	Msg          string         `json:"msg"`
+	WorkloadType string         `json:"workload_type"`
+	WorkloadName string         `json:"workload_name"`
+	Namespace    string         `json:"namespace"`
+	Pod          string         `json:"pod"`
+	Container    string         `json:"container"`
+	Node         string         `json:"node"`
+	Resource     map[string]any `json:"resource"`
+}
+
+type ECPWorkloadLogQuery struct {
+	Start        time.Time
+	End          time.Time
+	WorkloadType string
+	WorkloadName string
+	Pods         []string
+	Level        string
+	Keyword      string
+	Namespace    string
+	Container    string
+	Limit        int
+}
+
+type ECPWorkloadLogResult struct {
+	VCluster    string
+	ProfileName string
+	Items       []ECPWorkloadLogItem
+}
+
+type ECPWorkloadLogItem struct {
+	Timestamp    string
+	ObservedTS   string
+	Level        string
+	WorkloadName string
+	Pod          string
+	Container    string
+	Message      string
 }
 
 type config struct {
@@ -2344,6 +2382,72 @@ func (c *VirtualClusterClient) queryPodLogsWithCMSProfile(ctx context.Context, p
 	return lines, nil
 }
 
+func (c *VirtualClusterClient) QueryECPWorkloadLogs(ctx context.Context, vclusterName string, query ECPWorkloadLogQuery) (*ECPWorkloadLogResult, error) {
+	var lastErr error
+	for _, profile := range c.orderedCMSProfiles() {
+		clusterRef, err := c.cmsClusterRefForProfile(ctx, profile, vclusterName)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		result, err := c.queryECPWorkloadLogsWithCMSProfile(ctx, profile, clusterRef, query)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		result.VCluster = strings.TrimSpace(vclusterName)
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no cms profile available for ecp workload logs")
+}
+
+func (c *VirtualClusterClient) queryECPWorkloadLogsWithCMSProfile(ctx context.Context, profile clientProfile, vclusterName string, query ECPWorkloadLogQuery) (*ECPWorkloadLogResult, error) {
+	queryToken, err := c.cmsQueryTokenForProfile(ctx, profile, vclusterName)
+	if err != nil {
+		return nil, err
+	}
+
+	reqURL := c.cmsWorkloadLogQueryURL(profile, query)
+	var payload cmsLogQueryResponse
+	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil, queryToken)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode cms workload log response: %w", err)
+	}
+
+	rawItems := payload.Logs
+	if len(rawItems) == 0 {
+		rawItems = payload.Items
+	}
+	if len(rawItems) == 0 {
+		rawItems = payload.Data
+	}
+
+	items := make([]ECPWorkloadLogItem, 0, len(rawItems))
+	for _, item := range rawItems {
+		items = append(items, ECPWorkloadLogItem{
+			Timestamp:    strings.TrimSpace(item.Timestamp),
+			ObservedTS:   strings.TrimSpace(item.ObservedTS),
+			Level:        strings.TrimSpace(item.Level),
+			WorkloadName: firstNonEmpty(strings.TrimSpace(item.WorkloadName), stringFromAny(item.Resource["workload_name"])),
+			Pod:          firstNonEmpty(strings.TrimSpace(item.Pod), stringFromAny(item.Resource["k8s.pod.name"]), stringFromAny(item.Resource["pod"])),
+			Container:    firstNonEmpty(strings.TrimSpace(item.Container), stringFromAny(item.Resource["k8s.container.name"]), stringFromAny(item.Resource["container"])),
+			Message:      strings.TrimSpace(item.Msg),
+		})
+	}
+
+	return &ECPWorkloadLogResult{
+		VCluster:    vclusterName,
+		ProfileName: profile.Name,
+		Items:       items,
+	}, nil
+}
+
 func (c *VirtualClusterClient) cmsQueryTokenForProfile(ctx context.Context, profile clientProfile, vclusterName string) (string, error) {
 	telemetryRID, err := c.getPrivateTelemetryStationRID(ctx, profile)
 	if err != nil {
@@ -2502,12 +2606,91 @@ func (c *VirtualClusterClient) cmsLogQueryURL(profile clientProfile, namespace s
 	return u.String()
 }
 
+func (c *VirtualClusterClient) cmsWorkloadLogQueryURL(profile clientProfile, query ECPWorkloadLogQuery) string {
+	u, _ := url.Parse(profile.MonitorBaseURL)
+	u.Path = "/query/v1/logs"
+
+	values := u.Query()
+	values.Set("model_name", "logs.compute.ecp.v1.virtualCluster.logs")
+	for _, dimension := range []string{"resource_type", "resource_id", "id", "ts", "observed_ts", "workload_type", "workload_name", "namespace", "pod", "container", "node", "level", "msg"} {
+		values.Add("dimensions", dimension)
+	}
+	values.Set("filter", buildECPWorkloadLogFilter(query))
+	values.Set("time_dimension.dimension", "observed_ts")
+	values.Set("start", formatMonitorTime(query.Start))
+	values.Set("end", formatMonitorTime(query.End))
+	if query.Limit <= 0 {
+		query.Limit = 40
+	}
+	values.Set("page_size", fmt.Sprintf("%d", query.Limit))
+	values.Set("skip", "0")
+	values.Set("order_by", "ts desc,observed_ts desc")
+	u.RawQuery = values.Encode()
+	return u.String()
+}
+
+func buildECPWorkloadLogFilter(query ECPWorkloadLogQuery) string {
+	parts := []string{`resource_type="compute.ecp.v1.virtualCluster"`}
+	if value := strings.TrimSpace(query.Keyword); value != "" {
+		parts = append(parts, fmt.Sprintf(`matchPhrase(msg,"%s")`, escapeMonitorFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.WorkloadType); value != "" {
+		parts = append(parts, fmt.Sprintf(`workload_type="%s"`, escapeMonitorFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.WorkloadName); value != "" {
+		parts = append(parts, fmt.Sprintf(`workload_name="%s"`, escapeMonitorFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.Namespace); value != "" {
+		parts = append(parts, fmt.Sprintf(`namespace="%s"`, escapeMonitorFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.Container); value != "" {
+		parts = append(parts, fmt.Sprintf(`container="%s"`, escapeMonitorFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.Level); value != "" {
+		parts = append(parts, fmt.Sprintf(`level="%s"`, escapeMonitorFilterValue(value)))
+	}
+
+	podParts := make([]string, 0, len(query.Pods))
+	for _, pod := range query.Pods {
+		if value := strings.TrimSpace(pod); value != "" {
+			podParts = append(podParts, fmt.Sprintf(`pod="%s"`, escapeMonitorFilterValue(value)))
+		}
+	}
+	if len(podParts) == 1 {
+		parts = append(parts, podParts[0])
+	} else if len(podParts) > 1 {
+		parts = append(parts, "("+strings.Join(podParts, " OR ")+")")
+	}
+
+	return strings.Join(parts, " AND ")
+}
+
+func escapeMonitorFilterValue(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	return value
+}
+
+func formatMonitorTime(value time.Time) string {
+	if value.IsZero() {
+		value = time.Now()
+	}
+	return value.UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
 func virtualClusterUID(value string) string {
 	value = strings.TrimSpace(value)
 	if strings.HasPrefix(value, "vc-") {
 		return strings.TrimSpace(strings.TrimPrefix(value, "vc-"))
 	}
 	return value
+}
+
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", value))
 }
 
 func emptyDash(value string) string {
