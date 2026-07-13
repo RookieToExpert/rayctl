@@ -46,6 +46,36 @@ type ECPWorkloadLogItem struct {
 	Message      string
 }
 
+type CloudAuditLogOptions struct {
+	Since        string
+	Start        string
+	End          string
+	ServiceType  string
+	ResourceType string
+	Limit        int
+	BearerToken  string
+}
+
+type CloudAuditLogResult struct {
+	ProfileName  string
+	ServiceType  string
+	ResourceType string
+	Start        time.Time
+	End          time.Time
+	TotalSize    int
+	Items        []CloudAuditLogItem
+}
+
+type CloudAuditLogItem struct {
+	Time          string
+	ServiceType   string
+	ResourceType  string
+	ResourceName  string
+	OperationType string
+	UserName      string
+	UserID        string
+}
+
 func NewLogsService(vcClient *platform.VirtualClusterClient) *LogsService {
 	return &LogsService{vcClient: vcClient}
 }
@@ -110,6 +140,176 @@ func (s *LogsService) GetECPWorkloadLogs(ctx context.Context, opts ECPWorkloadLo
 		End:          end,
 		Items:        items,
 	}, nil
+}
+
+func (s *LogsService) GetCloudAuditLogs(ctx context.Context, opts CloudAuditLogOptions) (*CloudAuditLogResult, error) {
+	if s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required")
+	}
+	if opts.Limit <= 0 {
+		opts.Limit = 40
+	}
+
+	start, end, err := cloudAuditTimeRange(opts.Since, opts.Start, opts.End)
+	if err != nil {
+		return nil, err
+	}
+	serviceType := strings.ToUpper(strings.TrimSpace(opts.ServiceType))
+	resourceType := normalizeCloudAuditResourceType(serviceType, opts.ResourceType)
+	query := platform.CloudAuditQuery{
+		Start:        start,
+		End:          end,
+		ServiceType:  serviceType,
+		ResourceType: resourceType,
+		Limit:        opts.Limit,
+	}
+
+	platformResult, err := s.vcClient.QueryCloudAuditEvents(ctx, query, opts.BearerToken)
+	if err != nil {
+		return nil, err
+	}
+
+	userIDs := make([]string, 0)
+	for _, item := range platformResult.Items {
+		_, userID := cloudAuditUserIdentity(item.UserName, item.UserID, nil)
+		if isUUIDValue(userID) {
+			userIDs = append(userIDs, userID)
+		}
+	}
+	resolvedUsernames, resolveErr := s.vcClient.ResolveUsernames(ctx, userIDs)
+	if resolveErr != nil {
+		// Username enrichment is best-effort; audit events remain useful with raw user IDs.
+		resolvedUsernames = nil
+	}
+
+	items := make([]CloudAuditLogItem, 0, len(platformResult.Items))
+	for _, item := range platformResult.Items {
+		userName, userID := cloudAuditUserIdentity(item.UserName, item.UserID, resolvedUsernames)
+		items = append(items, CloudAuditLogItem{
+			Time:          formatLogTimestamp(item.Time),
+			ServiceType:   emptyDashService(item.ServiceType),
+			ResourceType:  emptyDashService(item.ResourceType),
+			ResourceName:  emptyDashService(item.ResourceName),
+			OperationType: emptyDashService(item.OperationType),
+			UserName:      emptyDashService(userName),
+			UserID:        emptyDashService(userID),
+		})
+	}
+
+	return &CloudAuditLogResult{
+		ProfileName:  platformResult.ProfileName,
+		ServiceType:  serviceType,
+		ResourceType: resourceType,
+		Start:        start,
+		End:          end,
+		TotalSize:    platformResult.TotalSize,
+		Items:        items,
+	}, nil
+}
+
+func cloudAuditUserIdentity(userName string, userID string, resolved map[string]string) (string, string) {
+	userName = strings.TrimSpace(userName)
+	userID = strings.TrimSpace(userID)
+	if isUUIDValue(userName) {
+		if userID == "" {
+			userID = userName
+		}
+		userName = ""
+	}
+	if userName == "" && isUUIDValue(userID) {
+		userName = strings.TrimSpace(resolved[userID])
+	}
+	if userName == "" {
+		userName = userID
+	}
+	return userName, userID
+}
+
+func isUUIDValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func cloudAuditTimeRange(sinceValue string, startValue string, endValue string) (time.Time, time.Time, error) {
+	now := time.Now()
+	startValue = strings.TrimSpace(startValue)
+	endValue = strings.TrimSpace(endValue)
+	if startValue == "" && endValue == "" {
+		since, err := time.ParseDuration(strings.TrimSpace(sinceValue))
+		if err != nil || since <= 0 {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid --since %q, examples: 30m, 2h, 24h", sinceValue)
+		}
+		return now.Add(-since), now, nil
+	}
+
+	end := now
+	var err error
+	if endValue != "" {
+		end, err = parseCloudAuditTime(endValue)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid --end %q: %w", endValue, err)
+		}
+	}
+	if startValue == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf("--start is required when --end is set")
+	}
+	start, err := parseCloudAuditTime(startValue)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid --start %q: %w", startValue, err)
+	}
+	if !start.Before(end) {
+		return time.Time{}, time.Time{}, fmt.Errorf("--start must be earlier than --end")
+	}
+	return start, end, nil
+}
+
+func parseCloudAuditTime(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		var parsed time.Time
+		var err error
+		if layout == time.RFC3339Nano {
+			parsed, err = time.Parse(layout, value)
+		} else {
+			parsed, err = time.ParseInLocation(layout, value, time.FixedZone("UTC+8", 8*60*60))
+		}
+		if err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("expected RFC3339 or 2006-01-02 15:04:05 (UTC+8)")
+}
+
+func normalizeCloudAuditResourceType(serviceType string, value string) string {
+	trimmed := strings.TrimSpace(value)
+	if strings.ToUpper(strings.TrimSpace(serviceType)) != "ECP" {
+		return trimmed
+	}
+	switch strings.ToLower(trimmed) {
+	case "vc", "vcluster", "virtualcluster":
+		return "compute.ecp.v1.virtualCluster"
+	case "node", "aicomputenode", "compute-node":
+		return "compute.ecp.v1.aiComputeNode"
+	case "job", "vcjob":
+		return "vcjob"
+	default:
+		return trimmed
+	}
 }
 
 func normalizeECPWorkloadType(value string) string {

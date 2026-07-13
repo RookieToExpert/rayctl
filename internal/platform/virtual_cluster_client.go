@@ -418,6 +418,38 @@ type ECPWorkloadLogItem struct {
 	Message      string
 }
 
+type CloudAuditQuery struct {
+	Start        time.Time
+	End          time.Time
+	ServiceType  string
+	ResourceType string
+	Limit        int
+}
+
+type CloudAuditResult struct {
+	ProfileName string
+	TotalSize   int
+	Items       []CloudAuditEvent
+}
+
+type CloudAuditEvent struct {
+	Time          string
+	ServiceType   string
+	ResourceType  string
+	ResourceName  string
+	OperationType string
+	UserName      string
+	UserID        string
+	Code          string
+	Detail        string
+}
+
+type cloudAuditResponse struct {
+	AuditEvents   []map[string]any `json:"audit_events"`
+	NextPageToken string           `json:"next_page_token"`
+	TotalSize     int              `json:"total_size"`
+}
+
 type config struct {
 	AccessKey         string `json:"access_key"`
 	SecretKey         string `json:"secret_key"`
@@ -2404,6 +2436,43 @@ func (c *VirtualClusterClient) QueryECPWorkloadLogs(ctx context.Context, vcluste
 	return nil, fmt.Errorf("no cms profile available for ecp workload logs")
 }
 
+func (c *VirtualClusterClient) QueryCloudAuditEvents(ctx context.Context, query CloudAuditQuery, bearerToken string) (*CloudAuditResult, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("current platform profile is unavailable")
+	}
+	if strings.TrimSpace(bearerToken) == "" {
+		return nil, fmt.Errorf("console bearer token is required; run rayctl auth login first")
+	}
+
+	reqURL := cloudAuditQueryURL(profile, query)
+	var payload cloudAuditResponse
+	if err := c.getJSONWithBearerProfile(ctx, profile, reqURL, bearerToken, &payload); err != nil {
+		return nil, err
+	}
+
+	items := make([]CloudAuditEvent, 0, len(payload.AuditEvents))
+	for _, item := range payload.AuditEvents {
+		items = append(items, CloudAuditEvent{
+			Time:          stringFromNested(item, "time", "event_time", "create_time"),
+			ServiceType:   stringFromNested(item, "service_type"),
+			ResourceType:  stringFromNested(item, "resource_type"),
+			ResourceName:  stringFromNested(item, "resource_name", "resource.name", "object_name"),
+			OperationType: stringFromNested(item, "operation_type"),
+			UserName:      stringFromNested(item, "user_name", "username"),
+			UserID:        stringFromNested(item, "user_id"),
+			Code:          stringFromNested(item, "code"),
+			Detail:        cloudAuditDetail(item["detail"]),
+		})
+	}
+
+	return &CloudAuditResult{
+		ProfileName: profile.Name,
+		TotalSize:   payload.TotalSize,
+		Items:       items,
+	}, nil
+}
+
 func (c *VirtualClusterClient) queryECPWorkloadLogsWithCMSProfile(ctx context.Context, profile clientProfile, vclusterName string, query ECPWorkloadLogQuery) (*ECPWorkloadLogResult, error) {
 	queryToken, err := c.cmsQueryTokenForProfile(ctx, profile, vclusterName)
 	if err != nil {
@@ -2629,6 +2698,77 @@ func (c *VirtualClusterClient) cmsWorkloadLogQueryURL(profile clientProfile, que
 	return u.String()
 }
 
+func cloudAuditQueryURL(profile clientProfile, query CloudAuditQuery) string {
+	u, _ := url.Parse(trailBaseURLFromIAMBaseURL(profile.IAMBaseURL))
+	u.Path = "/cts/data/v1/auditevents"
+
+	values := u.Query()
+	values.Set("trail_type", "res")
+	values.Set("page_token", "1")
+	if query.Limit <= 0 {
+		query.Limit = 40
+	}
+	values.Set("page_size", strconv.Itoa(query.Limit))
+	values.Set("filter", buildCloudAuditFilter(query))
+	u.RawQuery = values.Encode()
+	return u.String()
+}
+
+func buildCloudAuditFilter(query CloudAuditQuery) string {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	parts := []string{
+		fmt.Sprintf("time>='%s'", query.Start.In(location).Format(time.RFC3339)),
+		fmt.Sprintf("time<='%s'", query.End.In(location).Format(time.RFC3339)),
+	}
+	if value := strings.TrimSpace(query.ServiceType); value != "" {
+		parts = append(parts, fmt.Sprintf("service_type='%s'", escapeTrailFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.ResourceType); value != "" {
+		parts = append(parts, fmt.Sprintf("resource_type='%s'", escapeTrailFilterValue(value)))
+	}
+	return strings.Join(parts, " AND ")
+}
+
+func escapeTrailFilterValue(value string) string {
+	return strings.ReplaceAll(strings.TrimSpace(value), "'", "''")
+}
+
+func trailBaseURLFromIAMBaseURL(iamBaseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(iamBaseURL))
+	if err != nil || strings.TrimSpace(parsed.Host) == "" {
+		return "https://trail.d.pjlab.org.cn"
+	}
+	switch {
+	case strings.HasPrefix(parsed.Host, "iam."):
+		parsed.Host = "trail." + strings.TrimPrefix(parsed.Host, "iam.")
+	case strings.HasPrefix(parsed.Host, "iam-"):
+		parsed.Host = "trail-" + strings.TrimPrefix(parsed.Host, "iam-")
+	default:
+		parsed.Host = "trail." + parsed.Host
+	}
+	parsed.Path = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	if parsed.Scheme == "" {
+		parsed.Scheme = "https"
+	}
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func cloudAuditDetail(value any) string {
+	if text := stringFromAny(value); text != "" {
+		return text
+	}
+	if value == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(encoded))
+}
+
 func buildECPWorkloadLogFilter(query ECPWorkloadLogQuery) string {
 	parts := []string{`resource_type="compute.ecp.v1.virtualCluster"`}
 	if value := strings.TrimSpace(query.Keyword); value != "" {
@@ -2690,7 +2830,78 @@ func stringFromAny(value any) string {
 	if value == nil {
 		return ""
 	}
+	switch value.(type) {
+	case map[string]any, []any:
+		return ""
+	}
 	return strings.TrimSpace(fmt.Sprintf("%v", value))
+}
+
+func stringFromNested(item map[string]any, keys ...string) string {
+	if len(item) == 0 {
+		return ""
+	}
+
+	roots := []map[string]any{item}
+	for _, key := range []string{"attributes", "resource", "fields", "labels", "dimensions", "data"} {
+		if nested, ok := item[key].(map[string]any); ok {
+			roots = append(roots, nested)
+		}
+	}
+
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		for _, root := range roots {
+			if value := stringAtPath(root, key); value != "" {
+				return value
+			}
+		}
+		for _, root := range roots {
+			if value := findNestedString(root, key); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func stringAtPath(root map[string]any, path string) string {
+	parts := strings.Split(path, ".")
+	var current any = root
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return ""
+		}
+		currentMap, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current, ok = currentMap[part]
+		if !ok {
+			return ""
+		}
+	}
+	return stringFromAny(current)
+}
+
+func findNestedString(root map[string]any, key string) string {
+	if value := stringFromAny(root[key]); value != "" {
+		return value
+	}
+	for _, value := range root {
+		nested, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if found := findNestedString(nested, key); found != "" {
+			return found
+		}
+	}
+	return ""
 }
 
 func emptyDash(value string) string {
