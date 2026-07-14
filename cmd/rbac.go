@@ -22,6 +22,7 @@ func newRBACCmd() *cobra.Command {
 
 	rbacCmd.AddCommand(newRBACGetCmd())
 	rbacCmd.AddCommand(newRBACGrantCmd())
+	rbacCmd.AddCommand(newRBACRemoveCmd())
 	return rbacCmd
 }
 
@@ -119,12 +120,97 @@ func newRBACGrantCmd() *cobra.Command {
 	return cmd
 }
 
+func newRBACRemoveCmd() *cobra.Command {
+	var namespace string
+	var bindingName string
+	var bearerToken string
+	var dryRun bool
+	var yes bool
+	var debugAuth bool
+
+	cmd := &cobra.Command{
+		Use:   "remove <vc-name-or-uid>",
+		Short: "通过平台 API 删除 VC 中指定的 Kubernetes RBAC Binding",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(namespace) == "" {
+				return fmt.Errorf("请使用 --namespace 指定 namespace，集群级授权请填写 all")
+			}
+			if strings.TrimSpace(bindingName) == "" {
+				return fmt.Errorf("请使用 --binding 精确指定要删除的 Binding 名")
+			}
+
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+			computeToken, source, err := bearerTokenForRBACComputeCommand(context.Background(), cmd, vcClient, bearerToken)
+			if err != nil {
+				return err
+			}
+			if debugAuth {
+				fmt.Fprintf(cmd.ErrOrStderr(), "rbac remove debug: source=%s compute=%s\n", source, bearerDebugSummary(computeToken))
+			}
+
+			rbacService := service.NewRBACService(vcClient)
+			result, err := rbacService.PrepareRemove(context.Background(), service.RBACRemoveRequest{
+				ClusterIdentifier:  args[0],
+				Namespace:          namespace,
+				BindingName:        bindingName,
+				ComputeBearerToken: computeToken,
+				DryRun:             dryRun,
+			})
+			if err != nil {
+				return err
+			}
+			output.PrintRBACRemoveResult(result)
+			if dryRun {
+				return nil
+			}
+
+			if !yes {
+				fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"将删除整个 %s %s，并移除其中 %d 个 Subject 的 %s 权限，是否继续? (y/N): ",
+					result.BindingKind,
+					result.BindingName,
+					result.SubjectCount,
+					result.Role,
+				)
+				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if err != nil {
+					return err
+				}
+				if !isYes(line) {
+					fmt.Fprintln(cmd.OutOrStdout(), "已取消移除。")
+					return nil
+				}
+			}
+
+			if err := rbacService.ApplyRemove(context.Background(), result, computeToken); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "移除完成: binding=%s result=%s\n", result.BindingName, result.Result)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "授权范围：all 表示整个 VC，否则填写具体 namespace")
+	cmd.Flags().StringVarP(&bindingName, "binding", "b", "", "要删除的 RoleBinding 或 ClusterRoleBinding 名")
+	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "compute 代理 Bearer token，默认读取登录 session 的 id_token")
+	cmd.Flags().BoolVar(&debugAuth, "debug-auth", false, "打印脱敏授权调试信息，例如 token 来源")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只展示删除影响，不真正删除 Binding")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "跳过确认直接删除 Binding")
+	return cmd
+}
+
 func newRBACGetCmd() *cobra.Command {
 	var selector string
+	var long bool
 
 	cmd := &cobra.Command{
 		Use:   "get <vc-name-or-uid>",
-		Short: "查看 VC 集群维度 ClusterRoleBinding",
+		Short: "查看 VC 中平台管理的 RoleBinding 和 ClusterRoleBinding",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
@@ -142,12 +228,13 @@ func newRBACGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			output.PrintRBACGetResult(result)
+			output.PrintRBACGetResult(result, long)
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVarP(&selector, "selector", "l", "", "ClusterRoleBinding labelSelector，默认 resource.compute.sensecore.cn/control")
+	cmd.Flags().StringVarP(&selector, "selector", "s", "", "RoleBinding/ClusterRoleBinding labelSelector，默认 resource.compute.sensecore.cn/control")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 Binding 名和精确到秒的创建时间")
 	return cmd
 }
 

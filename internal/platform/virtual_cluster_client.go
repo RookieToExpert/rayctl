@@ -2262,6 +2262,10 @@ func (c *VirtualClusterClient) SearchIAMUserGroupsForProfileToken(ctx context.Co
 }
 
 func (c *VirtualClusterClient) ReviewRBACCreateAccessForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, resource string, bearerToken string) (*authorizationv1.SelfSubjectAccessReview, error) {
+	return c.ReviewRBACAccessForProfileToken(ctx, profileName, vclusterName, namespace, "post", resource, bearerToken)
+}
+
+func (c *VirtualClusterClient) ReviewRBACAccessForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, verb string, resource string, bearerToken string) (*authorizationv1.SelfSubjectAccessReview, error) {
 	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
 		return nil, fmt.Errorf("platform profile %q not found", profileName)
@@ -2278,7 +2282,7 @@ func (c *VirtualClusterClient) ReviewRBACCreateAccessForProfileToken(ctx context
 		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
 				Namespace: strings.TrimSpace(namespace),
-				Verb:      "post",
+				Verb:      strings.TrimSpace(verb),
 				Group:     "rbac.authorization.k8s.io",
 				Resource:  strings.TrimSpace(resource),
 			},
@@ -2330,6 +2334,14 @@ func (c *VirtualClusterClient) listClusterRoleBindingsWithProfiles(ctx context.C
 }
 
 func (c *VirtualClusterClient) ListRoleBindingsForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, labelSelector string, bearerToken string) ([]rbacv1.RoleBinding, error) {
+	return c.listRoleBindingsForProfileToken(ctx, profileName, vclusterName, strings.TrimSpace(namespace), labelSelector, bearerToken)
+}
+
+func (c *VirtualClusterClient) ListAllRoleBindingsForProfileToken(ctx context.Context, profileName string, vclusterName string, labelSelector string, bearerToken string) ([]rbacv1.RoleBinding, error) {
+	return c.listRoleBindingsForProfileToken(ctx, profileName, vclusterName, "", labelSelector, bearerToken)
+}
+
+func (c *VirtualClusterClient) listRoleBindingsForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, labelSelector string, bearerToken string) ([]rbacv1.RoleBinding, error) {
 	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
 		return nil, fmt.Errorf("platform profile %q not found", profileName)
@@ -2338,7 +2350,10 @@ func (c *VirtualClusterClient) ListRoleBindingsForProfileToken(ctx context.Conte
 	if strings.TrimSpace(labelSelector) != "" {
 		query.Set("labelSelector", strings.TrimSpace(labelSelector))
 	}
-	path := fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings", url.PathEscape(strings.TrimSpace(namespace)))
+	path := "/apis/rbac.authorization.k8s.io/v1/rolebindings"
+	if namespace != "" {
+		path = fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings", url.PathEscape(namespace))
+	}
 	reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, path, query)
 	var list rbacv1.RoleBindingList
 	if err := c.getJSONWithBearerProfile(ctx, profile, reqURL, bearerToken, &list); err != nil {
@@ -2372,6 +2387,42 @@ func (c *VirtualClusterClient) CreateRoleBindingForProfileToken(ctx context.Cont
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *VirtualClusterClient) DeleteClusterRoleBindingForProfileToken(ctx context.Context, profileName string, vclusterName string, bindingName string, bearerToken string) error {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return fmt.Errorf("platform profile %q not found", profileName)
+	}
+	bindingName = strings.TrimSpace(bindingName)
+	if bindingName == "" {
+		return fmt.Errorf("clusterrolebinding name is required")
+	}
+	path := fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/%s", url.PathEscape(bindingName))
+	reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, path, nil)
+	return c.deleteWithBearerProfile(ctx, profile, reqURL, bearerToken)
+}
+
+func (c *VirtualClusterClient) DeleteRoleBindingForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, bindingName string, bearerToken string) error {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return fmt.Errorf("platform profile %q not found", profileName)
+	}
+	namespace = strings.TrimSpace(namespace)
+	bindingName = strings.TrimSpace(bindingName)
+	if namespace == "" {
+		return fmt.Errorf("rolebinding namespace is required")
+	}
+	if bindingName == "" {
+		return fmt.Errorf("rolebinding name is required")
+	}
+	path := fmt.Sprintf(
+		"/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings/%s",
+		url.PathEscape(namespace),
+		url.PathEscape(bindingName),
+	)
+	reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, path, nil)
+	return c.deleteWithBearerProfile(ctx, profile, reqURL, bearerToken)
 }
 
 func (c *VirtualClusterClient) ListStorageVolumeResources(ctx context.Context, zone string) ([]StorageVolumeResource, error) {

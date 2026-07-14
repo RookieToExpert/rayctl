@@ -16,6 +16,7 @@ import (
 type tableOptions struct {
 	noWrapCells map[string]struct{}
 	minWidths   []int
+	rowDividers bool
 }
 
 func cellKey(row int, col int) string {
@@ -829,7 +830,7 @@ func PrintAuthRolesResult(result *service.AuthRolesResult) {
 	)
 }
 
-func PrintRBACGetResult(result *service.RBACGetResult) {
+func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
 	if result == nil {
 		return
 	}
@@ -859,31 +860,73 @@ func PrintRBACGetResult(result *service.RBACGetResult) {
 	)
 
 	fmt.Fprintln(os.Stdout)
-	rows := make([][]string, 0, maxInt(1, len(result.Items)))
-	if len(result.Items) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-"})
-	} else {
+	if long {
+		rows := make([][]string, 0, maxInt(1, len(result.Items)))
 		for _, item := range result.Items {
 			rows = append(rows, []string{
+				emptyDash(item.Kind),
+				emptyDash(item.Namespace),
 				emptyDash(item.Name),
 				emptyDash(item.Role),
 				emptyDash(item.Subjects),
 				emptyDash(item.CreatedAt),
 			})
 		}
+		if len(rows) == 0 {
+			rows = append(rows, []string{"-", "-", "-", "-", "-", "-"})
+		}
+		noWrapCells := make([][2]int, 0, len(rows)*6)
+		for column := 0; column < 6; column++ {
+			noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), column)...)
+		}
+		printBoxTableWithOptions(
+			[]string{"TYPE", "NAMESPACE", "BINDING", "ROLE", "SUBJECTS", "CREATE TIME"},
+			rows,
+			[]int{4, 20, 20, 13, 20, 19},
+			tableOptions{
+				noWrapCells: makeNoWrapCells(noWrapCells...),
+				minWidths:   []int{4, 12, 12, 13, 10, 19},
+				rowDividers: true,
+			},
+		)
+		return
 	}
-	noWrapCells := make([][2]int, 0, len(rows)*2)
-	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 1)...)
-	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 3)...)
+
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	for _, item := range result.Items {
+		rows = append(rows, []string{
+			emptyDash(item.Kind),
+			emptyDash(item.Namespace),
+			emptyDash(item.Role),
+			emptyDash(item.Subjects),
+			rbacCreateDate(item.CreatedAt),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-"})
+	}
+	noWrapCells := make([][2]int, 0, len(rows)*5)
+	for column := 0; column < 5; column++ {
+		noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), column)...)
+	}
 	printBoxTableWithOptions(
-		[]string{"BINDING", "ROLE", "SUBJECTS", "CREATE TIME"},
+		[]string{"TYPE", "NAMESPACE", "ROLE", "SUBJECTS", "DATE"},
 		rows,
-		[]int{48, 36, 56, 19},
+		[]int{4, 24, 13, 20, 10},
 		tableOptions{
 			noWrapCells: makeNoWrapCells(noWrapCells...),
-			minWidths:   []int{16, 14, 18, 19},
+			minWidths:   []int{4, 12, 13, 10, 10},
+			rowDividers: true,
 		},
 	)
+}
+
+func rbacCreateDate(createdAt string) string {
+	fields := strings.Fields(strings.TrimSpace(createdAt))
+	if len(fields) == 0 {
+		return "-"
+	}
+	return fields[0]
 }
 
 func PrintRBACGrantResult(result *service.RBACGrantResult) {
@@ -1387,6 +1430,39 @@ func shouldShowJobLogs(result *service.JobGetResult) bool {
 	}
 }
 
+func PrintRBACRemoveResult(result *service.RBACRemoveResult) {
+	if result == nil {
+		return
+	}
+	rows := [][]string{
+		{"VC", emptyDash(result.ClusterName)},
+		{"VC UID", emptyDash(result.ClusterUID)},
+		{"NAMESPACE", emptyDash(result.Namespace)},
+		{"BINDING KIND", emptyDash(result.BindingKind)},
+		{"BINDING", emptyDash(result.BindingName)},
+		{"ROLE", emptyDash(result.Role)},
+		{"AFFECTED", strconv.Itoa(result.SubjectCount)},
+		{"SUBJECTS", emptyDash(result.Subjects)},
+		{"ACCESS", emptyDash(result.AccessReason)},
+		{"RESULT", emptyDash(result.Result)},
+	}
+	noWrapCells := make([][2]int, 0, len(rows)-1)
+	for row := range rows {
+		if row != 7 {
+			noWrapCells = append(noWrapCells, [2]int{row, 1})
+		}
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		rows,
+		[]int{16, 80},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   []int{12, 24},
+		},
+	)
+}
+
 func PrintPodGroupDetail(result *service.PodGroupGetResult) {
 	summaryRows := [][]string{
 		{"PODGROUP", result.Name},
@@ -1795,6 +1871,9 @@ func printBoxTableWithOptions(headers []string, rows [][]string, maxWidths []int
 		for _, rendered := range renderWrappedRows(rowIdx, row, widths, options) {
 			fmt.Fprintln(os.Stdout, rendered)
 		}
+		if options.rowDividers && rowIdx < len(rows)-1 {
+			fmt.Fprintln(os.Stdout, borderLine("├", "┼", "┤", widths))
+		}
 	}
 	fmt.Fprintln(os.Stdout, borderLine("└", "┴", "┘", widths))
 }
@@ -1937,7 +2016,12 @@ func wrapCell(value string, width int, noWrap bool) []string {
 		return []string{""}
 	}
 	if noWrap {
-		return []string{truncateCell(value, width)}
+		paragraphs := strings.Split(value, "\n")
+		lines := make([]string, 0, len(paragraphs))
+		for _, paragraph := range paragraphs {
+			lines = append(lines, truncateCell(strings.TrimRight(paragraph, " "), width))
+		}
+		return lines
 	}
 
 	paragraphs := strings.Split(value, "\n")

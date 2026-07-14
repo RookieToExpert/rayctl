@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestRBACMemberTypeMatches(t *testing.T) {
@@ -71,5 +72,59 @@ func TestAddRBACSubjectsUsesKindAndID(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("indexed subjects = %d, want 2", len(got))
+	}
+}
+
+func TestSubjectsTextUsesAnnotationNames(t *testing.T) {
+	subjects := []rbacv1.Subject{
+		{Kind: "User", Name: "user-id"},
+		{Kind: "Group", Name: "group-id"},
+		{Kind: "User", Name: "fallback-id"},
+	}
+	annotations := map[string]string{
+		"user/user-id":   "test5",
+		"group/group-id": "ug-a3-test",
+	}
+	if got, want := subjectsText(subjects, annotations), "1. fallback-id\n2. test5\n3. ug-a3-test"; got != want {
+		t.Fatalf("subjectsText() = %q, want %q", got, want)
+	}
+}
+
+func TestSubjectsTextKeepsSingleNameCompact(t *testing.T) {
+	subjects := []rbacv1.Subject{{Kind: "User", Name: "user-id"}}
+	annotations := map[string]string{"user/user-id": "test5"}
+	if got, want := subjectsText(subjects, annotations), "test5"; got != want {
+		t.Fatalf("subjectsText() = %q, want %q", got, want)
+	}
+}
+
+func TestRoleRefTextOnlyReturnsRoleName(t *testing.T) {
+	role := rbacv1.RoleRef{Kind: "ClusterRole", Name: "cluster-admin"}
+	if got := roleRefText(role); got != "cluster-admin" {
+		t.Fatalf("roleRefText() = %q", got)
+	}
+}
+
+func TestFindRoleBindingByNameRequiresExactMatch(t *testing.T) {
+	bindings := []rbacv1.RoleBinding{
+		{ObjectMeta: metav1.ObjectMeta{Name: "edit-abc"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "edit-def"}},
+	}
+	binding, ok := findRoleBindingByName(bindings, "edit-def")
+	if !ok || binding.Name != "edit-def" {
+		t.Fatalf("findRoleBindingByName() = %#v, %v", binding, ok)
+	}
+	if _, ok := findRoleBindingByName(bindings, "edit"); ok {
+		t.Fatal("partial binding name unexpectedly matched")
+	}
+}
+
+func TestFindClusterRoleBindingByNameRequiresExactMatch(t *testing.T) {
+	bindings := []rbacv1.ClusterRoleBinding{
+		{ObjectMeta: metav1.ObjectMeta{Name: "cluster-admin-abc"}},
+	}
+	binding, ok := findClusterRoleBindingByName(bindings, "cluster-admin-abc")
+	if !ok || binding.Name != "cluster-admin-abc" {
+		t.Fatalf("findClusterRoleBindingByName() = %#v, %v", binding, ok)
 	}
 }

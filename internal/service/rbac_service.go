@@ -36,6 +36,8 @@ type RBACGetResult struct {
 }
 
 type RBACBindingItem struct {
+	Kind      string
+	Namespace string
 	Name      string
 	Role      string
 	Subjects  string
@@ -79,8 +81,141 @@ type RBACGrantResult struct {
 	roleBinding    *rbacv1.RoleBinding
 }
 
+type RBACRemoveRequest struct {
+	ClusterIdentifier  string
+	Namespace          string
+	BindingName        string
+	ComputeBearerToken string
+	DryRun             bool
+}
+
+type RBACRemoveResult struct {
+	ClusterName  string
+	ClusterUID   string
+	ClusterRef   string
+	ProfileName  string
+	Namespace    string
+	BindingKind  string
+	BindingName  string
+	Role         string
+	Subjects     string
+	SubjectCount int
+	AccessReason string
+	Result       string
+
+	clusterWide bool
+}
+
 func NewRBACService(vcClient *platform.VirtualClusterClient) *RBACService {
 	return &RBACService{vcClient: vcClient}
+}
+
+func (s *RBACService) PrepareRemove(ctx context.Context, req RBACRemoveRequest) (*RBACRemoveResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for rbac remove")
+	}
+	if strings.TrimSpace(req.ComputeBearerToken) == "" {
+		return nil, fmt.Errorf("rbac remove requires compute id_token; run rayctl auth login first")
+	}
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required; use --namespace all for cluster-wide access")
+	}
+	bindingName := strings.TrimSpace(req.BindingName)
+	if bindingName == "" {
+		return nil, fmt.Errorf("binding name is required")
+	}
+
+	clusterName, clusterUID, profileName, err := s.resolveCluster(ctx, req.ClusterIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(profileName) == "" {
+		return nil, fmt.Errorf("cannot determine platform profile for virtual cluster %q", req.ClusterIdentifier)
+	}
+	clusterRef := "vc-" + clusterUID
+	clusterWide := strings.EqualFold(namespace, "all")
+	bindingKind := "RoleBinding"
+	resource := "rolebindings"
+	reviewNamespace := namespace
+	if clusterWide {
+		namespace = "all"
+		bindingKind = "ClusterRoleBinding"
+		resource = "clusterrolebindings"
+		reviewNamespace = ""
+	}
+
+	review, err := s.vcClient.ReviewRBACAccessForProfileToken(ctx, profileName, clusterRef, reviewNamespace, "delete", resource, req.ComputeBearerToken)
+	if err != nil {
+		return nil, fmt.Errorf("check permission to delete %s: %w", resource, err)
+	}
+	if !review.Status.Allowed {
+		reason := firstNonEmpty(strings.TrimSpace(review.Status.Reason), strings.TrimSpace(review.Status.EvaluationError), "access denied")
+		return nil, fmt.Errorf("current console user cannot delete %s in VC %s: %s", bindingKind, clusterName, reason)
+	}
+
+	result := &RBACRemoveResult{
+		ClusterName:  clusterName,
+		ClusterUID:   clusterUID,
+		ClusterRef:   clusterRef,
+		ProfileName:  profileName,
+		Namespace:    namespace,
+		BindingKind:  bindingKind,
+		BindingName:  bindingName,
+		AccessReason: firstNonEmpty(strings.TrimSpace(review.Status.Reason), "allowed"),
+		Result:       "pending confirmation",
+		clusterWide:  clusterWide,
+	}
+	if clusterWide {
+		bindings, err := s.vcClient.ListClusterRoleBindingsForProfileToken(ctx, profileName, clusterRef, defaultRBACLabelSelector, req.ComputeBearerToken)
+		if err != nil {
+			return nil, fmt.Errorf("list clusterrolebindings: %w", err)
+		}
+		binding, ok := findClusterRoleBindingByName(bindings, bindingName)
+		if !ok {
+			return nil, fmt.Errorf("controlled ClusterRoleBinding %q not found in VC %s", bindingName, clusterName)
+		}
+		result.Role = roleRefText(binding.RoleRef)
+		result.Subjects = subjectsText(binding.Subjects, binding.Annotations)
+		result.SubjectCount = len(binding.Subjects)
+	} else {
+		bindings, err := s.vcClient.ListRoleBindingsForProfileToken(ctx, profileName, clusterRef, namespace, defaultRBACLabelSelector, req.ComputeBearerToken)
+		if err != nil {
+			return nil, fmt.Errorf("list rolebindings: %w", err)
+		}
+		binding, ok := findRoleBindingByName(bindings, bindingName)
+		if !ok {
+			return nil, fmt.Errorf("controlled RoleBinding %q not found in namespace %s of VC %s", bindingName, namespace, clusterName)
+		}
+		result.Role = roleRefText(binding.RoleRef)
+		result.Subjects = subjectsText(binding.Subjects, binding.Annotations)
+		result.SubjectCount = len(binding.Subjects)
+	}
+	if req.DryRun {
+		result.Result = "dry-run"
+	}
+	return result, nil
+}
+
+func (s *RBACService) ApplyRemove(ctx context.Context, result *RBACRemoveResult, bearerToken string) error {
+	if result == nil {
+		return fmt.Errorf("prepared rbac remove is required")
+	}
+	if strings.TrimSpace(bearerToken) == "" {
+		return fmt.Errorf("compute bearer token is required")
+	}
+	var err error
+	if result.clusterWide {
+		err = s.vcClient.DeleteClusterRoleBindingForProfileToken(ctx, result.ProfileName, result.ClusterRef, result.BindingName, bearerToken)
+	} else {
+		err = s.vcClient.DeleteRoleBindingForProfileToken(ctx, result.ProfileName, result.ClusterRef, result.Namespace, result.BindingName, bearerToken)
+	}
+	if err != nil {
+		return fmt.Errorf("delete %s %s: %w", result.BindingKind, result.BindingName, err)
+	}
+	result.Result = "deleted"
+	return nil
 }
 
 func (s *RBACService) PrepareGrant(ctx context.Context, req RBACGrantRequest) (*RBACGrantResult, error) {
@@ -358,6 +493,26 @@ func addRBACSubjects(target map[string]struct{}, subjects []rbacv1.Subject) {
 	}
 }
 
+func findClusterRoleBindingByName(bindings []rbacv1.ClusterRoleBinding, name string) (rbacv1.ClusterRoleBinding, bool) {
+	name = strings.TrimSpace(name)
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.Name) == name {
+			return binding, true
+		}
+	}
+	return rbacv1.ClusterRoleBinding{}, false
+}
+
+func findRoleBindingByName(bindings []rbacv1.RoleBinding, name string) (rbacv1.RoleBinding, bool) {
+	name = strings.TrimSpace(name)
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.Name) == name {
+			return binding, true
+		}
+	}
+	return rbacv1.RoleBinding{}, false
+}
+
 func grantBindingMembers(members []RBACGrantMember, namespace string, namespaced bool) (map[string]string, []rbacv1.Subject) {
 	annotations := make(map[string]string, len(members))
 	subjects := make([]rbacv1.Subject, 0, len(members))
@@ -412,17 +567,39 @@ func (s *RBACService) Get(ctx context.Context, clusterIdentifier string, labelSe
 	if err != nil {
 		return nil, fmt.Errorf("list clusterrolebindings: %w", err)
 	}
+	roleBindings, err := s.vcClient.ListAllRoleBindingsForProfileToken(ctx, profileName, clusterRef, labelSelector, bearerToken)
+	if err != nil {
+		return nil, fmt.Errorf("list rolebindings: %w", err)
+	}
 
-	items := make([]RBACBindingItem, 0, len(bindings))
+	items := make([]RBACBindingItem, 0, len(bindings)+len(roleBindings))
 	for _, binding := range bindings {
 		items = append(items, RBACBindingItem{
+			Kind:      "CRB",
+			Namespace: "all",
 			Name:      binding.Name,
 			Role:      roleRefText(binding.RoleRef),
-			Subjects:  subjectsText(binding.Subjects),
+			Subjects:  subjectsText(binding.Subjects, binding.Annotations),
 			CreatedAt: formatRBACLocalTime(binding),
 		})
 	}
+	for _, binding := range roleBindings {
+		items = append(items, RBACBindingItem{
+			Kind:      "RB",
+			Namespace: firstNonEmpty(strings.TrimSpace(binding.Namespace), "-"),
+			Name:      binding.Name,
+			Role:      roleRefText(binding.RoleRef),
+			Subjects:  subjectsText(binding.Subjects, binding.Annotations),
+			CreatedAt: formatRBACRoleBindingLocalTime(binding),
+		})
+	}
 	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Kind != items[j].Kind {
+			return items[i].Kind < items[j].Kind
+		}
+		if items[i].Namespace != items[j].Namespace {
+			return items[i].Namespace < items[j].Namespace
+		}
 		if items[i].Role != items[j].Role {
 			return items[i].Role < items[j].Role
 		}
@@ -509,7 +686,7 @@ func rbacClusterCandidates(items []platform.VirtualCluster) string {
 }
 
 func roleRefText(role rbacv1.RoleRef) string {
-	return strings.TrimSpace(role.Kind + "/" + role.Name)
+	return strings.TrimSpace(role.Name)
 }
 
 func formatRBACLocalTime(binding rbacv1.ClusterRoleBinding) string {
@@ -519,18 +696,39 @@ func formatRBACLocalTime(binding rbacv1.ClusterRoleBinding) string {
 	return formatLocalTime(binding.CreationTimestamp.Time.Format("2006-01-02T15:04:05.999999999Z07:00"))
 }
 
-func subjectsText(subjects []rbacv1.Subject) string {
+func formatRBACRoleBindingLocalTime(binding rbacv1.RoleBinding) string {
+	if binding.CreationTimestamp.IsZero() {
+		return ""
+	}
+	return formatLocalTime(binding.CreationTimestamp.Time.Format("2006-01-02T15:04:05.999999999Z07:00"))
+}
+
+func subjectsText(subjects []rbacv1.Subject, annotations map[string]string) string {
 	if len(subjects) == 0 {
 		return "-"
 	}
 	parts := make([]string, 0, len(subjects))
 	for _, subject := range subjects {
-		value := strings.TrimSpace(subject.Kind + "/" + subject.Name)
-		if strings.TrimSpace(subject.Namespace) != "" {
-			value += "@" + strings.TrimSpace(subject.Namespace)
+		kind := strings.ToLower(strings.TrimSpace(subject.Kind))
+		name := strings.TrimSpace(subject.Name)
+		value := strings.TrimSpace(annotations[kind+"/"+name])
+		if value == "" {
+			value = name
 		}
-		parts = append(parts, value)
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 0 {
+		return "-"
 	}
 	sort.Strings(parts)
-	return strings.Join(parts, "\n")
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	lines := make([]string, 0, len(parts))
+	for index, part := range parts {
+		lines = append(lines, fmt.Sprintf("%d. %s", index+1, part))
+	}
+	return strings.Join(lines, "\n")
 }

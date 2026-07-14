@@ -654,6 +654,34 @@ func bearerTokensForRBACGrantCommand(ctx context.Context, cmd *cobra.Command, vc
 	return iamToken, computeToken, "login/access_token + login/id_token", nil
 }
 
+func bearerTokenForRBACComputeCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, explicitToken string) (string, string, error) {
+	if token := strings.TrimSpace(explicitToken); token != "" {
+		return strings.TrimPrefix(token, "Bearer "), "--bearer-token", nil
+	}
+
+	store, err := authsession.Load("")
+	if err != nil {
+		return "", "", err
+	}
+	profile := sessionProfileName(vcClient)
+	if token, ok := authsession.ValidIDToken(store.Profiles[profile]); ok {
+		return token, "session/id_token", nil
+	}
+	if token := strings.TrimSpace(os.Getenv("RAYCTL_BEARER_TOKEN")); token != "" {
+		return strings.TrimPrefix(token, "Bearer "), "RAYCTL_BEARER_TOKEN", nil
+	}
+
+	loggedIn, err := loginForCommand(ctx, cmd, vcClient, "", "", false, false)
+	if err != nil {
+		return "", "", err
+	}
+	token, ok := authsession.ValidIDToken(*loggedIn)
+	if !ok {
+		return "", "", fmt.Errorf("login succeeded but id_token is missing")
+	}
+	return token, "login/id_token", nil
+}
+
 func bearerDebugSummary(token string) string {
 	token = strings.TrimPrefix(strings.TrimSpace(token), "Bearer ")
 	if token == "" {
