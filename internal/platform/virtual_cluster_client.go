@@ -18,8 +18,10 @@ import (
 	"strings"
 	"time"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -177,6 +179,13 @@ type IAMGroup struct {
 	CreateTime     string `json:"create_time"`
 }
 
+type IAMUserGroupSearchItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Type        string `json:"type"`
+}
+
 type IAMBindingPolicy struct {
 	ID             string        `json:"id"`
 	Scope          string        `json:"scope"`
@@ -331,6 +340,13 @@ type iamGroupListResponse struct {
 	Groups        []IAMGroup `json:"groups"`
 	NextPageToken string     `json:"next_page_token"`
 	TotalSize     int        `json:"total_size"`
+}
+
+type iamUserGroupSearchResponse struct {
+	Items      []IAMUserGroupSearchItem `json:"items"`
+	Users      []IAMUserGroupSearchItem `json:"users"`
+	Groups     []IAMUserGroupSearchItem `json:"groups"`
+	UserGroups []IAMUserGroupSearchItem `json:"user_groups"`
 }
 
 type iamBindingPolicyListResponse struct {
@@ -1118,6 +1134,15 @@ func (c *VirtualClusterClient) currentClientProfile() (clientProfile, bool) {
 	return profile, ok
 }
 
+func (c *VirtualClusterClient) clientProfileByName(profileName string) (clientProfile, bool) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" || profileName == c.currentProfile {
+		return c.currentClientProfile()
+	}
+	profile, ok := c.profiles[profileName]
+	return profile, ok
+}
+
 func (c *VirtualClusterClient) orderedCMSProfiles() []clientProfile {
 	profiles := c.orderedProfiles()
 	result := make([]clientProfile, 0, len(profiles))
@@ -1294,6 +1319,32 @@ func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile 
 	return users, nil
 }
 
+func (c *VirtualClusterClient) findExactUsersForProfile(ctx context.Context, profile clientProfile, identifier string) ([]IAMUser, error) {
+	u, _ := url.Parse(profile.IAMBaseURL)
+	u.Path = "/iam/idp/v1/getUsers"
+	query := u.Query()
+	query.Set("includeAdmin", "true")
+	query.Set("page_token", "1")
+	query.Set("page_size", "10")
+	query.Set("order_by", "create_time desc")
+	escaped := escapeIAMFilterValue(identifier)
+	query.Set("filter", fmt.Sprintf(`username="%s" OR id="%s"`, escaped, escaped))
+	u.RawQuery = query.Encode()
+
+	var payload iamUserListResponse
+	if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+		return nil, err
+	}
+
+	result := make([]IAMUser, 0, len(payload.Users))
+	for _, user := range payload.Users {
+		if strings.EqualFold(strings.TrimSpace(user.Username), identifier) || strings.EqualFold(strings.TrimSpace(user.ID), identifier) {
+			result = append(result, user)
+		}
+	}
+	return result, nil
+}
+
 func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string) ([]IAMUser, error) {
 	profile, ok := c.currentClientProfile()
 	if !ok {
@@ -1305,12 +1356,25 @@ func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string)
 		return nil, fmt.Errorf("user identifier is required")
 	}
 
+	// Most callers provide a complete username or user ID. Resolve that with one
+	// filtered request before falling back to the paginated fuzzy search.
+	exact, exactErr := c.findExactUsersForProfile(ctx, profile, identifier)
+	if len(exact) > 0 {
+		sort.Slice(exact, func(i, j int) bool {
+			return strings.TrimSpace(exact[i].Username) < strings.TrimSpace(exact[j].Username)
+		})
+		return exact, nil
+	}
+
 	users, err := c.listUsersForProfile(ctx, profile)
 	if err != nil {
+		if exactErr != nil {
+			return nil, fmt.Errorf("find exact user: %v; list users: %w", exactErr, err)
+		}
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 
-	exact := make([]IAMUser, 0)
+	exact = make([]IAMUser, 0)
 	prefix := make([]IAMUser, 0)
 	contains := make([]IAMUser, 0)
 	lowerID := strings.ToLower(identifier)
@@ -2065,9 +2129,18 @@ func (c *VirtualClusterClient) GetVolcanoJob(ctx context.Context, vclusterName s
 }
 
 func (c *VirtualClusterClient) ListVolcanoJobs(ctx context.Context, vclusterName string, namespace string) ([]unstructured.Unstructured, error) {
+	return c.ListVolcanoJobsByLabelSelector(ctx, vclusterName, namespace, "")
+}
+
+func (c *VirtualClusterClient) ListVolcanoJobsByLabelSelector(ctx context.Context, vclusterName string, namespace string, labelSelector string) ([]unstructured.Unstructured, error) {
+	query := url.Values{}
+	if strings.TrimSpace(labelSelector) != "" {
+		query.Set("labelSelector", strings.TrimSpace(labelSelector))
+	}
+
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs", namespace), nil)
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs", namespace), query)
 		var list unstructured.UnstructuredList
 		if err := c.getJSONWithProfile(ctx, profile, reqURL, &list); err != nil {
 			lastErr = err
@@ -2156,18 +2229,77 @@ func (c *VirtualClusterClient) ListClusterRoleBindings(ctx context.Context, vclu
 	return c.listClusterRoleBindingsWithProfiles(ctx, c.orderedProfiles(), vclusterName, labelSelector, "")
 }
 
+func (c *VirtualClusterClient) SearchIAMUserGroupsForProfileToken(ctx context.Context, profileName string, searchQuery string, bearerToken string) ([]IAMUserGroupSearchItem, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	searchQuery = strings.TrimSpace(searchQuery)
+	if searchQuery == "" {
+		return nil, fmt.Errorf("member search query is required")
+	}
+	if strings.TrimSpace(bearerToken) == "" {
+		return nil, fmt.Errorf("console bearer token is required")
+	}
+
+	u, _ := url.Parse(profile.IAMBaseURL)
+	u.Path = "/iam/idp/v1/userGroups:search"
+	query := u.Query()
+	query.Set("page", "1")
+	query.Set("page_size", "100")
+	query.Set("query", searchQuery)
+	u.RawQuery = query.Encode()
+
+	var payload iamUserGroupSearchResponse
+	if err := c.getJSONWithBearerProfile(ctx, profile, u.String(), bearerToken, &payload); err != nil {
+		return nil, err
+	}
+	items := payload.Items
+	items = append(items, payload.Users...)
+	items = append(items, payload.Groups...)
+	items = append(items, payload.UserGroups...)
+	return items, nil
+}
+
+func (c *VirtualClusterClient) ReviewRBACCreateAccessForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, resource string, bearerToken string) (*authorizationv1.SelfSubjectAccessReview, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	if strings.TrimSpace(bearerToken) == "" {
+		return nil, fmt.Errorf("console bearer token is required")
+	}
+
+	review := authorizationv1.SelfSubjectAccessReview{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "authorization.k8s.io/v1",
+			Kind:       "SelfSubjectAccessReview",
+		},
+		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationv1.ResourceAttributes{
+				Namespace: strings.TrimSpace(namespace),
+				Verb:      "post",
+				Group:     "rbac.authorization.k8s.io",
+				Resource:  strings.TrimSpace(resource),
+			},
+		},
+	}
+	reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", nil)
+	var out authorizationv1.SelfSubjectAccessReview
+	if err := c.postJSONWithBearerProfile(ctx, profile, reqURL, review, bearerToken, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *VirtualClusterClient) ListClusterRoleBindingsForProfile(ctx context.Context, profileName string, vclusterName string, labelSelector string) ([]rbacv1.ClusterRoleBinding, error) {
 	return c.ListClusterRoleBindingsForProfileToken(ctx, profileName, vclusterName, labelSelector, "")
 }
 
 func (c *VirtualClusterClient) ListClusterRoleBindingsForProfileToken(ctx context.Context, profileName string, vclusterName string, labelSelector string, bearerToken string) ([]rbacv1.ClusterRoleBinding, error) {
-	profileName = strings.TrimSpace(profileName)
-	if profileName == "" {
-		return c.listClusterRoleBindingsWithProfiles(ctx, c.orderedProfiles(), vclusterName, labelSelector, bearerToken)
-	}
-	profile, ok := c.profiles[profileName]
+	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
-		return c.listClusterRoleBindingsWithProfiles(ctx, c.orderedProfiles(), vclusterName, labelSelector, bearerToken)
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
 	}
 	return c.listClusterRoleBindingsWithProfiles(ctx, []clientProfile{profile}, vclusterName, labelSelector, bearerToken)
 }
@@ -2195,6 +2327,51 @@ func (c *VirtualClusterClient) listClusterRoleBindingsWithProfiles(ctx context.C
 		return list.Items, nil
 	}
 	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) ListRoleBindingsForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, labelSelector string, bearerToken string) ([]rbacv1.RoleBinding, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	query := url.Values{}
+	if strings.TrimSpace(labelSelector) != "" {
+		query.Set("labelSelector", strings.TrimSpace(labelSelector))
+	}
+	path := fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings", url.PathEscape(strings.TrimSpace(namespace)))
+	reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, path, query)
+	var list rbacv1.RoleBindingList
+	if err := c.getJSONWithBearerProfile(ctx, profile, reqURL, bearerToken, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+func (c *VirtualClusterClient) CreateClusterRoleBindingForProfileToken(ctx context.Context, profileName string, vclusterName string, binding rbacv1.ClusterRoleBinding, bearerToken string) (*rbacv1.ClusterRoleBinding, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings", nil)
+	var out rbacv1.ClusterRoleBinding
+	if err := c.postJSONWithBearerProfile(ctx, profile, reqURL, binding, bearerToken, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *VirtualClusterClient) CreateRoleBindingForProfileToken(ctx context.Context, profileName string, vclusterName string, namespace string, binding rbacv1.RoleBinding, bearerToken string) (*rbacv1.RoleBinding, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	path := fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings", url.PathEscape(strings.TrimSpace(namespace)))
+	reqURL := c.kubernetesClusterURLForProfile(profile, vclusterName, path, nil)
+	var out rbacv1.RoleBinding
+	if err := c.postJSONWithBearerProfile(ctx, profile, reqURL, binding, bearerToken, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *VirtualClusterClient) ListStorageVolumeResources(ctx context.Context, zone string) ([]StorageVolumeResource, error) {
@@ -3318,7 +3495,7 @@ func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clie
 	if readErr != nil {
 		return nil, fmt.Errorf("read response from %s: %w", reqURL, readErr)
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return body, nil

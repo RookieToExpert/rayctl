@@ -571,7 +571,7 @@ func bearerTokenForCommand(ctx context.Context, cmd *cobra.Command, vcClient *pl
 		return "", err
 	}
 	profile := sessionProfileName(vcClient)
-	if token, ok := authsession.ValidToken(store.Profiles[profile]); ok {
+	if token, ok := authsession.ValidIDToken(store.Profiles[profile]); ok {
 		return token, nil
 	}
 
@@ -579,9 +579,9 @@ func bearerTokenForCommand(ctx context.Context, cmd *cobra.Command, vcClient *pl
 	if err != nil {
 		return "", err
 	}
-	token, ok := authsession.ValidToken(*item)
+	token, ok := authsession.ValidIDToken(*item)
 	if !ok {
-		return "", fmt.Errorf("login succeeded but token is not usable")
+		return "", fmt.Errorf("login succeeded but id_token is not usable")
 	}
 	return token, nil
 }
@@ -612,6 +612,46 @@ func bearerTokenForAuthGrantCommand(ctx context.Context, cmd *cobra.Command, vcC
 		return "", "", fmt.Errorf("login succeeded but token is not usable")
 	}
 	return token, "login/access_token", nil
+}
+
+func bearerTokensForRBACGrantCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, explicitComputeToken string) (string, string, string, error) {
+	store, err := authsession.Load("")
+	if err != nil {
+		return "", "", "", err
+	}
+	profile := sessionProfileName(vcClient)
+	item := store.Profiles[profile]
+	iamToken, iamOK := authsession.ValidAccessToken(item)
+	computeToken, computeOK := authsession.ValidIDToken(item)
+
+	if token := strings.TrimSpace(explicitComputeToken); token != "" {
+		computeToken = strings.TrimPrefix(token, "Bearer ")
+		computeOK = true
+		if iamOK {
+			return iamToken, computeToken, "session/access_token + --bearer-token", nil
+		}
+	}
+	if token := strings.TrimSpace(os.Getenv("RAYCTL_BEARER_TOKEN")); token != "" && !computeOK {
+		computeToken = strings.TrimPrefix(token, "Bearer ")
+		computeOK = true
+		if iamOK {
+			return iamToken, computeToken, "session/access_token + RAYCTL_BEARER_TOKEN", nil
+		}
+	}
+	if iamOK && computeOK {
+		return iamToken, computeToken, "session/access_token + session/id_token", nil
+	}
+
+	loggedIn, err := loginForCommand(ctx, cmd, vcClient, "", "", false, false)
+	if err != nil {
+		return "", "", "", err
+	}
+	iamToken, iamOK = authsession.ValidAccessToken(*loggedIn)
+	computeToken, computeOK = authsession.ValidIDToken(*loggedIn)
+	if !iamOK || !computeOK {
+		return "", "", "", fmt.Errorf("login succeeded but access_token or id_token is missing")
+	}
+	return iamToken, computeToken, "login/access_token + login/id_token", nil
 }
 
 func bearerDebugSummary(token string) string {

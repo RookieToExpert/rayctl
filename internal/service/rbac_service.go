@@ -2,16 +2,25 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"rayctl/internal/platform"
 )
 
 const defaultRBACLabelSelector = "resource.compute.sensecore.cn/control"
+
+var allowedRBACGrantRoles = map[string]struct{}{
+	"cluster-admin": {},
+	"admin":         {},
+	"edit":          {},
+	"view":          {},
+}
 
 type RBACService struct {
 	vcClient *platform.VirtualClusterClient
@@ -33,8 +42,348 @@ type RBACBindingItem struct {
 	CreatedAt string
 }
 
+type RBACGrantRequest struct {
+	ClusterIdentifier  string
+	Namespace          string
+	Role               string
+	Users              []string
+	Groups             []string
+	IAMBearerToken     string
+	ComputeBearerToken string
+	DryRun             bool
+}
+
+type RBACGrantMember struct {
+	Type        string
+	Name        string
+	DisplayName string
+	ID          string
+	Status      string
+}
+
+type RBACGrantResult struct {
+	ClusterName  string
+	ClusterUID   string
+	ClusterRef   string
+	ProfileName  string
+	Namespace    string
+	BindingKind  string
+	BindingName  string
+	Role         string
+	AccessReason string
+	Members      []RBACGrantMember
+	Payload      string
+	Result       string
+
+	clusterBinding *rbacv1.ClusterRoleBinding
+	roleBinding    *rbacv1.RoleBinding
+}
+
 func NewRBACService(vcClient *platform.VirtualClusterClient) *RBACService {
 	return &RBACService{vcClient: vcClient}
+}
+
+func (s *RBACService) PrepareGrant(ctx context.Context, req RBACGrantRequest) (*RBACGrantResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for rbac grant")
+	}
+	if strings.TrimSpace(req.IAMBearerToken) == "" || strings.TrimSpace(req.ComputeBearerToken) == "" {
+		return nil, fmt.Errorf("rbac grant requires IAM access_token and compute id_token; run rayctl auth login first")
+	}
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required; use --namespace all for cluster-wide access")
+	}
+	role := strings.ToLower(strings.TrimSpace(req.Role))
+	if _, ok := allowedRBACGrantRoles[role]; !ok {
+		return nil, fmt.Errorf("unsupported role %q; allowed roles: cluster-admin, admin, edit, view", req.Role)
+	}
+	if len(req.Users) == 0 && len(req.Groups) == 0 {
+		return nil, fmt.Errorf("at least one --user or --group is required")
+	}
+
+	clusterName, clusterUID, profileName, err := s.resolveCluster(ctx, req.ClusterIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(profileName) == "" {
+		return nil, fmt.Errorf("cannot determine platform profile for virtual cluster %q", req.ClusterIdentifier)
+	}
+	clusterRef := "vc-" + clusterUID
+	clusterWide := strings.EqualFold(namespace, "all")
+	bindingKind := "RoleBinding"
+	resource := "rolebindings"
+	reviewNamespace := namespace
+	if clusterWide {
+		namespace = "all"
+		bindingKind = "ClusterRoleBinding"
+		resource = "clusterrolebindings"
+		reviewNamespace = ""
+	}
+
+	review, err := s.vcClient.ReviewRBACCreateAccessForProfileToken(ctx, profileName, clusterRef, reviewNamespace, resource, req.ComputeBearerToken)
+	if err != nil {
+		return nil, fmt.Errorf("check permission to create %s: %w", resource, err)
+	}
+	if !review.Status.Allowed {
+		reason := firstNonEmpty(strings.TrimSpace(review.Status.Reason), strings.TrimSpace(review.Status.EvaluationError), "access denied")
+		return nil, fmt.Errorf("current console user cannot create %s in VC %s: %s", bindingKind, clusterName, reason)
+	}
+
+	members, err := s.resolveGrantMembers(ctx, profileName, req.Users, req.Groups, req.IAMBearerToken)
+	if err != nil {
+		return nil, err
+	}
+	existingSubjects, err := s.existingRoleSubjects(ctx, profileName, clusterRef, namespace, clusterWide, role, req.ComputeBearerToken)
+	if err != nil {
+		return nil, err
+	}
+
+	pending := make([]RBACGrantMember, 0, len(members))
+	for i := range members {
+		key := strings.ToLower(members[i].Type) + "/" + members[i].ID
+		if _, ok := existingSubjects[key]; ok {
+			members[i].Status = "already granted"
+			continue
+		}
+		members[i].Status = "pending"
+		pending = append(pending, members[i])
+	}
+
+	result := &RBACGrantResult{
+		ClusterName:  clusterName,
+		ClusterUID:   clusterUID,
+		ClusterRef:   clusterRef,
+		ProfileName:  profileName,
+		Namespace:    namespace,
+		BindingKind:  bindingKind,
+		Role:         role,
+		AccessReason: firstNonEmpty(strings.TrimSpace(review.Status.Reason), "allowed"),
+		Members:      members,
+		Result:       "pending confirmation",
+	}
+	if len(pending) == 0 {
+		result.Result = "already granted"
+		return result, nil
+	}
+
+	annotations, subjects := grantBindingMembers(pending, namespace, !clusterWide)
+	if clusterWide {
+		binding := &rbacv1.ClusterRoleBinding{
+			TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRoleBinding"},
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: role + "-",
+				Labels:       map[string]string{"resource.compute.sensecore.cn/control": "true"},
+				Annotations:  annotations,
+			},
+			RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: role},
+			Subjects: subjects,
+		}
+		result.clusterBinding = binding
+		result.Payload = marshalRBACPayload(binding)
+	} else {
+		binding := &rbacv1.RoleBinding{
+			TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: role + "-",
+				Namespace:    namespace,
+				Labels:       map[string]string{"resource.compute.sensecore.cn/control": "true"},
+				Annotations:  annotations,
+			},
+			RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: role},
+			Subjects: subjects,
+		}
+		result.roleBinding = binding
+		result.Payload = marshalRBACPayload(binding)
+	}
+	if req.DryRun {
+		result.Result = "dry-run"
+	}
+	return result, nil
+}
+
+func (s *RBACService) ApplyGrant(ctx context.Context, result *RBACGrantResult, bearerToken string) error {
+	if result == nil {
+		return fmt.Errorf("prepared rbac grant is required")
+	}
+	if strings.TrimSpace(bearerToken) == "" {
+		return fmt.Errorf("console bearer token is required")
+	}
+	if result.Result == "already granted" {
+		return nil
+	}
+
+	switch {
+	case result.clusterBinding != nil:
+		binding, err := s.vcClient.CreateClusterRoleBindingForProfileToken(ctx, result.ProfileName, result.ClusterRef, *result.clusterBinding, bearerToken)
+		if err != nil {
+			return fmt.Errorf("create clusterrolebinding: %w", err)
+		}
+		result.BindingName = binding.Name
+	case result.roleBinding != nil:
+		binding, err := s.vcClient.CreateRoleBindingForProfileToken(ctx, result.ProfileName, result.ClusterRef, result.Namespace, *result.roleBinding, bearerToken)
+		if err != nil {
+			return fmt.Errorf("create rolebinding: %w", err)
+		}
+		result.BindingName = binding.Name
+	default:
+		return fmt.Errorf("prepared rbac binding payload is missing")
+	}
+	for i := range result.Members {
+		if result.Members[i].Status == "pending" {
+			result.Members[i].Status = "created"
+		}
+	}
+	result.Result = "created"
+	return nil
+}
+
+func (s *RBACService) resolveGrantMembers(ctx context.Context, profileName string, users []string, groups []string, bearerToken string) ([]RBACGrantMember, error) {
+	type requestedMember struct {
+		kind       string
+		identifier string
+	}
+	requested := make([]requestedMember, 0, len(users)+len(groups))
+	for _, user := range users {
+		if value := strings.TrimSpace(user); value != "" {
+			requested = append(requested, requestedMember{kind: "User", identifier: value})
+		}
+	}
+	for _, group := range groups {
+		if value := strings.TrimSpace(group); value != "" {
+			requested = append(requested, requestedMember{kind: "Group", identifier: value})
+		}
+	}
+	if len(requested) == 0 {
+		return nil, fmt.Errorf("at least one non-empty --user or --group is required")
+	}
+
+	result := make([]RBACGrantMember, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, target := range requested {
+		items, err := s.vcClient.SearchIAMUserGroupsForProfileToken(ctx, profileName, target.identifier, bearerToken)
+		if err != nil {
+			return nil, fmt.Errorf("search %s %q: %w", strings.ToLower(target.kind), target.identifier, err)
+		}
+		matches := make([]platform.IAMUserGroupSearchItem, 0)
+		for _, item := range items {
+			if !rbacMemberTypeMatches(item.Type, target.kind) {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(item.ID), target.identifier) || strings.EqualFold(strings.TrimSpace(item.Name), target.identifier) {
+				matches = append(matches, item)
+			}
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("%s %q not found; use an exact name or ID", strings.ToLower(target.kind), target.identifier)
+		}
+		if len(matches) > 1 {
+			candidates := make([]string, 0, len(matches))
+			for _, item := range matches {
+				candidates = append(candidates, fmt.Sprintf("%s(%s)", item.Name, item.ID))
+			}
+			sort.Strings(candidates)
+			return nil, fmt.Errorf("%s %q matched multiple members: %s", strings.ToLower(target.kind), target.identifier, strings.Join(candidates, ", "))
+		}
+		item := matches[0]
+		key := strings.ToLower(target.kind) + "/" + strings.TrimSpace(item.ID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, RBACGrantMember{
+			Type:        target.kind,
+			Name:        strings.TrimSpace(item.Name),
+			DisplayName: strings.TrimSpace(item.DisplayName),
+			ID:          strings.TrimSpace(item.ID),
+		})
+	}
+	return result, nil
+}
+
+func (s *RBACService) existingRoleSubjects(ctx context.Context, profileName string, clusterRef string, namespace string, clusterWide bool, role string, bearerToken string) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	if clusterWide {
+		bindings, err := s.vcClient.ListClusterRoleBindingsForProfileToken(ctx, profileName, clusterRef, defaultRBACLabelSelector, bearerToken)
+		if err != nil {
+			return nil, fmt.Errorf("list existing clusterrolebindings: %w", err)
+		}
+		for _, binding := range bindings {
+			if !rbacRoleRefMatches(binding.RoleRef, role) {
+				continue
+			}
+			addRBACSubjects(result, binding.Subjects)
+		}
+		return result, nil
+	}
+
+	bindings, err := s.vcClient.ListRoleBindingsForProfileToken(ctx, profileName, clusterRef, namespace, defaultRBACLabelSelector, bearerToken)
+	if err != nil {
+		return nil, fmt.Errorf("list existing rolebindings in namespace %q: %w", namespace, err)
+	}
+	for _, binding := range bindings {
+		if !rbacRoleRefMatches(binding.RoleRef, role) {
+			continue
+		}
+		addRBACSubjects(result, binding.Subjects)
+	}
+	return result, nil
+}
+
+func rbacMemberTypeMatches(actual string, expected string) bool {
+	actual = strings.ToLower(strings.NewReplacer("_", "", "-", "", " ", "").Replace(strings.TrimSpace(actual)))
+	switch strings.ToLower(strings.TrimSpace(expected)) {
+	case "user":
+		return actual == "user"
+	case "group":
+		return actual == "group" || actual == "usergroup"
+	default:
+		return false
+	}
+}
+
+func rbacRoleRefMatches(roleRef rbacv1.RoleRef, role string) bool {
+	return strings.EqualFold(strings.TrimSpace(roleRef.Kind), "ClusterRole") && strings.EqualFold(strings.TrimSpace(roleRef.Name), strings.TrimSpace(role))
+}
+
+func addRBACSubjects(target map[string]struct{}, subjects []rbacv1.Subject) {
+	for _, subject := range subjects {
+		kind := strings.ToLower(strings.TrimSpace(subject.Kind))
+		name := strings.TrimSpace(subject.Name)
+		if (kind != "user" && kind != "group") || name == "" {
+			continue
+		}
+		target[kind+"/"+name] = struct{}{}
+	}
+}
+
+func grantBindingMembers(members []RBACGrantMember, namespace string, namespaced bool) (map[string]string, []rbacv1.Subject) {
+	annotations := make(map[string]string, len(members))
+	subjects := make([]rbacv1.Subject, 0, len(members))
+	for _, member := range members {
+		kind := "User"
+		prefix := "user"
+		if strings.EqualFold(member.Type, "Group") {
+			kind = "Group"
+			prefix = "group"
+		}
+		annotations[prefix+"/"+member.ID] = member.Name
+		subject := rbacv1.Subject{Kind: kind, Name: member.ID}
+		if namespaced {
+			subject.Namespace = namespace
+		}
+		subjects = append(subjects, subject)
+	}
+	return annotations, subjects
+}
+
+func marshalRBACPayload(value any) string {
+	payload, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(payload)
 }
 
 func (s *RBACService) Get(ctx context.Context, clusterIdentifier string, labelSelector string, bearerToken string) (*RBACGetResult, error) {

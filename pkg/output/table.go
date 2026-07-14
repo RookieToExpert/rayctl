@@ -886,6 +886,72 @@ func PrintRBACGetResult(result *service.RBACGetResult) {
 	)
 }
 
+func PrintRBACGrantResult(result *service.RBACGrantResult) {
+	if result == nil {
+		return
+	}
+
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"VC", emptyDash(result.ClusterName)},
+			{"VC UID", emptyDash(result.ClusterUID)},
+			{"PROFILE", emptyDash(result.ProfileName)},
+			{"NAMESPACE", emptyDash(result.Namespace)},
+			{"BINDING KIND", emptyDash(result.BindingKind)},
+			{"ROLE", emptyDash(result.Role)},
+			{"ACCESS", emptyDash(result.AccessReason)},
+			{"RESULT", emptyDash(result.Result)},
+		},
+		[]int{16, 104},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(8, 1)...),
+			minWidths:   []int{12, 28},
+		},
+	)
+
+	fmt.Fprintln(os.Stdout)
+	rows := make([][]string, 0, maxInt(1, len(result.Members)))
+	if len(result.Members) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-"})
+	} else {
+		for _, member := range result.Members {
+			rows = append(rows, []string{
+				emptyDash(member.Type),
+				emptyDash(member.Name),
+				emptyDash(member.DisplayName),
+				emptyDash(member.ID),
+				emptyDash(member.Status),
+			})
+		}
+	}
+	noWrapCells := make([][2]int, 0, len(rows)*4)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 0)...)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 1)...)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 3)...)
+	noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), 4)...)
+	printBoxTableWithOptions(
+		[]string{"TYPE", "NAME", "DISPLAY NAME", "ID", "STATUS"},
+		rows,
+		[]int{8, 28, 28, 36, 18},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   []int{6, 12, 12, 32, 12},
+		},
+	)
+
+	if result.Result != "dry-run" || strings.TrimSpace(result.Payload) == "" {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions(
+		[]string{"PAYLOAD"},
+		[][]string{{result.Payload}},
+		[]int{120},
+		tableOptions{minWidths: []int{40}},
+	)
+}
+
 func PrintVCList(result *service.VCListResult) {
 	if result == nil {
 		return

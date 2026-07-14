@@ -847,6 +847,118 @@ func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeIna
 	}, nil
 }
 
+// GetCurrentTenantUserJobs returns active jobs submitted by the requested users.
+// Unlike the cluster summary path, it does not fetch Pods because user output does
+// not need Pod counts.
+func (s *JobService) GetCurrentTenantUserJobs(ctx context.Context, submitters []string) ([]JobClusterItem, error) {
+	if s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for user job listing")
+	}
+
+	normalized := make([]string, 0, len(submitters))
+	seen := make(map[string]struct{}, len(submitters))
+	for _, submitter := range submitters {
+		submitter = strings.TrimSpace(submitter)
+		key := strings.ToLower(submitter)
+		if submitter == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, submitter)
+	}
+	if len(normalized) == 0 {
+		return []JobClusterItem{}, nil
+	}
+
+	vclusters, err := s.vcClient.ListCurrentProfileVirtualClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list current tenant virtual clusters: %w", err)
+	}
+
+	selector := "lepton.sensetime.com/submitter=" + normalized[0]
+	if len(normalized) > 1 {
+		selector = fmt.Sprintf("lepton.sensetime.com/submitter in (%s)", strings.Join(normalized, ","))
+	}
+
+	type clusterJobsResult struct {
+		clusterName string
+		jobs        []unstructured.Unstructured
+		err         error
+	}
+	results := make(chan clusterJobsResult, len(vclusters))
+	semaphore := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, vc := range vclusters {
+		vc := vc
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				results <- clusterJobsResult{err: ctx.Err()}
+				return
+			}
+
+			clusterName := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
+			vcRef := firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID))
+			jobs, listErr := s.vcClient.ListVolcanoJobsByLabelSelector(ctx, vcRef, "default", selector)
+			results <- clusterJobsResult{clusterName: clusterName, jobs: jobs, err: listErr}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	items := make([]JobClusterItem, 0)
+	for result := range results {
+		if result.err != nil {
+			return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", result.clusterName, result.err)
+		}
+		for i := range result.jobs {
+			job := &result.jobs[i]
+			status := extractVolcanoJobPhase(job)
+			if !isActiveVolcanoJobPhase(status) {
+				continue
+			}
+			submitter := firstNonEmpty(
+				getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
+				getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"),
+				"-",
+			)
+			if _, ok := seen[strings.ToLower(strings.TrimSpace(submitter))]; !ok {
+				continue
+			}
+			createdAt := job.GetCreationTimestamp().Time
+			items = append(items, JobClusterItem{
+				ClusterName:    result.clusterName,
+				JobName:        firstNonEmpty(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"), job.GetName()),
+				Submitter:      submitter,
+				Status:         status,
+				CreatedAt:      createdAt.In(utcPlus8).Format("2006-01-02 15:04:05"),
+				CreatedAtShort: createdAt.In(utcPlus8).Format("01-02 15:04"),
+				CreatedAtTime:  createdAt,
+			})
+		}
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
+			return items[i].CreatedAtTime.After(items[j].CreatedAtTime)
+		}
+		if items[i].ClusterName != items[j].ClusterName {
+			return items[i].ClusterName < items[j].ClusterName
+		}
+		return items[i].JobName < items[j].JobName
+	})
+	return items, nil
+}
+
 func normalizeClusterStatusFilter(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "all":

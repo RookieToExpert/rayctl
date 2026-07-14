@@ -757,6 +757,18 @@ func ValidAccessToken(item ProfileSession) (string, bool) {
 	return strings.TrimPrefix(token, "Bearer "), true
 }
 
+func ValidIDToken(item ProfileSession) (string, bool) {
+	token := item.IDToken
+	if token == "" {
+		return "", false
+	}
+	expiresAt, ok := parseExpiresAt(item.ExpiresAt)
+	if ok && time.Now().After(expiresAt.Add(-1*time.Minute)) {
+		return "", false
+	}
+	return strings.TrimPrefix(token, "Bearer "), true
+}
+
 func TokenStatus(item ProfileSession) (string, string) {
 	token := firstNonEmpty(item.AccessToken, item.IDToken)
 	if token == "" {

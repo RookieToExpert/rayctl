@@ -36,10 +36,16 @@ func (s *UserService) Get(ctx context.Context, identifier string, includeJobs bo
 		return nil, err
 	}
 
-	var jobList *JobClusterListResult
+	var jobList []JobClusterItem
 	if includeJobs {
+		submitters := make([]string, 0, len(users))
+		for _, user := range users {
+			if username := strings.TrimSpace(user.Username); username != "" {
+				submitters = append(submitters, username)
+			}
+		}
 		jobService := NewJobService(nil, nil, s.vcClient)
-		jobList, err = jobService.GetCurrentTenantClusterJobs(ctx, false, "")
+		jobList, err = jobService.GetCurrentTenantUserJobs(ctx, submitters)
 		if err != nil {
 			return nil, err
 		}
@@ -48,8 +54,8 @@ func (s *UserService) Get(ctx context.Context, identifier string, includeJobs bo
 	results := make([]*UserGetResult, 0, len(users))
 	for _, user := range users {
 		submittedJobs := make([]JobClusterItem, 0)
-		if includeJobs && jobList != nil {
-			for _, item := range jobList.Items {
+		if includeJobs {
+			for _, item := range jobList {
 				submitter := strings.TrimSpace(item.Submitter)
 				if submitter == "" {
 					continue
