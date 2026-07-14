@@ -47,13 +47,16 @@ type ECPWorkloadLogItem struct {
 }
 
 type CloudAuditLogOptions struct {
-	Since        string
-	Start        string
-	End          string
-	ServiceType  string
-	ResourceType string
-	Limit        int
-	BearerToken  string
+	Since         string
+	Start         string
+	End           string
+	ServiceType   string
+	ResourceType  string
+	ResourceName  string
+	OperationType string
+	UserName      string
+	Limit         int
+	BearerToken   string
 }
 
 type CloudAuditLogResult struct {
@@ -156,12 +159,17 @@ func (s *LogsService) GetCloudAuditLogs(ctx context.Context, opts CloudAuditLogO
 	}
 	serviceType := strings.ToUpper(strings.TrimSpace(opts.ServiceType))
 	resourceType := normalizeCloudAuditResourceType(serviceType, opts.ResourceType)
+	operationType := normalizeCloudAuditOperationType(resourceType, opts.OperationType)
+	userFilters := cloudAuditUserFilters(ctx, s.vcClient, opts.UserName)
 	query := platform.CloudAuditQuery{
-		Start:        start,
-		End:          end,
-		ServiceType:  serviceType,
-		ResourceType: resourceType,
-		Limit:        opts.Limit,
+		Start:         start,
+		End:           end,
+		ServiceType:   serviceType,
+		ResourceType:  resourceType,
+		ResourceName:  strings.TrimSpace(opts.ResourceName),
+		OperationType: operationType,
+		UserNames:     userFilters,
+		Limit:         opts.Limit,
 	}
 
 	platformResult, err := s.vcClient.QueryCloudAuditEvents(ctx, query, opts.BearerToken)
@@ -205,6 +213,25 @@ func (s *LogsService) GetCloudAuditLogs(ctx context.Context, opts CloudAuditLogO
 		TotalSize:    platformResult.TotalSize,
 		Items:        items,
 	}, nil
+}
+
+func cloudAuditUserFilters(ctx context.Context, vcClient *platform.VirtualClusterClient, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	filters := []string{value}
+	if isUUIDValue(value) || vcClient == nil {
+		return filters
+	}
+	resolved, err := vcClient.ResolveUserIDs(ctx, []string{value})
+	if err != nil {
+		return filters
+	}
+	if userID := strings.TrimSpace(resolved[strings.ToLower(value)]); userID != "" && userID != value {
+		filters = append(filters, userID)
+	}
+	return filters
 }
 
 func cloudAuditUserIdentity(userName string, userID string, resolved map[string]string) (string, string) {
@@ -310,6 +337,21 @@ func normalizeCloudAuditResourceType(serviceType string, value string) string {
 	default:
 		return trimmed
 	}
+}
+
+func normalizeCloudAuditOperationType(resourceType string, value string) string {
+	trimmed := strings.TrimSpace(value)
+	if strings.EqualFold(strings.TrimSpace(resourceType), "vcjob") {
+		switch strings.ToLower(trimmed) {
+		case "createvcjobs":
+			return "createVCJobs"
+		case "updatevcjobs":
+			return "updateVCJobs"
+		case "deletevcjobs":
+			return "deleteVCJobs"
+		}
+	}
+	return trimmed
 }
 
 func normalizeECPWorkloadType(value string) string {

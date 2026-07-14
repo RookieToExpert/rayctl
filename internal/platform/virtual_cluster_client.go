@@ -419,11 +419,14 @@ type ECPWorkloadLogItem struct {
 }
 
 type CloudAuditQuery struct {
-	Start        time.Time
-	End          time.Time
-	ServiceType  string
-	ResourceType string
-	Limit        int
+	Start         time.Time
+	End           time.Time
+	ServiceType   string
+	ResourceType  string
+	ResourceName  string
+	OperationType string
+	UserNames     []string
+	Limit         int
 }
 
 type CloudAuditResult struct {
@@ -1220,6 +1223,49 @@ func (c *VirtualClusterClient) resolveUsernamesWithProfile(ctx context.Context, 
 	return result, nil
 }
 
+func (c *VirtualClusterClient) resolveUserIDsWithProfile(ctx context.Context, profile clientProfile, usernames []string) (map[string]string, error) {
+	result := make(map[string]string, len(usernames))
+	for start := 0; start < len(usernames); start += defaultPageLimit {
+		end := start + defaultPageLimit
+		if end > len(usernames) {
+			end = len(usernames)
+		}
+		chunk := usernames[start:end]
+		filters := make([]string, 0, len(chunk))
+		for _, username := range chunk {
+			filters = append(filters, fmt.Sprintf(`username="%s"`, escapeIAMFilterValue(username)))
+		}
+
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/idp/v1/getUsers"
+		query := u.Query()
+		query.Set("includeAdmin", "true")
+		query.Set("page_token", "1")
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("order_by", "create_time desc")
+		query.Set("filter", strings.Join(filters, " OR "))
+		u.RawQuery = query.Encode()
+
+		var payload iamUserListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		for _, user := range payload.Users {
+			username := strings.TrimSpace(user.Username)
+			id := strings.TrimSpace(user.ID)
+			if username != "" && id != "" {
+				result[strings.ToLower(username)] = id
+			}
+		}
+	}
+	return result, nil
+}
+
+func escapeIAMFilterValue(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
+	return strings.ReplaceAll(value, `"`, `\"`)
+}
+
 func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile clientProfile) ([]IAMUser, error) {
 	pageToken := "1"
 	users := make([]IAMUser, 0)
@@ -1906,6 +1952,59 @@ func (c *VirtualClusterClient) ResolveUsernames(ctx context.Context, ids []strin
 				continue
 			}
 			nextRemaining = append(nextRemaining, id)
+		}
+		remaining = nextRemaining
+	}
+	if len(result) > 0 || success {
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return map[string]string{}, nil
+}
+
+func (c *VirtualClusterClient) ResolveUserIDs(ctx context.Context, usernames []string) (map[string]string, error) {
+	unique := make([]string, 0, len(usernames))
+	seen := make(map[string]struct{}, len(usernames))
+	for _, username := range usernames {
+		username = strings.TrimSpace(username)
+		key := strings.ToLower(username)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, username)
+	}
+	if len(unique) == 0 {
+		return map[string]string{}, nil
+	}
+
+	result := make(map[string]string, len(unique))
+	var lastErr error
+	success := false
+	remaining := append([]string(nil), unique...)
+	for _, profile := range c.orderedProfiles() {
+		if len(remaining) == 0 {
+			break
+		}
+		resolved, err := c.resolveUserIDsWithProfile(ctx, profile, remaining)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		success = true
+		nextRemaining := make([]string, 0, len(remaining))
+		for _, username := range remaining {
+			key := strings.ToLower(strings.TrimSpace(username))
+			if id := strings.TrimSpace(resolved[key]); id != "" {
+				result[key] = id
+				continue
+			}
+			nextRemaining = append(nextRemaining, username)
 		}
 		remaining = nextRemaining
 	}
@@ -2725,6 +2824,28 @@ func buildCloudAuditFilter(query CloudAuditQuery) string {
 	}
 	if value := strings.TrimSpace(query.ResourceType); value != "" {
 		parts = append(parts, fmt.Sprintf("resource_type='%s'", escapeTrailFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.ResourceName); value != "" {
+		parts = append(parts, fmt.Sprintf("resource_name='%s'", escapeTrailFilterValue(value)))
+	}
+	if value := strings.TrimSpace(query.OperationType); value != "" {
+		parts = append(parts, fmt.Sprintf("operation_type='%s'", escapeTrailFilterValue(value)))
+	}
+	userParts := make([]string, 0, len(query.UserNames))
+	seenUsers := make(map[string]struct{}, len(query.UserNames))
+	for _, userName := range query.UserNames {
+		value := strings.TrimSpace(userName)
+		if value == "" {
+			continue
+		}
+		if _, ok := seenUsers[value]; ok {
+			continue
+		}
+		seenUsers[value] = struct{}{}
+		userParts = append(userParts, fmt.Sprintf("user_name='%s'", escapeTrailFilterValue(value)))
+	}
+	if len(userParts) > 0 {
+		parts = append(parts, "("+strings.Join(userParts, " OR ")+")")
 	}
 	return strings.Join(parts, " AND ")
 }

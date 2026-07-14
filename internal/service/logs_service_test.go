@@ -23,6 +23,15 @@ func TestNormalizeCloudAuditResourceType(t *testing.T) {
 	}
 }
 
+func TestNormalizeCloudAuditOperationType(t *testing.T) {
+	if got := normalizeCloudAuditOperationType("vcjob", "deletevcjobs"); got != "deleteVCJobs" {
+		t.Fatalf("operation type = %q", got)
+	}
+	if got := normalizeCloudAuditOperationType("compute.ecp.v1.virtualCluster", "customOperation"); got != "customOperation" {
+		t.Fatalf("custom operation type = %q", got)
+	}
+}
+
 func TestCloudAuditTimeRangeExplicitUTC8(t *testing.T) {
 	start, end, err := cloudAuditTimeRange("24h", "2026-07-12 00:00:00", "2026-07-13 00:00:00")
 	if err != nil {

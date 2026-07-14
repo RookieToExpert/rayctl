@@ -38,6 +38,9 @@ func newLogsCloudAuditCmd() *cobra.Command {
 	var end string
 	var serviceType string
 	var resourceType string
+	var resourceName string
+	var operationType string
+	var userName string
 	var limit int
 	var bearerToken string
 	var long bool
@@ -47,6 +50,7 @@ func newLogsCloudAuditCmd() *cobra.Command {
 		Short: "查询全平台云审计日志",
 		Example: strings.Join([]string{
 			"rayctl logs audit --service ECP --resource-type vcjob --since 2h",
+			"rayctl logs audit -s ECP -r vcjob -n huawei-8node1 -o deletevcjobs -u wangwenxuan.p",
 			"rayctl logs audit --service ECP --resource-type vcluster --start '2026-07-12 00:00:00' --end '2026-07-13 00:00:00'",
 			"rayctl logs audit --service IAM --since 24h",
 		}, "\n"),
@@ -67,13 +71,16 @@ func newLogsCloudAuditCmd() *cobra.Command {
 
 			svc := service.NewLogsService(vcClient)
 			result, err := svc.GetCloudAuditLogs(context.Background(), service.CloudAuditLogOptions{
-				Since:        since,
-				Start:        start,
-				End:          end,
-				ServiceType:  serviceType,
-				ResourceType: resourceType,
-				Limit:        limit,
-				BearerToken:  token,
+				Since:         since,
+				Start:         start,
+				End:           end,
+				ServiceType:   serviceType,
+				ResourceType:  resourceType,
+				ResourceName:  resourceName,
+				OperationType: operationType,
+				UserName:      userName,
+				Limit:         limit,
+				BearerToken:   token,
 			})
 			if err != nil {
 				return err
@@ -87,6 +94,9 @@ func newLogsCloudAuditCmd() *cobra.Command {
 	auditCmd.Flags().StringVar(&end, "end", "", "结束时间，支持 RFC3339 或 UTC+8 的 2006-01-02 15:04:05")
 	auditCmd.Flags().StringVarP(&serviceType, "service", "s", "", "云服务类型，例如 ECP、IAM、ECS")
 	auditCmd.Flags().StringVarP(&resourceType, "resource-type", "r", "", "资源类型，例如 vcjob、vcluster、node；支持完整资源类型")
+	auditCmd.Flags().StringVarP(&resourceName, "resource-name", "n", "", "资源名称，例如 VCJob 名称")
+	auditCmd.Flags().StringVarP(&operationType, "operation-type", "o", "", "操作类型，例如 createVCJobs、updateVCJobs、deleteVCJobs")
+	auditCmd.Flags().StringVarP(&userName, "user", "u", "", "操作用户 username")
 	auditCmd.Flags().IntVar(&limit, "limit", 40, "返回审计日志条数")
 	auditCmd.Flags().StringVar(&bearerToken, "bearer-token", "", "控制台 Bearer token；默认读取 rayctl auth login 缓存")
 	auditCmd.Flags().BoolVarP(&long, "long", "l", false, "显示 USER ID 等详细字段")
