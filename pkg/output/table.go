@@ -252,13 +252,14 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 		for _, pvc := range result.PersistentVolumeClaims {
 			pvcRows = append(pvcRows, []string{
 				emptyDash(pvc.ClaimName),
+				emptyDash(pvc.Status),
 				emptyDash(pvc.FrontendVolume),
 			})
 		}
 		printBoxTableWithMaxWidths(
-			[]string{"VIRTUAL PVC", "AFS/AOSS ENDPOINT"},
+			[]string{"VIRTUAL PVC", "STATUS", "AFS/AOSS ENDPOINT"},
 			pvcRows,
-			[]int{32, 32},
+			[]int{32, 12, 32},
 		)
 	}
 

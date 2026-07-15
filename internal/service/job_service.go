@@ -190,6 +190,8 @@ type VolumeClaimRef struct {
 	HostPVCName      string
 	HostPVCNamespace string
 	FrontendVolume   string
+	Status           string
+	Message          string
 }
 
 type PVCCheckItem struct {
@@ -1139,6 +1141,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 	formatDuration := time.Since(formatBegin)
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
 	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
+	stage, diagnosis = ensurePVCGetDiagnosis(status, terminal, stage, diagnosis, pvcRefs)
 	imagePullSecrets = s.resolveImagePullSecretsFromKube(ctx, firstNonEmpty(identity.HostNamespace, identity.Namespace), imagePullSecrets)
 
 	return &JobGetResult{
@@ -1594,6 +1597,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 	formatDuration := time.Since(formatBegin)
 	imagePullSecrets, pvcRefs := extractJobSpecDetails(job)
 	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
+	stage, diagnosis = ensurePVCGetDiagnosis(status, terminal, stage, diagnosis, pvcRefs)
 	imagePullSecrets = s.resolveImagePullSecrets(ctx, &identity, imagePullSecrets)
 
 	return &JobGetResult{
@@ -3121,10 +3125,15 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 
 	for _, ref := range refs {
 		current := ref
+		if strings.TrimSpace(current.PVName) != "" {
+			current.Status = "Bound"
+		}
 		switch {
 		case s.vcClient != nil && vclusterName != "" && namespace != "":
 			pvc, err := s.vcClient.GetPersistentVolumeClaim(ctx, vclusterName, namespace, ref.ClaimName)
 			if err == nil {
+				current.Status = dashIfEmpty(string(pvc.Status.Phase))
+				current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
 				current.PVName = strings.TrimSpace(pvc.Spec.VolumeName)
 				if current.PVName != "" {
 					if pv, pvErr := s.clientset.CoreV1().PersistentVolumes().Get(ctx, current.PVName, metav1.GetOptions{}); pvErr == nil {
@@ -3137,11 +3146,25 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 					}
 				}
 				s.enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx, vclusterName, namespace, pvc, &current)
+			} else {
+				current.Status = "Unknown"
+				current.Message = classifyPVCErrorMessage(err)
+				if current.Message == "PVC 在当前集群不存在" {
+					current.Status = "NotFound"
+				}
 			}
 		case hostNamespace != "":
 			pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, ref.ClaimName, metav1.GetOptions{})
 			if err == nil {
+				current.Status = dashIfEmpty(string(pvc.Status.Phase))
+				current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
 				current.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
+			} else {
+				current.Status = "Unknown"
+				current.Message = classifyPVCErrorMessage(err)
+				if current.Message == "PVC 在当前集群不存在" {
+					current.Status = "NotFound"
+				}
 			}
 		}
 		if strings.TrimSpace(current.FrontendVolume) == "" {
@@ -3153,6 +3176,32 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 	}
 
 	return resolved
+}
+
+func ensurePVCGetDiagnosis(status string, terminal bool, stage string, diagnosis []string, refs []VolumeClaimRef) (string, []string) {
+	if terminal || strings.EqualFold(strings.TrimSpace(status), "Running") {
+		return stage, diagnosis
+	}
+
+	message := ""
+	for _, ref := range refs {
+		if strings.EqualFold(strings.TrimSpace(ref.Status), "NotFound") || ref.Message == "PVC 在当前集群不存在" {
+			message = "存在 PVC 在当前集群不存在，任务因此无法继续调度。"
+			break
+		}
+		if strings.EqualFold(strings.TrimSpace(ref.Status), string(corev1.ClaimPending)) {
+			message = "PVC 仍处于 Pending，当前大概率是 AFS 的 AK/SK 错误。"
+		}
+	}
+	if message == "" {
+		return stage, diagnosis
+	}
+	for _, existing := range diagnosis {
+		if strings.Contains(existing, "PVC") {
+			return firstNonEmpty(stage, "scheduling"), diagnosis
+		}
+	}
+	return firstNonEmpty(stage, "scheduling"), append([]string{message}, diagnosis...)
 }
 
 func (s *JobService) enrichHostVolumeClaimRef(ctx context.Context, ref *VolumeClaimRef) {
