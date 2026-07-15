@@ -47,7 +47,8 @@ func newJobGetCmd() *cobra.Command {
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
 			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
 			for i, identifier := range args {
-				results, err := jobService.GetJobs(context.Background(), identifier)
+				queryIdentifier := normalizeJobGetIdentifier(identifier)
+				results, err := jobService.GetJobs(context.Background(), queryIdentifier)
 				if err != nil {
 					return fmt.Errorf("job %q: %w", identifier, err)
 				}
@@ -75,6 +76,10 @@ func newJobGetCmd() *cobra.Command {
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
 	getCmd.AddCommand(newJobGetClusterCmd())
 	return getCmd
+}
+
+func normalizeJobGetIdentifier(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func newJobGetClusterCmd() *cobra.Command {
