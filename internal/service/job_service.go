@@ -3264,17 +3264,16 @@ func (s *JobService) enrichObjectStorageVolumeClaimRef(ctx context.Context, host
 	}
 
 	secretName := strings.TrimSpace(pvc.Annotations["secretName"])
-	if secretName == "" {
-		return
+	endpoint := ""
+	if secretName != "" {
+		secret, secretErr := s.clientset.CoreV1().Secrets(hostNamespace).Get(ctx, secretName, metav1.GetOptions{})
+		if secretErr == nil && secret != nil {
+			endpoint = decodeObjectStorageEndpoint(secret)
+		}
 	}
 
-	secret, err := s.clientset.CoreV1().Secrets(hostNamespace).Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil || secret == nil {
-		return
-	}
-
-	if endpoint := decodeObjectStorageEndpoint(secret); endpoint != "" {
-		ref.FrontendVolume = endpoint
+	if location := formatObjectStorageLocation(endpoint, objectStorageBucketFromPVC(pvc)); location != "-" {
+		ref.FrontendVolume = location
 	}
 }
 
@@ -3299,18 +3298,29 @@ func (s *JobService) enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx con
 	}
 
 	secretName := strings.TrimSpace(firstNonEmpty(pvc.Annotations["secretName"], pvc.Annotations["afs.secretName"]))
-	if secretName == "" {
-		return
+	endpoint := ""
+	if secretName != "" {
+		secret, secretErr := s.vcClient.GetSecret(ctx, vclusterName, namespace, secretName)
+		if secretErr == nil && secret != nil {
+			endpoint = decodeObjectStorageEndpoint(secret)
+		}
 	}
 
-	secret, err := s.vcClient.GetSecret(ctx, vclusterName, namespace, secretName)
-	if err != nil || secret == nil {
-		return
+	if location := formatObjectStorageLocation(endpoint, objectStorageBucketFromPVC(pvc)); location != "-" {
+		ref.FrontendVolume = location
 	}
+}
 
-	if endpoint := decodeObjectStorageEndpoint(secret); endpoint != "" {
-		ref.FrontendVolume = endpoint
+func objectStorageBucketFromPVC(pvc *corev1.PersistentVolumeClaim) string {
+	if pvc == nil {
+		return ""
 	}
+	return firstNonEmpty(
+		pvc.Annotations["bucket"],
+		pvc.Annotations["bucketName"],
+		pvc.Annotations["bucket-name"],
+		pvc.Annotations["aoss.bucket"],
+	)
 }
 
 func looksLikeObjectStoragePVC(storageClass string, annotations map[string]string) bool {
