@@ -43,6 +43,7 @@ type PVCCheckResult struct {
 type PVCheckResult struct {
 	HostPVName  string
 	HostPVCName string
+	StorageType string
 	AFSName     string
 	Tenant      string
 }
@@ -218,15 +219,28 @@ func (s *StorageService) CheckPV(ctx context.Context, identifier string) (*PVChe
 	}
 
 	hostPVCName := "-"
+	hostPVCNamespace := ""
 	resourceUID := ""
 	if pv.Spec.ClaimRef != nil {
 		hostPVCName = firstNonEmpty(strings.TrimSpace(pv.Spec.ClaimRef.Name), "-")
+		hostPVCNamespace = strings.TrimSpace(pv.Spec.ClaimRef.Namespace)
 		resourceUID = extractResourceUIDFromName(strings.TrimSpace(pv.Spec.ClaimRef.Name))
 	}
 
+	storageType := "AFS"
 	afsName := "-"
 	tenant := "-"
-	if resourceUID != "" && s.vcClient != nil {
+	var hostPVC *corev1.PersistentVolumeClaim
+	if hostPVCNamespace != "" && hostPVCName != "-" {
+		if pvc, pvcErr := s.clientset.CoreV1().PersistentVolumeClaims(hostPVCNamespace).Get(ctx, hostPVCName, metav1.GetOptions{}); pvcErr == nil {
+			hostPVC = pvc
+		}
+	}
+
+	if isObjectStoragePV(pv, hostPVC) {
+		storageType = "AOSS"
+		afsName = s.resolveObjectStorageLocationForPV(ctx, pv, hostPVC)
+	} else if resourceUID != "" && s.vcClient != nil {
 		resource, resourceErr := s.vcClient.FindStorageVolumeResourceByUID(ctx, resourceUID)
 		if resourceErr == nil && resource != nil {
 			afsName = firstNonEmpty(resource.Name, resource.DisplayName, resource.ID, "-")
@@ -237,9 +251,111 @@ func (s *StorageService) CheckPV(ctx context.Context, identifier string) (*PVChe
 	return &PVCheckResult{
 		HostPVName:  pv.Name,
 		HostPVCName: hostPVCName,
+		StorageType: storageType,
 		AFSName:     afsName,
 		Tenant:      tenant,
 	}, nil
+}
+
+func isObjectStoragePV(pv *corev1.PersistentVolume, pvc *corev1.PersistentVolumeClaim) bool {
+	if pvc != nil {
+		storageClassName := ""
+		if pvc.Spec.StorageClassName != nil {
+			storageClassName = strings.TrimSpace(*pvc.Spec.StorageClassName)
+		}
+		storageClass := firstNonEmpty(
+			storageClassName,
+			pvc.Annotations["volume.kubernetes.io/storage-provisioner"],
+			pvc.Annotations["volume.beta.kubernetes.io/storage-provisioner"],
+		)
+		if looksLikeObjectStoragePVC(storageClass, pvc.Annotations) {
+			return true
+		}
+	}
+
+	if pv == nil {
+		return false
+	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(pv.Spec.StorageClassName)), "aoss") ||
+		strings.Contains(strings.ToLower(strings.TrimSpace(pv.Spec.StorageClassName)), "s3") {
+		return true
+	}
+	if pv.Spec.CSI == nil {
+		return false
+	}
+	driver := strings.ToLower(strings.TrimSpace(pv.Spec.CSI.Driver))
+	if strings.Contains(driver, "aoss") || strings.Contains(driver, "s3") {
+		return true
+	}
+	for key, value := range pv.Spec.CSI.VolumeAttributes {
+		text := strings.ToLower(strings.TrimSpace(key + "=" + value))
+		if strings.Contains(text, "aoss") || strings.Contains(text, "s3") || strings.Contains(text, "bucket") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *StorageService) resolveObjectStorageLocationForPV(ctx context.Context, pv *corev1.PersistentVolume, pvc *corev1.PersistentVolumeClaim) string {
+	endpoint := ""
+	bucket := ""
+	if pvc != nil {
+		endpoint = s.resolveObjectStorageEndpointForPVC(ctx, pvc)
+		bucket = firstNonEmpty(
+			pvc.Annotations["bucket"],
+			pvc.Annotations["bucketName"],
+			pvc.Annotations["bucket-name"],
+			pvc.Annotations["aoss.bucket"],
+		)
+	}
+
+	if pv != nil && pv.Spec.CSI != nil {
+		attributes := pv.Spec.CSI.VolumeAttributes
+		if endpoint == "" {
+			endpoint = firstNonEmptyMapValue(attributes, "endpoint", "domain", "host", "url")
+			endpoint = normalizeEndpointString(endpoint)
+		}
+		if bucket == "" {
+			bucket = firstNonEmptyMapValue(attributes, "bucket", "bucketName", "bucket-name")
+		}
+		if bucket == "" {
+			parts := strings.Split(strings.Trim(strings.TrimSpace(pv.Spec.CSI.VolumeHandle), "/"), "/")
+			if len(parts) > 1 {
+				bucket = strings.TrimSpace(parts[len(parts)-1])
+			}
+		}
+	}
+
+	return formatObjectStorageLocation(endpoint, bucket)
+}
+
+func firstNonEmptyMapValue(values map[string]string, keys ...string) string {
+	for _, wantedKey := range keys {
+		for key, value := range values {
+			if strings.EqualFold(strings.TrimSpace(key), wantedKey) && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
+func formatObjectStorageLocation(endpoint string, bucket string) string {
+	endpoint = strings.TrimSuffix(strings.TrimSpace(endpoint), "/")
+	bucket = strings.Trim(strings.TrimSpace(bucket), "/")
+	switch {
+	case endpoint != "" && bucket != "":
+		if strings.HasSuffix(endpoint, "/"+bucket) || endpoint == bucket {
+			return endpoint
+		}
+		return endpoint + "/" + bucket
+	case endpoint != "":
+		return endpoint
+	case bucket != "":
+		return "bucket=" + bucket
+	default:
+		return "-"
+	}
 }
 
 func (s *StorageService) findHostVolumesForAFS(ctx context.Context, resourceUID string) ([]string, []string, error) {

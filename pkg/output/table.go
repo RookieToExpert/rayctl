@@ -1379,10 +1379,14 @@ func PrintPVCheckDetail(result *service.PVCheckResult) {
 		return
 	}
 
+	storageType := strings.ToUpper(strings.TrimSpace(result.StorageType))
+	if storageType == "" {
+		storageType = "AFS"
+	}
 	rows := [][]string{
 		{"HOST PV", emptyDash(result.HostPVName)},
 		{"HOST PVC", emptyDash(result.HostPVCName)},
-		{"AFS", emptyDash(result.AFSName)},
+		{storageType, emptyDash(result.AFSName)},
 	}
 	if strings.TrimSpace(result.Tenant) != "" && strings.TrimSpace(result.Tenant) != "-" {
 		rows = append(rows, []string{"TENANT", emptyDash(result.Tenant)})
