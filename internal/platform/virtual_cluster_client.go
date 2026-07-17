@@ -363,6 +363,28 @@ type iamRoleListResponse struct {
 	TotalSize     int           `json:"total_size"`
 }
 
+type iamResourceScope struct {
+	ID                  string `json:"id"`
+	Scope               string `json:"scope"`
+	ResourceScope       string `json:"resource_scope"`
+	RID                 string `json:"rid"`
+	Name                string `json:"name"`
+	ResourceName        string `json:"resource_name"`
+	DisplayName         string `json:"display_name"`
+	ResourceDisplayName string `json:"resource_display_name"`
+	ResourceType        string `json:"resource_type"`
+	Type                string `json:"type"`
+}
+
+type iamResourceScopeListResponse struct {
+	Scopes         []iamResourceScope `json:"scopes"`
+	ResourceScopes []iamResourceScope `json:"resource_scopes"`
+	ScopeInfos     []iamResourceScope `json:"scope_infos"`
+	Resources      []iamResourceScope `json:"resources"`
+	Items          []iamResourceScope `json:"items"`
+	NextPageToken  string             `json:"next_page_token"`
+}
+
 type aiComputeNodeListResponse struct {
 	AIComputeNodes []AIComputeNode `json:"ai_compute_nodes"`
 }
@@ -1697,6 +1719,82 @@ func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string
 		pageToken = strconv.Itoa(current + 1)
 	}
 	return result, nil
+}
+
+func (c *VirtualClusterClient) FindIAMResourceScope(ctx context.Context, name string, searchTerm string, bearerToken string) (*StorageVolumeResource, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+	name = strings.TrimSpace(name)
+	searchTerm = strings.TrimSpace(searchTerm)
+	bearerToken = strings.TrimSpace(bearerToken)
+	if name == "" {
+		return nil, fmt.Errorf("resource name is required")
+	}
+	if searchTerm == "" {
+		searchTerm = name
+	}
+	if bearerToken == "" {
+		return nil, fmt.Errorf("bearer token is required for IAM resource scope lookup")
+	}
+
+	pageToken := "1"
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = "/iam/authz/v1/services/rm/levels/resources/scopes"
+		query := u.Query()
+		query.Set("filter", fmt.Sprintf(`name="*%s*" OR display_name="*%s*"`, searchTerm, searchTerm))
+		query.Set("page_token", pageToken)
+		query.Set("page_size", "50")
+		query.Set("order_by", "create_time desc")
+		u.RawQuery = query.Encode()
+
+		var payload iamResourceScopeListResponse
+		if err := c.getJSONWithBearerProfile(ctx, profile, u.String(), bearerToken, &payload); err != nil {
+			return nil, err
+		}
+		items := payload.Scopes
+		if len(items) == 0 {
+			items = payload.ResourceScopes
+		}
+		if len(items) == 0 {
+			items = payload.ScopeInfos
+		}
+		if len(items) == 0 {
+			items = payload.Resources
+		}
+		if len(items) == 0 {
+			items = payload.Items
+		}
+		for _, item := range items {
+			itemName := firstNonEmpty(strings.TrimSpace(item.Name), strings.TrimSpace(item.ResourceName))
+			displayName := firstNonEmpty(strings.TrimSpace(item.DisplayName), strings.TrimSpace(item.ResourceDisplayName))
+			if !strings.EqualFold(itemName, name) && !strings.EqualFold(displayName, name) {
+				continue
+			}
+			scope := firstNonEmpty(strings.TrimSpace(item.Scope), strings.TrimSpace(item.ResourceScope), strings.TrimSpace(item.RID))
+			if scope == "" {
+				continue
+			}
+			return &StorageVolumeResource{
+				ID:           strings.TrimSpace(item.ID),
+				RID:          scope,
+				Name:         firstNonEmpty(itemName, name),
+				DisplayName:  displayName,
+				Type:         strings.TrimSpace(item.Type),
+				ResourceType: strings.TrimSpace(item.ResourceType),
+				ProfileName:  profile.Name,
+			}, nil
+		}
+
+		nextPageToken := strings.TrimSpace(payload.NextPageToken)
+		if nextPageToken == "" || nextPageToken == pageToken || len(items) == 0 {
+			break
+		}
+		pageToken = nextPageToken
+	}
+	return nil, fmt.Errorf("IAM resource scope %q not found", name)
 }
 
 func (c *VirtualClusterClient) SetIAMPolicy(ctx context.Context, payload IAMSetPolicyRequest, bearerToken string) (*IAMSetPolicyResponse, error) {

@@ -118,8 +118,11 @@ type AuthRoleItem struct {
 }
 
 type authRoleDefinition struct {
-	Alias    string
-	RoleName string
+	Alias       string
+	RoleName    string
+	RoleID      string
+	DisplayName string
+	Description string
 }
 
 func NewAuthService(vcClient *platform.VirtualClusterClient) *AuthService {
@@ -131,6 +134,10 @@ func (s *AuthService) GetAFS(ctx context.Context, afsName string) (*AuthAFSResul
 }
 
 func (s *AuthService) GetResourceAuth(ctx context.Context, resourceType string, resourceName string) (*AuthAFSResult, error) {
+	return s.GetResourceAuthWithBearer(ctx, resourceType, resourceName, "")
+}
+
+func (s *AuthService) GetResourceAuthWithBearer(ctx context.Context, resourceType string, resourceName string, bearerToken string) (*AuthAFSResult, error) {
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for auth lookup")
 	}
@@ -143,7 +150,7 @@ func (s *AuthService) GetResourceAuth(ctx context.Context, resourceType string, 
 		return nil, fmt.Errorf("%s name is required", resourceType)
 	}
 
-	resource, err := s.findGrantResource(ctx, resourceType, resourceName)
+	resource, err := s.findGrantResource(ctx, resourceType, resourceName, bearerToken)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
 	}
@@ -215,22 +222,28 @@ func (s *AuthService) GetResourceRoles(ctx context.Context, resourceType string)
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
 	roleByName := make(map[string]platform.IAMRoleInfo, len(roles))
+	roleByID := make(map[string]platform.IAMRoleInfo, len(roles))
 	for _, role := range roles {
 		roleName := strings.TrimSpace(role.RoleName)
-		if roleName == "" {
-			continue
+		if roleName != "" {
+			roleByName[roleName] = role
 		}
-		roleByName[roleName] = role
+		if roleID := strings.TrimSpace(role.ID); roleID != "" {
+			roleByID[roleID] = role
+		}
 	}
 	items := make([]AuthRoleItem, 0, len(defs))
 	for _, def := range defs {
 		role := roleByName[def.RoleName]
+		if strings.TrimSpace(role.ID) == "" && strings.TrimSpace(def.RoleID) != "" {
+			role = roleByID[def.RoleID]
+		}
 		items = append(items, AuthRoleItem{
 			Alias:       def.Alias,
-			RoleName:    def.RoleName,
-			DisplayName: strings.TrimSpace(role.DisplayName),
-			Description: strings.TrimSpace(role.Description),
-			RoleID:      strings.TrimSpace(role.ID),
+			RoleName:    firstNonEmpty(strings.TrimSpace(role.RoleName), def.RoleName),
+			DisplayName: firstNonEmpty(strings.TrimSpace(role.DisplayName), def.DisplayName),
+			Description: firstNonEmpty(strings.TrimSpace(role.Description), def.Description),
+			RoleID:      firstNonEmpty(strings.TrimSpace(role.ID), def.RoleID),
 			Service:     strings.TrimSpace(role.AvailableService),
 		})
 	}
@@ -366,7 +379,7 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 	}
 
 	if scope == "" {
-		resource, err := s.findGrantResource(ctx, resourceType, resourceName)
+		resource, err := s.findGrantResource(ctx, resourceType, resourceName, req.BearerToken)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
 		}
@@ -404,7 +417,7 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 	if err != nil {
 		return nil, fmt.Errorf("list binding policies: %w", err)
 	}
-	if policyID := existingGrantPolicyID(policies, scope, memberType, memberValue, roleName); policyID != "" {
+	if policyID := existingGrantPolicyID(policies, scope, memberType, memberValue, roleName, roleID); policyID != "" {
 		result.Result = "already exists"
 		result.PolicyID = policyID
 		return result, nil
@@ -486,7 +499,7 @@ func (s *AuthService) RemoveAFS(ctx context.Context, req AuthGrantAFSRequest) (*
 	}
 
 	if scope == "" {
-		resource, err := s.findGrantResource(ctx, resourceType, resourceName)
+		resource, err := s.findGrantResource(ctx, resourceType, resourceName, req.BearerToken)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
 		}
@@ -612,18 +625,36 @@ func (s *AuthService) resolveGrantRole(ctx context.Context, resourceType string,
 	if roleName == "" {
 		return "", "", fmt.Errorf("role is required")
 	}
+	roleID := ""
+	roleLabel := ""
+	for _, def := range grantRoleDefinitions(resourceType) {
+		if strings.EqualFold(strings.TrimSpace(roleName), strings.TrimSpace(def.RoleName)) ||
+			strings.EqualFold(strings.TrimSpace(roleName), strings.TrimSpace(def.RoleID)) ||
+			strings.EqualFold(strings.TrimSpace(role), strings.TrimSpace(def.Alias)) {
+			roleID = strings.TrimSpace(def.RoleID)
+			roleLabel = firstNonEmpty(strings.TrimSpace(def.RoleName), strings.TrimSpace(def.DisplayName), strings.TrimSpace(def.Alias))
+			if strings.TrimSpace(def.RoleName) != "" {
+				roleName = strings.TrimSpace(def.RoleName)
+			}
+			break
+		}
+	}
 	roles, err := s.vcClient.ListIAMRoles(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("list roles: %w", err)
 	}
 	for _, item := range roles {
-		if strings.TrimSpace(item.RoleName) != roleName {
+		if strings.TrimSpace(item.RoleName) != roleName && (roleID == "" || strings.TrimSpace(item.ID) != roleID) {
 			continue
 		}
 		if strings.TrimSpace(item.ID) == "" {
 			return "", "", fmt.Errorf("role %q has empty id", roleName)
 		}
-		return roleName, strings.TrimSpace(item.ID), nil
+		resolvedName := firstNonEmpty(strings.TrimSpace(item.RoleName), strings.TrimSpace(item.DisplayName), roleName)
+		return resolvedName, strings.TrimSpace(item.ID), nil
+	}
+	if roleID != "" {
+		return firstNonEmpty(roleLabel, roleName), roleID, nil
 	}
 	return "", "", fmt.Errorf("role %q not found", roleName)
 }
@@ -656,6 +687,25 @@ func grantRoleDefinitions(resourceType string) []authRoleDefinition {
 			{Alias: "reader", RoleName: "vpc.reader"},
 			{Alias: "editor", RoleName: "vpc.editor"},
 		}
+	case "vpc":
+		return []authRoleDefinition{
+			{Alias: "reader", RoleName: "vpc.reader", RoleID: "f7c50b68-0e30-4b7c-a0cb-47bb4c8d9adc"},
+			{Alias: "editor", RoleName: "vpc.editor", RoleID: "d09129e9-f5a3-072b-1bf8-f881709a9099"},
+		}
+	case "eip":
+		return []authRoleDefinition{
+			{Alias: "reader", RoleName: "eip.reader", RoleID: "2c291f49-aad8-44ad-971f-4620e7b6233c"},
+			{Alias: "editor", RoleName: "eip.editor", RoleID: "5f6146ff-0434-0948-ae6a-4a4823b5a239"},
+		}
+	case "natgateway":
+		return []authRoleDefinition{
+			{
+				Alias:       "operator",
+				RoleID:      "246b7558-2db8-4602-9b8c-bb4464506ef6",
+				DisplayName: "DNAT 操作员",
+				Description: "允许管理 NAT Gateway 的 DNAT 规则。",
+			},
+		}
 	case "ais":
 		return []authRoleDefinition{
 			{Alias: "owner", RoleName: "ais.instanceOwner"},
@@ -678,6 +728,12 @@ func normalizeGrantRoleName(resourceType string, role string) string {
 			return "ccr.namespaceUser"
 		case "subnet":
 			return "vpc.reader"
+		case "vpc":
+			return "vpc.reader"
+		case "eip":
+			return "eip.reader"
+		case "natgateway":
+			return "246b7558-2db8-4602-9b8c-bb4464506ef6"
 		case "ais":
 			return "ais.instanceOwner"
 		default:
@@ -712,12 +768,24 @@ func normalizeGrantRoleName(resourceType string, role string) string {
 		case "owner", "namespaceowner", "namespace-owner":
 			return "ccr.namespaceOwner"
 		}
-	case "subnet":
+	case "subnet", "vpc":
 		switch normalized {
 		case "reader", "read", "viewer", "view":
 			return "vpc.reader"
 		case "editor", "edit":
 			return "vpc.editor"
+		}
+	case "eip":
+		switch normalized {
+		case "reader", "read", "viewer", "view":
+			return "eip.reader"
+		case "editor", "edit":
+			return "eip.editor"
+		}
+	case "natgateway":
+		switch normalized {
+		case "operator", "operate", "dnat", "dnatoperator", "dnat-operator":
+			return "246b7558-2db8-4602-9b8c-bb4464506ef6"
 		}
 	case "ais":
 		switch normalized {
@@ -762,6 +830,12 @@ func normalizeGrantResourceType(resourceType string) string {
 		return "ccr"
 	case "subnet":
 		return "subnet"
+	case "vpc", "virtualprivatecloud", "virtual-private-cloud":
+		return "vpc"
+	case "eip", "elasticip", "elastic-ip":
+		return "eip"
+	case "nat", "dnat", "natgateway", "nat-gateway", "nat_gateway":
+		return "natgateway"
 	case "ais", "ai", "aispace", "ai-space", "ai_spaces":
 		return "ais"
 	default:
@@ -769,7 +843,7 @@ func normalizeGrantResourceType(resourceType string) string {
 	}
 }
 
-func (s *AuthService) findGrantResource(ctx context.Context, resourceType string, name string) (*platform.StorageVolumeResource, error) {
+func (s *AuthService) findGrantResource(ctx context.Context, resourceType string, name string, bearerToken string) (*platform.StorageVolumeResource, error) {
 	switch normalizeGrantResourceType(resourceType) {
 	case "afs":
 		return s.vcClient.FindStorageVolumeResource(ctx, name)
@@ -779,6 +853,12 @@ func (s *AuthService) findGrantResource(ctx context.Context, resourceType string
 		return s.vcClient.FindResourceByName(ctx, name, "namespaces")
 	case "subnet":
 		return s.vcClient.FindResourceByName(ctx, name, "subnets")
+	case "vpc":
+		return s.vcClient.FindIAMResourceScope(ctx, name, "vpc", bearerToken)
+	case "eip":
+		return s.vcClient.FindIAMResourceScope(ctx, name, "eip", bearerToken)
+	case "natgateway":
+		return s.vcClient.FindIAMResourceScope(ctx, name, "nat", bearerToken)
 	case "ais":
 		return s.vcClient.FindResourceByName(ctx, name, "aiSpaces")
 	default:
@@ -811,7 +891,7 @@ func emptyIAMPolicyCondition() platform.IAMPolicyCondition {
 	}
 }
 
-func existingGrantPolicyID(policies []platform.IAMBindingPolicy, scope string, memberType string, memberValue string, roleName string) string {
+func existingGrantPolicyID(policies []platform.IAMBindingPolicy, scope string, memberType string, memberValue string, roleName string, roleID string) string {
 	for _, policy := range policies {
 		if !strings.EqualFold(strings.TrimSpace(policy.MemberType), strings.TrimSpace(memberType)) {
 			continue
@@ -823,7 +903,7 @@ func existingGrantPolicyID(policies []platform.IAMBindingPolicy, scope string, m
 			continue
 		}
 		for _, role := range policy.RoleInfos {
-			if strings.TrimSpace(role.RoleName) == roleName {
+			if strings.TrimSpace(role.RoleName) == roleName || (strings.TrimSpace(roleID) != "" && strings.TrimSpace(role.ID) == strings.TrimSpace(roleID)) {
 				return strings.TrimSpace(policy.ID)
 			}
 		}

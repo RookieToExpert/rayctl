@@ -55,6 +55,9 @@ func newAuthCheckCmd() *cobra.Command {
 	checkCmd.AddCommand(newAuthCheckResourceCmd("ccr", "ccr <namespace-name>", "查看 CCR namespace 归属的用户/用户组授权"))
 	checkCmd.AddCommand(newAuthCheckResourceCmd("subnet", "subnet <subnet-name>", "查看 Subnet 归属的用户/用户组授权"))
 	checkCmd.AddCommand(newAuthCheckResourceCmd("ais", "ais <ais-name>", "查看开发机 AI Space 归属的用户/用户组授权"))
+	checkCmd.AddCommand(newAuthCheckResourceCmd("vpc", "vpc <vpc-name>", "查看 VPC 归属的用户/用户组授权"))
+	checkCmd.AddCommand(newAuthCheckResourceCmd("eip", "eip <eip-name>", "查看 EIP 归属的用户/用户组授权"))
+	checkCmd.AddCommand(newAuthCheckResourceCmd("natgateway", "natgateway <natgateway-name>", "查看 NAT Gateway 归属的用户/用户组授权"))
 	checkCmd.AddCommand(newAuthCheckGroupsCmd())
 	checkCmd.AddCommand(newAuthCheckUserCmd())
 	return checkCmd
@@ -70,6 +73,9 @@ func newAuthGrantCmd() *cobra.Command {
 	grantCmd.AddCommand(newAuthGrantResourceCmd("ccr", "ccr <namespace-name>", "给 CCR namespace 授权用户或用户组", "CCR 角色: user/imageUser/owner 或完整 role_name"))
 	grantCmd.AddCommand(newAuthGrantResourceCmd("subnet", "subnet <subnet-name>", "给 Subnet 授权用户或用户组", "Subnet 角色: reader/editor 或完整 role_name"))
 	grantCmd.AddCommand(newAuthGrantResourceCmd("ais", "ais <ais-name>", "给开发机 AI Space 授权用户或用户组", "AIS 角色: owner 或完整 role_name"))
+	grantCmd.AddCommand(newAuthGrantResourceCmd("vpc", "vpc <vpc-name>", "给 VPC 授权用户或用户组", "VPC 角色: reader/editor 或完整 role_name"))
+	grantCmd.AddCommand(newAuthGrantResourceCmd("eip", "eip <eip-name>", "给 EIP 授权用户或用户组", "EIP 角色: reader/editor 或完整 role_name"))
+	grantCmd.AddCommand(newAuthGrantResourceCmd("natgateway", "natgateway <natgateway-name>", "给 NAT Gateway 授权用户或用户组", "NAT Gateway 角色: operator 或完整 role id/name"))
 	return grantCmd
 }
 
@@ -80,6 +86,9 @@ func newAuthRemoveCmd() *cobra.Command {
 	removeCmd.AddCommand(newAuthRemoveResourceCmd("ccr", "ccr <namespace-name>", "移除 CCR namespace 授权", "CCR 角色: user/imageUser/owner 或完整 role_name"))
 	removeCmd.AddCommand(newAuthRemoveResourceCmd("subnet", "subnet <subnet-name>", "移除 Subnet 授权", "Subnet 角色: reader/editor 或完整 role_name"))
 	removeCmd.AddCommand(newAuthRemoveResourceCmd("ais", "ais <ais-name>", "移除开发机 AI Space 授权", "AIS 角色: owner 或完整 role_name"))
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("vpc", "vpc <vpc-name>", "移除 VPC 授权", "VPC 角色: reader/editor 或完整 role_name"))
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("eip", "eip <eip-name>", "移除 EIP 授权", "EIP 角色: reader/editor 或完整 role_name"))
+	removeCmd.AddCommand(newAuthRemoveResourceCmd("natgateway", "natgateway <natgateway-name>", "移除 NAT Gateway 授权", "NAT Gateway 角色: operator 或完整 role id/name"))
 	return removeCmd
 }
 
@@ -93,6 +102,9 @@ func newAuthRolesCmd() *cobra.Command {
 	rolesCmd.AddCommand(newAuthRolesResourceCmd("ccr", "ccr", "查看 CCR namespace 可授权角色"))
 	rolesCmd.AddCommand(newAuthRolesResourceCmd("subnet", "subnet", "查看 Subnet 可授权角色"))
 	rolesCmd.AddCommand(newAuthRolesResourceCmd("ais", "ais", "查看开发机 AI Space 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("vpc", "vpc", "查看 VPC 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("eip", "eip", "查看 EIP 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesResourceCmd("natgateway", "natgateway", "查看 NAT Gateway 可授权角色"))
 	return rolesCmd
 }
 
@@ -101,14 +113,17 @@ func newAuthCheckAFSCmd() *cobra.Command {
 }
 
 func newAuthCheckResourceCmd(resourceType string, use string, short string) *cobra.Command {
-	return &cobra.Command{
+	var bearerToken string
+	cmd := &cobra.Command{
 		Use:   use,
 		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuthCheckResource(cmd, resourceType, args[0])
+			return runAuthCheckResource(cmd, resourceType, args[0], bearerToken)
 		},
 	}
+	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "控制台 Bearer token；也可使用当前 auth login session")
+	return cmd
 }
 
 func newAuthCheckGroupsCmd() *cobra.Command {
@@ -192,6 +207,20 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
+			token := ""
+			tokenSource := ""
+			tokenDebugPrinted := false
+			if authResourceScopeRequiresBearer(resourceType) && strings.TrimSpace(scope) == "" {
+				var tokenErr error
+				token, tokenSource, tokenErr = bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+				if tokenErr != nil {
+					return tokenErr
+				}
+				if debugAuth {
+					fmt.Fprintf(cmd.ErrOrStderr(), "auth grant debug: bearer source=%s %s\n", tokenSource, bearerDebugSummary(token))
+					tokenDebugPrinted = true
+				}
+			}
 
 			req := service.AuthGrantAFSRequest{
 				ResourceType:     resourceType,
@@ -201,6 +230,7 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 				MemberIdentifier: memberIdentifier,
 				Role:             role,
 				DryRun:           dryRun,
+				BearerToken:      token,
 			}
 
 			authService := service.NewAuthService(vcClient)
@@ -236,13 +266,16 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 			}
 
 			req.DryRun = false
-			token, source, err := bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
-			if err != nil {
-				return err
+			if token == "" {
+				var tokenErr error
+				token, tokenSource, tokenErr = bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+				if tokenErr != nil {
+					return tokenErr
+				}
 			}
 			req.BearerToken = token
-			if debugAuth {
-				fmt.Fprintf(cmd.ErrOrStderr(), "auth grant debug: bearer source=%s %s\n", source, bearerDebugSummary(token))
+			if debugAuth && !tokenDebugPrinted {
+				fmt.Fprintf(cmd.ErrOrStderr(), "auth grant debug: bearer source=%s %s\n", tokenSource, bearerDebugSummary(token))
 			}
 			result, err = authService.GrantAFS(context.Background(), req)
 			if err != nil {
@@ -503,22 +536,40 @@ func newAuthTokenCmd() *cobra.Command {
 }
 
 func runAuthCheckAFS(cmd *cobra.Command, args []string) error {
-	return runAuthCheckResource(cmd, "afs", args[0])
+	return runAuthCheckResource(cmd, "afs", args[0], "")
 }
 
-func runAuthCheckResource(cmd *cobra.Command, resourceType string, resourceName string) error {
+func runAuthCheckResource(cmd *cobra.Command, resourceType string, resourceName string, explicitToken string) error {
 	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 	if !ok {
 		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 	}
 
+	bearerToken := ""
+	if authResourceScopeRequiresBearer(resourceType) {
+		var err error
+		bearerToken, _, err = bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, explicitToken)
+		if err != nil {
+			return err
+		}
+	}
+
 	authService := service.NewAuthService(vcClient)
-	result, err := authService.GetResourceAuth(context.Background(), resourceType, resourceName)
+	result, err := authService.GetResourceAuthWithBearer(context.Background(), resourceType, resourceName, bearerToken)
 	if err != nil {
 		return err
 	}
 	output.PrintAuthAFSResult(result)
 	return nil
+}
+
+func authResourceScopeRequiresBearer(resourceType string) bool {
+	switch strings.ToLower(strings.TrimSpace(resourceType)) {
+	case "vpc", "eip", "nat", "dnat", "natgateway", "nat-gateway", "nat_gateway":
+		return true
+	default:
+		return false
+	}
 }
 
 func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool) error {
