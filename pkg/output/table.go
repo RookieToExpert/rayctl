@@ -181,6 +181,7 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 				{"list namespaces", details.Timings.ListNamespaces.String()},
 				{"list pods", details.Timings.ListPods.String()},
 				{"summarize", details.Timings.Summarize.String()},
+				{"resolve vc", details.Timings.ResolveVC.String()},
 				{"service total", details.Timings.Total.String()},
 			},
 		)

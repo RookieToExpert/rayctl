@@ -79,6 +79,7 @@ type DescribeTimings struct {
 	ListNamespaces time.Duration
 	ListPods       time.Duration
 	Summarize      time.Duration
+	ResolveVC      time.Duration
 	Total          time.Duration
 }
 

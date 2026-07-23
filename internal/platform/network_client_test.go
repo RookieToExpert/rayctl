@@ -60,3 +60,35 @@ func TestNetworkResourceAPIs(t *testing.T) {
 		t.Fatalf("ListCurrentStorageVolumeResources() = %#v, %v", afsResources, err)
 	}
 }
+
+func TestFindVirtualClusterResourceByUIDUsesFilteredResourceLookup(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/rmh/v1/resources:page" {
+			return nil, fmt.Errorf("unexpected request path %s", r.URL.Path)
+		}
+		if filter := r.URL.Query().Get("filter"); filter != `uid="*vc-uid*"` {
+			t.Errorf("filter = %q, want uid filter", filter)
+		}
+		body := `{"resources":[{"id":"vc-uid","name":"vc-display-name","rid":"/subscriptions/sub/resourceGroups/default/regions/cn-pj-01/virtualClusters/vc-display-name"}]}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+
+	client := &VirtualClusterClient{
+		accessKey:  "ak",
+		secretKey:  "sk",
+		baseURL:    "https://example.test",
+		httpClient: httpClient,
+	}
+	resource, err := client.FindResourceByUID(context.Background(), "vc-uid", "virtualClusters")
+	if err != nil {
+		t.Fatalf("FindResourceByUID() error = %v", err)
+	}
+	if resource.Name != "vc-display-name" {
+		t.Fatalf("resource name = %q, want vc-display-name", resource.Name)
+	}
+}

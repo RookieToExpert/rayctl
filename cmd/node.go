@@ -217,7 +217,7 @@ func newNodeDescribeCmd() *cobra.Command {
 			"  rayctl node check host-10-140-214-222",
 			"  rayctl node check 10.140.214.222",
 		}, "\n"),
-		Args:    cobra.MinimumNArgs(1),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientBegin := time.Now()
 			clientset, err := kube.NewClientset(kubeconfig)
@@ -227,21 +227,32 @@ func newNodeDescribeCmd() *cobra.Command {
 			clientDuration := time.Since(clientBegin)
 
 			nodeService := service.NewNodeService(clientset)
+			vcClient, hasVCClient := platform.NewVirtualClusterClientFromEnv()
+			resolvedVCNames := make(map[string]string)
 
 			for i, nodeName := range args {
 				resolvedNodeName := normalizeNodeIdentifier(nodeName)
-				details, err := nodeService.Describe(context.Background(), resolvedNodeName)
+				details, err := nodeService.Describe(cmd.Context(), resolvedNodeName)
 				if err != nil {
 					return fmt.Errorf("node %q: %w", nodeName, err)
 				}
-				if vcClient, ok := platform.NewVirtualClusterClientFromEnv(); ok && strings.TrimSpace(details.VClusterUID) != "" {
-					displayNames, err := vcClient.ResolveDisplayNames(context.Background(), []string{details.VClusterUID})
-					if err == nil {
-						if displayName, ok := displayNames[details.VClusterUID]; ok {
-							details.VClusterName = displayName
+
+				resolveVCBegin := time.Now()
+				vcUID := strings.TrimSpace(details.VClusterUID)
+				if hasVCClient && vcUID != "" {
+					if cachedName, ok := resolvedVCNames[vcUID]; ok {
+						details.VClusterName = cachedName
+					} else {
+						resolveCtx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+						resource, resolveErr := vcClient.FindResourceByUID(resolveCtx, vcUID, "virtualClusters")
+						cancel()
+						if resolveErr == nil && strings.TrimSpace(resource.Name) != "" {
+							details.VClusterName = strings.TrimSpace(resource.Name)
 						}
+						resolvedVCNames[vcUID] = details.VClusterName
 					}
 				}
+				details.Timings.ResolveVC = time.Since(resolveVCBegin)
 				if i > 0 {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
