@@ -10,23 +10,23 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
 const (
-	repairUsageLabelKey            = "belong-usage-type"
-	repairUsageLabelValue          = "repair"
-	prodRoleLabelKey               = "node-role.compute.sensecore.cn/prod"
-	genericRoleLabelPrefix         = "node-role.sensecore.cn/"
-	nodeVClusterNamespaceLabelKey  = "cluster.x-k8s.io/vcluster-namespace"
-	nsVClusterNamespaceLabelKey    = "vcluster.loft.sh/vcluster-namespace"
-	metaxGPUResourceName           = "metax-tech.com/gpu"
-	huaweiGPUResourceName          = "huawei.com/Ascend910"
-	metaxGPUTopologyAnnotationKey  = "metax-tech.com/gpu.topology.zones"
+	repairUsageLabelKey           = "belong-usage-type"
+	repairUsageLabelValue         = "repair"
+	prodRoleLabelKey              = "node-role.compute.sensecore.cn/prod"
+	genericRoleLabelPrefix        = "node-role.sensecore.cn/"
+	nodeVClusterNamespaceLabelKey = "cluster.x-k8s.io/vcluster-namespace"
+	nsVClusterNamespaceLabelKey   = "vcluster.loft.sh/vcluster-namespace"
+	metaxGPUResourceName          = "metax-tech.com/gpu"
+	huaweiGPUResourceName         = "huawei.com/Ascend910"
+	metaxGPUTopologyAnnotationKey = "metax-tech.com/gpu.topology.zones"
 )
 
 var nodeSelectorProfiles = map[string]string{
@@ -60,17 +60,18 @@ type NodeMutationResult struct {
 }
 
 type NodeDescribe struct {
-	Hostname         string
-	VClusterName     string
-	VClusterUID      string
-	Unschedulable    bool
-	Repair           bool
-	GPUUsage         string
-	CPUUsage         string
-	MemoryUsage      string
-	Pods             []string
-	MatchedPodCount  int
-	Timings          DescribeTimings
+	Hostname        string
+	VClusterName    string
+	VClusterUID     string
+	Ready           string
+	Unschedulable   bool
+	Repair          bool
+	GPUUsage        string
+	CPUUsage        string
+	MemoryUsage     string
+	Pods            []string
+	MatchedPodCount int
+	Timings         DescribeTimings
 }
 
 type DescribeTimings struct {
@@ -193,14 +194,15 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 	summarizeDuration := time.Since(summarizeBegin)
 
 	return &NodeDescribe{
-		Hostname:        node.Name,
-		VClusterName:    firstNonEmpty(
+		Hostname: node.Name,
+		VClusterName: firstNonEmpty(
 			node.Labels["cluster.x-k8s.io/vcluster-name"],
 			node.Labels["cluster.x-k8s.io/cluster-name"],
 			node.Labels[nodeVClusterNamespaceLabelKey],
 			node.Labels["resource.compute.sensecore.cn/vc-uid"],
 		),
 		VClusterUID:     nodeResolveClusterUID(node.Labels),
+		Ready:           nodeReadyStatus(node.Status.Conditions),
 		Unschedulable:   node.Spec.Unschedulable,
 		Repair:          node.Labels[repairUsageLabelKey] == repairUsageLabelValue,
 		GPUUsage:        formatGPUUsage(allocatedGPU, totalGPU),

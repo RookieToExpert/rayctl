@@ -15,6 +15,16 @@ rayctl node uncordon worker-01
 rayctl node describe worker-01
 rayctl node check worker-01
 rayctl --kubeconfig=/path/to/config node get ecp
+
+# 列出当前 profile 下的资源，或按名称/UID 查看单个资源
+rayctl vpc get
+rayctl vpc get vpc-muxi-ailab
+rayctl subnet get
+rayctl subnet get subnet-muxi-ailab
+rayctl natgw get
+rayctl natgw get nat-muxi-ailab
+rayctl afs get
+rayctl afs get afs-tangrui
 ```
 
 ## Project Initialization

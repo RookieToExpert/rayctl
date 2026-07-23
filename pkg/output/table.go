@@ -134,10 +134,11 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 
 func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}) {
 	printBoxTableWithOptions(
-		[]string{"HOST", "VC", "UNSCH", "RPR", "GPU", "CPU", "MEM", "PODS"},
+		[]string{"HOST", "VC", "RDY", "UNSCH", "RPR", "GPU", "CPU", "MEM", "PODS"},
 		[][]string{{
 			details.Hostname,
 			emptyDash(details.VClusterName),
+			yesNoFromReady(details.Ready),
 			fmt.Sprintf("%t", details.Unschedulable),
 			fmt.Sprintf("%t", details.Repair),
 			details.GPUUsage,
@@ -145,7 +146,7 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 			details.MemoryUsage,
 			fmt.Sprintf("%d", details.MatchedPodCount),
 		}},
-		[]int{24, 20, 5, 5, 8, 12, 12, 5},
+		[]int{24, 20, 3, 5, 5, 8, 12, 12, 5},
 		tableOptions{
 			noWrapCells: makeNoWrapCells(
 				[2]int{0, 0},
@@ -1051,6 +1052,181 @@ func PrintVCDetail(result *service.VCDetailResult) {
 			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
 			minWidths:   []int{8, 24},
 		},
+	)
+}
+
+func PrintVPCList(result *service.VPCListResult) {
+	if result == nil {
+		return
+	}
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	for _, item := range result.Items {
+		rows = append(rows, []string{
+			emptyDash(item.Name), emptyDash(item.State), emptyDash(item.CIDR), emptyDash(item.RDMA),
+			strconv.Itoa(item.SubnetCount), emptyDash(item.NATGateways), emptyDash(item.Region),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"VPC", "STATE", "CIDR", "RDMA", "SUBNETS", "NATGW", "REGION"},
+		rows,
+		[]int{32, 10, 20, 6, 8, 28, 12},
+		tableOptions{minWidths: []int{16, 8, 12, 4, 7, 10, 8}},
+	)
+}
+
+func PrintVPCDetail(result *service.VPCListItem) {
+	if result == nil {
+		return
+	}
+	printResourceDetail([][]string{
+		{"VPC", emptyDash(result.Name)},
+		{"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)},
+		{"CIDR", emptyDash(result.CIDR)},
+		{"RDMA", emptyDash(result.RDMA)},
+		{"DEFAULT", emptyDash(result.Default)},
+		{"SUBNET COUNT", strconv.Itoa(result.SubnetCount)},
+		{"NAT GATEWAY", emptyDash(result.NATGateways)},
+		{"REGION", emptyDash(result.Region)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+		{"UPDATED", emptyDash(result.UpdatedAt)},
+	})
+}
+
+func PrintSubnetList(result *service.SubnetListResult) {
+	if result == nil {
+		return
+	}
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	for _, item := range result.Items {
+		rows = append(rows, []string{
+			emptyDash(item.Name), emptyDash(item.State), emptyDash(item.VPC), emptyDash(item.CIDR),
+			emptyDash(item.AvailableIPs), emptyDash(item.Zone),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"SUBNET", "STATE", "VPC", "CIDR", "AVAILABLE", "ZONE"},
+		rows,
+		[]int{32, 10, 28, 20, 10, 12},
+		tableOptions{minWidths: []int{18, 8, 14, 12, 9, 8}},
+	)
+}
+
+func PrintSubnetDetail(result *service.SubnetListItem) {
+	if result == nil {
+		return
+	}
+	printResourceDetail([][]string{
+		{"SUBNET", emptyDash(result.Name)},
+		{"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)},
+		{"VPC", emptyDash(result.VPC)},
+		{"CIDR", emptyDash(result.CIDR)},
+		{"GATEWAY", emptyDash(result.Gateway)},
+		{"AVAILABLE IPS", emptyDash(result.AvailableIPs)},
+		{"SCOPE", emptyDash(result.Scope)},
+		{"PROVIDER", emptyDash(result.Provider)},
+		{"NETWORK TYPE", emptyDash(result.NetworkType)},
+		{"ZONE", emptyDash(result.Zone)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+		{"UPDATED", emptyDash(result.UpdatedAt)},
+	})
+}
+
+func PrintNATGatewayList(result *service.NATGatewayListResult) {
+	if result == nil {
+		return
+	}
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	for _, item := range result.Items {
+		rows = append(rows, []string{
+			emptyDash(item.Name), emptyDash(item.State), emptyDash(item.VPC), emptyDash(item.Subnet),
+			emptyDash(item.GatewayType), strconv.Itoa(item.EIPCount), strconv.Itoa(item.SNATCount), strconv.Itoa(item.DNATCount),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"NATGW", "STATE", "VPC", "SUBNET", "TYPE", "EIPS", "SNAT", "DNAT"},
+		rows,
+		[]int{30, 10, 26, 26, 10, 6, 6, 6},
+		tableOptions{minWidths: []int{16, 8, 12, 12, 6, 5, 5, 5}},
+	)
+}
+
+func PrintNATGatewayDetail(result *service.NATGatewayListItem) {
+	if result == nil {
+		return
+	}
+	printResourceDetail([][]string{
+		{"NAT GATEWAY", emptyDash(result.Name)},
+		{"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)},
+		{"VPC", emptyDash(result.VPC)},
+		{"SUBNET", emptyDash(result.Subnet)},
+		{"TYPE", emptyDash(result.GatewayType)},
+		{"EIP", emptyDash(result.EIPs)},
+		{"SNAT RULES", strconv.Itoa(result.SNATCount)},
+		{"DNAT RULES", strconv.Itoa(result.DNATCount)},
+		{"ZONE", emptyDash(result.Zone)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+		{"UPDATED", emptyDash(result.UpdatedAt)},
+	})
+}
+
+func PrintAFSList(result *service.AFSListResult) {
+	if result == nil {
+		return
+	}
+	rows := make([][]string, 0, maxInt(1, len(result.Items)))
+	for _, item := range result.Items {
+		rows = append(rows, []string{
+			emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Capacity), emptyDash(item.StorageClass),
+			emptyDash(item.Zone), emptyDash(item.CreatedAt),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"AFS", "STATE", "CAPACITY", "STORAGE CLASS", "ZONE", "CREATED"},
+		rows,
+		[]int{36, 10, 12, 18, 12, 20},
+		tableOptions{minWidths: []int{18, 8, 8, 12, 8, 16}},
+	)
+}
+
+func PrintAFSDetail(result *service.AFSListItem) {
+	if result == nil {
+		return
+	}
+	printResourceDetail([][]string{
+		{"AFS", emptyDash(result.Name)},
+		{"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)},
+		{"CAPACITY", emptyDash(result.Capacity)},
+		{"STORAGE CLASS", emptyDash(result.StorageClass)},
+		{"ZONE", emptyDash(result.Zone)},
+		{"REGION", emptyDash(result.Region)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+		{"UPDATED", emptyDash(result.UpdatedAt)},
+		{"RID", emptyDash(result.RID)},
+	})
+}
+
+func printResourceDetail(rows [][]string) {
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		rows,
+		[]int{18, 100},
+		tableOptions{minWidths: []int{12, 24}},
 	)
 }
 

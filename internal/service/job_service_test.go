@@ -105,3 +105,38 @@ func TestEnrichObjectStorageVolumeClaimRefKeepsBucketWithoutSecret(t *testing.T)
 		t.Fatalf("FrontendVolume = %q, want bucket fallback", ref.FrontendVolume)
 	}
 }
+
+func TestLocateJobByUIDUsesPodOwnerReference(t *testing.T) {
+	const jobUID = "0908d002-fc65-4291-a268-102360023265"
+	clientset := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "vcluster-host-ns",
+			Name:      "uid-fast-path-worker-0",
+			Labels: map[string]string{
+				"volcano.sh/job-name":            "uid-fast-path",
+				"vcluster.loft.sh/vcluster-name": "vc-uid-fast-path",
+				"lepton.sensetime.com/submitter": "tester",
+				"scheduling.k8s.io/group-name":   "uid-fast-path-" + jobUID,
+			},
+			Annotations: map[string]string{
+				"vcluster.loft.sh/namespace":        "default",
+				"vcluster.loft.sh/owner-references": `[{"kind":"Job","name":"uid-fast-path","uid":"` + jobUID + `"}]`,
+			},
+		},
+	})
+	jobService := &JobService{clientset: clientset}
+
+	identity, err := jobService.locateJobForPlatform(context.Background(), jobUID)
+	if err != nil {
+		t.Fatalf("locateJobForPlatform() error = %v", err)
+	}
+	if identity.Name != "uid-fast-path" {
+		t.Fatalf("job name = %q, want uid-fast-path", identity.Name)
+	}
+	if identity.UID != jobUID {
+		t.Fatalf("job UID = %q, want %s", identity.UID, jobUID)
+	}
+	if identity.VClusterName != "vc-uid-fast-path" {
+		t.Fatalf("vcluster = %q, want vc-uid-fast-path", identity.VClusterName)
+	}
+}

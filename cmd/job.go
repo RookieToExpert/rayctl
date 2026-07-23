@@ -55,11 +55,9 @@ func newJobGetCmd() *cobra.Command {
 				for j, result := range results {
 					if vcClient != nil {
 						if vcUID := virtualClusterUIDFromName(result.VClusterName); vcUID != "" {
-							displayNames, err := vcClient.ResolveDisplayNames(context.Background(), []string{vcUID})
-							if err == nil {
-								if displayName, ok := displayNames[vcUID]; ok {
-									result.VClusterName = displayName
-								}
+							resource, err := vcClient.FindResourceByUID(context.Background(), vcUID, "virtualClusters")
+							if err == nil && strings.TrimSpace(resource.Name) != "" {
+								result.VClusterName = strings.TrimSpace(resource.Name)
 							}
 						}
 					}

@@ -15,11 +15,40 @@ import (
 func newAFSCmd() *cobra.Command {
 	afsCmd := &cobra.Command{
 		Use:   "afs",
-		Short: "查询 AFS 与 PVC/PV 的映射关系",
+		Short: "查询 AFS 资源及其 PVC/PV 映射关系",
 	}
 
+	afsCmd.AddCommand(newAFSGetCmd())
 	afsCmd.AddCommand(newAFSCheckCmd())
 	return afsCmd
+}
+
+func newAFSGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get [afs-name-or-uid]",
+		Short: "列出当前 profile 的 AFS 或查询单个 AFS 详情",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			networkService, err := newNetworkResourceService()
+			if err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				result, err := networkService.ListAFS(cmd.Context())
+				if err != nil {
+					return err
+				}
+				output.PrintAFSList(result)
+				return nil
+			}
+			result, err := networkService.GetAFS(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			output.PrintAFSDetail(result)
+			return nil
+		},
+	}
 }
 
 func newAFSCheckCmd() *cobra.Command {

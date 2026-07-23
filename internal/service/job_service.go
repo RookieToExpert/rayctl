@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -42,9 +43,10 @@ var (
 )
 
 const (
-	defaultTailLogLines = int64(10)
-	defaultEventLimit   = 10
-	defaultRegistryHost = "registry2.d.pjlab.org.cn"
+	defaultTailLogLines  = int64(10)
+	defaultEventLimit    = 10
+	defaultRegistryHost  = "registry2.d.pjlab.org.cn"
+	jobUIDLookupPageSize = int64(5000)
 )
 
 type JobService struct {
@@ -1201,7 +1203,10 @@ func (s *JobService) CheckJob(ctx context.Context, identifier string) (*JobCheck
 	if err != nil {
 		return nil, err
 	}
+	return s.checkPlatformJob(ctx, identity, job, pods)
+}
 
+func (s *JobService) checkPlatformJob(ctx context.Context, identity *jobIdentity, job *unstructured.Unstructured, pods []corev1.Pod) (*JobCheckResult, error) {
 	podChecks := make([]JobPodCheckItem, 0, len(pods))
 	readyPodCount := 0
 	assignedPodCount := 0
@@ -1482,7 +1487,7 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 	return s.getJobViaPlatformByIdentity(ctx, *identity, identifier, locateDuration, startedAt)
 }
 
-func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity jobIdentity, identifier string, locateDuration time.Duration, startedAt time.Time) (*JobGetResult, error) {
+func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity jobIdentity, _ string, locateDuration time.Duration, startedAt time.Time) (*JobGetResult, error) {
 	jobBegin := time.Now()
 	job, err := s.vcClient.GetVolcanoJob(ctx, identity.VClusterName, identity.Namespace, identity.Name)
 	platformJobDuration := time.Since(jobBegin)
@@ -1498,6 +1503,9 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 	}
 
 	identity.UID = firstNonEmpty(identity.UID, string(job.GetUID()))
+	if strings.TrimSpace(identity.PodGroupName) == "" && strings.TrimSpace(identity.UID) != "" {
+		identity.PodGroupName = fmt.Sprintf("%s-%s", identity.Name, identity.UID)
+	}
 	status := extractVolcanoJobPhase(job)
 	terminal := isTerminalVolcanoJobPhase(status)
 	stage := ""
@@ -1506,7 +1514,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 	secretChecks := []SecretCheckItem(nil)
 	detailEvidence := []CheckEvidenceItem(nil)
 	if shouldAttachJobCheckSummary(status, terminal) {
-		if checkResult, err := s.CheckJob(ctx, identifier); err == nil && checkResult != nil {
+		if checkResult, err := s.checkPlatformJob(ctx, &identity, job, pods); err == nil && checkResult != nil {
 			stage = strings.TrimSpace(checkResult.Stage)
 			instruction = strings.TrimSpace(checkResult.Instruction)
 			if len(checkResult.Diagnosis) > 0 {
@@ -1533,10 +1541,6 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"),
 		"-",
 	)
-	if strings.TrimSpace(identity.PodGroupName) == "" && strings.TrimSpace(identity.UID) != "" {
-		identity.PodGroupName = fmt.Sprintf("%s-%s", identity.Name, identity.UID)
-	}
-
 	inspectPod := chooseInspectPod(pods)
 	recentLogLines := []string{"no pods found for this job"}
 	var platformLogsDuration time.Duration
@@ -1809,6 +1813,17 @@ func (s *JobService) resolveJobIdentityFromJobObject(ctx context.Context, job *u
 }
 
 func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string) (*jobIdentity, error) {
+	if looksLikeUUID(identifier) {
+		identity, err := s.locateJobByUID(ctx, strings.TrimSpace(identifier))
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(identity.VClusterName) == "" {
+			return nil, fmt.Errorf("unable to determine vcluster for job uid %q", identifier)
+		}
+		return identity, nil
+	}
+
 	if s.vcClient != nil && shouldLookupJobByPlatform(identifier) {
 		if identity, err := s.findPlatformJobIdentity(ctx, identifier); err == nil {
 			return identity, nil
@@ -1841,6 +1856,161 @@ func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string
 		return nil, fmt.Errorf("unable to determine vcluster for %q", identifier)
 	}
 	return identity, nil
+}
+
+type jobUIDLookupResult struct {
+	identity *jobIdentity
+	err      error
+}
+
+func (s *JobService) locateJobByUID(ctx context.Context, uid string) (*jobIdentity, error) {
+	lookupCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	resultCount := 0
+	results := make(chan jobUIDLookupResult, 2)
+	if s.clientset != nil {
+		resultCount++
+		go func() {
+			identity, err := s.findPodIdentityByUID(lookupCtx, uid)
+			results <- jobUIDLookupResult{identity: identity, err: err}
+		}()
+	}
+	if s.dynamicClient != nil {
+		resultCount++
+		go func() {
+			identity, err := s.findHostJobIdentityByUID(lookupCtx, uid)
+			results <- jobUIDLookupResult{identity: identity, err: err}
+		}()
+	}
+	if resultCount == 0 {
+		return nil, fmt.Errorf("kubernetes clients are required for job uid lookup")
+	}
+
+	errorsBySource := make([]string, 0, resultCount)
+	for range resultCount {
+		result := <-results
+		if result.identity != nil {
+			cancel()
+			return result.identity, nil
+		}
+		if result.err != nil && !errors.Is(result.err, context.Canceled) {
+			errorsBySource = append(errorsBySource, result.err.Error())
+		}
+	}
+	if len(errorsBySource) > 0 {
+		return nil, fmt.Errorf("job uid %q not found: %s", uid, strings.Join(errorsBySource, "; "))
+	}
+	return nil, fmt.Errorf("job uid %q not found", uid)
+}
+
+func (s *JobService) findPodIdentityByUID(ctx context.Context, uid string) (*jobIdentity, error) {
+	identity, err := s.findPodIdentityByUIDAndSelector(ctx, uid, "volcano.sh/job-name")
+	if err == nil {
+		return identity, nil
+	}
+	return s.findPodIdentityByUIDAndSelector(ctx, uid, "")
+}
+
+func (s *JobService) findPodIdentityByUIDAndSelector(ctx context.Context, uid string, labelSelector string) (*jobIdentity, error) {
+	options := metav1.ListOptions{
+		LabelSelector:   labelSelector,
+		Limit:           jobUIDLookupPageSize,
+		ResourceVersion: "0",
+	}
+	for {
+		podMetadata, continueToken, err := s.listPodMetadataPage(ctx, options)
+		if err != nil {
+			return nil, fmt.Errorf("list pods for job uid: %w", err)
+		}
+		for i := range podMetadata {
+			pod := corev1.Pod{ObjectMeta: podMetadata[i].ObjectMeta}
+			if string(pod.UID) != uid && deriveJobUID(pod) != uid && !hasOwnerUID(pod.OwnerReferences, uid) {
+				continue
+			}
+			identity := jobIdentityFromPod(pod)
+			identity.UID = firstNonEmpty(identity.UID, uid)
+			if strings.TrimSpace(identity.VClusterName) == "" {
+				identity.VClusterName = s.resolveVClusterNameFromNamespace(ctx, pod.Namespace)
+			}
+			return identity, nil
+		}
+		if strings.TrimSpace(continueToken) == "" {
+			break
+		}
+		options.Continue = continueToken
+		options.ResourceVersion = ""
+	}
+	return nil, fmt.Errorf("pod for job uid not found")
+}
+
+func (s *JobService) listPodMetadataPage(ctx context.Context, options metav1.ListOptions) ([]metav1.PartialObjectMetadata, string, error) {
+	restClient := s.clientset.CoreV1().RESTClient()
+	restClientValue := reflect.ValueOf(restClient)
+	if restClient != nil && !(restClientValue.Kind() == reflect.Pointer && restClientValue.IsNil()) {
+		list := &metav1.PartialObjectMetadataList{}
+		err := restClient.Get().
+			Resource("pods").
+			VersionedParams(&options, metav1.ParameterCodec).
+			SetHeader("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io").
+			Do(ctx).
+			Into(list)
+		if err != nil {
+			return nil, "", err
+		}
+		return list.Items, list.GetContinue(), nil
+	}
+
+	pods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, options)
+	if err != nil {
+		return nil, "", err
+	}
+	items := make([]metav1.PartialObjectMetadata, 0, len(pods.Items))
+	for i := range pods.Items {
+		items = append(items, metav1.PartialObjectMetadata{ObjectMeta: pods.Items[i].ObjectMeta})
+	}
+	return items, pods.Continue, nil
+}
+
+func (s *JobService) findHostJobIdentityByUID(ctx context.Context, uid string) (*jobIdentity, error) {
+	options := metav1.ListOptions{
+		Limit:           jobUIDLookupPageSize,
+		ResourceVersion: "0",
+	}
+	for {
+		jobs, err := s.dynamicClient.Resource(volcanoJobGVR).Namespace(metav1.NamespaceAll).List(ctx, options)
+		if err != nil {
+			return nil, fmt.Errorf("list volcano jobs for uid: %w", err)
+		}
+		for i := range jobs.Items {
+			job := &jobs.Items[i]
+			logicalUID := strings.TrimSpace(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"))
+			if string(job.GetUID()) != uid && logicalUID != uid {
+				continue
+			}
+			hostNamespace := firstNonEmpty(
+				getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-host-namespace"),
+				job.GetNamespace(),
+			)
+			identity := &jobIdentity{
+				Name:          firstNonEmpty(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"), job.GetName()),
+				Namespace:     firstNonEmpty(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-namespace"), job.GetNamespace()),
+				UID:           firstNonEmpty(logicalUID, string(job.GetUID()), uid),
+				Submitter:     firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), "-"),
+				HostNamespace: hostNamespace,
+				HostJobName:   job.GetName(),
+			}
+			identity.PodGroupName = derivePodGroupName(identity.Name, identity.UID)
+			identity.VClusterName = s.resolveVClusterNameFromNamespace(ctx, hostNamespace)
+			return identity, nil
+		}
+		if strings.TrimSpace(jobs.GetContinue()) == "" {
+			break
+		}
+		options.Continue = jobs.GetContinue()
+		options.ResourceVersion = ""
+	}
+	return nil, fmt.Errorf("volcano job uid not found")
 }
 
 func looksLikePodBackedIdentifier(identifier string) bool {

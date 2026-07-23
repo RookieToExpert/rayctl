@@ -19,6 +19,7 @@ func init() {
 	rootCmd.AddCommand(newClusterCmd())
 	rootCmd.AddCommand(newECSCmd())
 	rootCmd.AddCommand(newLogsCmd())
+	rootCmd.AddCommand(newNATGatewayCmd())
 	rootCmd.AddCommand(newNodeCmd())
 	rootCmd.AddCommand(newPolicyCmd())
 	rootCmd.AddCommand(newPVCmd())
@@ -27,6 +28,8 @@ func init() {
 	rootCmd.AddCommand(newPVCCmd())
 	rootCmd.AddCommand(newUserCmd())
 	rootCmd.AddCommand(newVCCmd())
+	rootCmd.AddCommand(newVPCCmd())
+	rootCmd.AddCommand(newSubnetCmd())
 }
 
 func Execute() error {
