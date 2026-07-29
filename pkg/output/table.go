@@ -199,6 +199,7 @@ func PrintNodeMutationResult(result *service.NodeMutationResult) {
 
 func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 	summaryRows := [][]string{
+		{"TYPE", "ECP VCJob"},
 		{"JOB", result.Name},
 		{"STATUS", emptyDash(result.Status)},
 		{"VC", result.VClusterName},
@@ -306,6 +307,195 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 				{"total", result.Timings.Total.String()},
 			},
 		)
+	}
+}
+
+func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
+	if result == nil {
+		return
+	}
+	summaryRows := [][]string{
+		{"TYPE", "SSP TrainingJob"},
+		{"JOB", emptyDash(result.Name)},
+		{"STATUS", emptyDash(result.Status)},
+		{"VC", emptyDash(result.VCluster)},
+		{"WORKSPACE", emptyDash(result.Workspace)},
+		{"QUEUE", emptyDash(result.Queue)},
+		{"QUEUE TYPE", emptyDash(result.QueueType)},
+		{"NAMESPACE", emptyDash(result.Namespace)},
+		{"UID", emptyDash(result.UID)},
+		{"SUBMITTER", emptyDash(result.Submitter)},
+		{"FRAMEWORK", emptyDash(result.Framework)},
+		{"PRIORITY", emptyDash(result.Priority)},
+		{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+	}
+	for _, line := range result.Diagnosis {
+		summaryRows = append(summaryRows, []string{"结论", emptyDash(line)})
+	}
+	for _, secret := range result.SecretChecks {
+		summaryRows = append(summaryRows,
+			[]string{"镜像账号密码", fmt.Sprintf("%s | 账号=%s | 密码=%s", emptyDash(secret.SecretName), emptyDash(secret.Username), emptyDash(secret.Password))},
+			[]string{"镜像密钥结果", emptyDash(secret.Message)},
+		)
+	}
+	if strings.TrimSpace(result.Instruction) != "" {
+		summaryRows = append(summaryRows, []string{"下一步", result.Instruction})
+	}
+	if !result.Terminal {
+		summaryRows = append(summaryRows,
+			[]string{"INSPECT POD", emptyDash(result.InspectPod)},
+			[]string{"NODES", joinOrDash(result.Nodes)},
+		)
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		summaryRows,
+		nil,
+		tableOptions{noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(12, 1)...)},
+	)
+
+	if len(result.PodResources) > 0 {
+		fmt.Fprintln(os.Stdout)
+		rows := make([][]string, 0, len(result.PodResources))
+		for _, pod := range result.PodResources {
+			rows = append(rows, []string{
+				emptyDash(pod.Pod),
+				emptyDash(pod.Phase),
+				emptyDash(pod.Node),
+				emptyDash(pod.CPU),
+				emptyDash(pod.Memory),
+				emptyDash(pod.MachineType),
+				emptyDash(pod.Model),
+				emptyDash(pod.Accelerator),
+			})
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"POD", "PHASE", "NODE", "CPU", "MEMORY", "MACHINE TYPE", "MODEL", "ACCELERATOR"},
+			rows,
+			[]int{52, 12, 26, 10, 12, 28, 24, 12},
+		)
+	}
+
+	if len(result.PersistentVolumeClaims) > 0 {
+		fmt.Fprintln(os.Stdout)
+		rows := make([][]string, 0, len(result.PersistentVolumeClaims))
+		for _, pvc := range result.PersistentVolumeClaims {
+			rows = append(rows, []string{emptyDash(pvc.ClaimName), emptyDash(pvc.Status), emptyDash(pvc.FrontendVolume)})
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"PVC", "STATUS", "AFS/AOSS ENDPOINT"},
+			rows,
+			[]int{36, 12, 36},
+		)
+	}
+
+	if !result.Terminal && len(result.CheckEvidence) > 0 {
+		fmt.Fprintln(os.Stdout)
+		printJobEvidenceTable("DIAGNOSIS", result.CheckEvidence)
+	}
+	if longOutput && !result.Terminal && strings.EqualFold(result.Stage, "running") && len(result.RecentLogLines) > 0 {
+		fmt.Fprintln(os.Stdout)
+		rows := make([][]string, 0, len(result.RecentLogLines))
+		for _, line := range result.RecentLogLines {
+			rows = append(rows, []string{line})
+		}
+		printBoxTableWithMaxWidths([]string{"LATEST LOGS"}, rows, []int{110})
+	}
+}
+
+func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool) {
+	if result == nil {
+		return
+	}
+	rows := [][]string{
+		{"AID", emptyDash(result.Name)},
+		{"STATE", emptyDash(result.State)},
+		{"VC", emptyDash(result.VCluster)},
+		{"WORKSPACE", emptyDash(result.Workspace)},
+		{"QUEUE", emptyDash(result.Queue)},
+		{"QUEUE TYPE", emptyDash(result.QueueType)},
+		{"PRIORITY", emptyDash(result.Priority)},
+		{"UID", emptyDash(result.UID)},
+		{"SUBMITTER", emptyDash(result.Submitter)},
+		{"HOST IP", emptyDash(result.HostIP)},
+		{"SSH", emptyDash(result.SSHEnabled)},
+		{"CODE SERVER", emptyDash(result.CodeServerEnabled)},
+		{"IMAGE", emptyDash(result.Image)},
+		{"IMAGE TYPE", emptyDash(result.ImageType)},
+		{"RESOURCE", emptyDash(result.ResourceSummary)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+	}
+	for _, line := range result.Diagnosis {
+		rows = append(rows, []string{"结论", emptyDash(line)})
+	}
+	for _, secret := range result.SecretChecks {
+		rows = append(rows,
+			[]string{"镜像账号密码", fmt.Sprintf("%s | 账号=%s | 密码=%s", emptyDash(secret.SecretName), emptyDash(secret.Username), emptyDash(secret.Password))},
+			[]string{"镜像密钥结果", emptyDash(secret.Message)},
+		)
+	}
+	if result.Instruction != "" {
+		rows = append(rows, []string{"下一步", result.Instruction})
+	}
+	if !result.Terminal {
+		rows = append(rows,
+			[]string{"INSPECT POD", emptyDash(result.InspectPod)},
+			[]string{"NODES", joinOrDash(result.Nodes)},
+		)
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		rows,
+		[]int{20, 100},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(
+				[2]int{0, 1}, [2]int{1, 1}, [2]int{2, 1}, [2]int{3, 1},
+				[2]int{4, 1}, [2]int{5, 1}, [2]int{6, 1}, [2]int{7, 1},
+				[2]int{8, 1}, [2]int{9, 1}, [2]int{10, 1}, [2]int{12, 1}, [2]int{13, 1},
+			),
+			minWidths: []int{16, 28},
+		},
+	)
+
+	if len(result.DNATRules) > 0 {
+		fmt.Fprintln(os.Stdout)
+		dnatRows := make([][]string, 0, len(result.DNATRules))
+		for _, rule := range result.DNATRules {
+			dnatRows = append(dnatRows, []string{
+				emptyDash(rule.External),
+				emptyDash(rule.Internal),
+				emptyDash(rule.Protocol),
+				emptyDash(rule.State),
+			})
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"EXTERNAL", "INTERNAL", "PROTOCOL", "STATE"},
+			dnatRows,
+			[]int{28, 28, 12, 14},
+		)
+	}
+
+	if len(result.PersistentVolumeClaims) > 0 {
+		fmt.Fprintln(os.Stdout)
+		pvcRows := make([][]string, 0, len(result.PersistentVolumeClaims))
+		for _, pvc := range result.PersistentVolumeClaims {
+			pvcRows = append(pvcRows, []string{emptyDash(pvc.ClaimName), emptyDash(pvc.Status), emptyDash(pvc.FrontendVolume)})
+		}
+		printBoxTableWithMaxWidths([]string{"PVC", "STATUS", "AFS/AOSS ENDPOINT"}, pvcRows, []int{38, 12, 38})
+	}
+
+	if !result.Terminal && len(result.CheckEvidence) > 0 {
+		fmt.Fprintln(os.Stdout)
+		printJobEvidenceTable("DIAGNOSIS", result.CheckEvidence)
+	}
+	if longOutput && !result.Terminal && strings.EqualFold(result.Stage, "running") && len(result.RecentLogLines) > 0 {
+		fmt.Fprintln(os.Stdout)
+		logRows := make([][]string, 0, len(result.RecentLogLines))
+		for _, line := range result.RecentLogLines {
+			logRows = append(logRows, []string{line})
+		}
+		printBoxTableWithMaxWidths([]string{"LATEST LOGS"}, logRows, []int{110})
 	}
 }
 
@@ -1052,6 +1242,111 @@ func PrintVCDetail(result *service.VCDetailResult) {
 		tableOptions{
 			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
 			minWidths:   []int{8, 24},
+		},
+	)
+}
+
+func PrintVCNodeList(result *service.VCNodeListResult, longOutput bool) {
+	if result == nil {
+		return
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"VC", emptyDash(result.ClusterName)},
+			{"VC UID", emptyDash(result.ClusterUID)},
+			{"PROFILE", emptyDash(result.ProfileName)},
+			{"NODE COUNT", strconv.Itoa(len(result.Items))},
+		},
+		[]int{14, 72},
+		tableOptions{minWidths: []int{10, 24}},
+	)
+	fmt.Fprintln(os.Stdout)
+	printVCNodeItems(result.Items, longOutput)
+}
+
+func PrintVCNodeRemoveResult(result *service.VCNodeRemoveResult, longOutput bool, showPayload bool) {
+	if result == nil {
+		return
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"VC", emptyDash(result.ClusterName)},
+			{"VC UID", emptyDash(result.ClusterUID)},
+			{"PROFILE", emptyDash(result.ProfileName)},
+			{"NODE COUNT", strconv.Itoa(len(result.Nodes))},
+			{"RESULT", emptyDash(result.Result)},
+		},
+		[]int{14, 72},
+		tableOptions{minWidths: []int{10, 24}},
+	)
+	fmt.Fprintln(os.Stdout)
+	printVCNodeItems(result.Nodes, longOutput)
+	if !showPayload {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions(
+		[]string{"REQUEST URL"},
+		[][]string{{emptyDash(result.RequestURL)}},
+		[]int{140},
+		tableOptions{minWidths: []int{40}},
+	)
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions(
+		[]string{"PAYLOAD"},
+		[][]string{{emptyDash(result.Payload)}},
+		[]int{120},
+		tableOptions{minWidths: []int{40}},
+	)
+}
+
+func printVCNodeItems(items []service.VCNodeListItem, longOutput bool) {
+	rows := make([][]string, 0, maxInt(1, len(items)))
+	noWrapCells := make([][2]int, 0, maxInt(1, len(items))*4)
+	headers := []string{"HOST", "IP", "STATE", "MACHINE TYPE"}
+	maxWidths := []int{20, 15, 8, 12}
+	minWidths := []int{20, 15, 8, 12}
+	if longOutput {
+		headers = append(headers, "ACN", "ACN UID")
+		maxWidths = append(maxWidths, 14, 36)
+		minWidths = append(minWidths, 14, 36)
+	}
+	if len(items) == 0 {
+		row := []string{"-", "-", "-", "-"}
+		if longOutput {
+			row = append(row, "-", "-")
+		}
+		rows = append(rows, row)
+	} else {
+		for rowIndex, item := range items {
+			row := []string{
+				emptyDash(item.HostName),
+				emptyDash(item.HostIP),
+				emptyDash(item.State),
+				emptyDash(item.MachineType),
+			}
+			if longOutput {
+				row = append(row, emptyDash(item.Name), emptyDash(item.UID))
+			}
+			rows = append(rows, row)
+			noWrapColumns := []int{0, 1}
+			if longOutput {
+				noWrapColumns = append(noWrapColumns, 4, 5)
+			}
+			for _, columnIndex := range noWrapColumns {
+				noWrapCells = append(noWrapCells, [2]int{rowIndex, columnIndex})
+			}
+		}
+	}
+	printBoxTableWithOptions(
+		headers,
+		rows,
+		maxWidths,
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCells...),
+			minWidths:   minWidths,
 		},
 	)
 }

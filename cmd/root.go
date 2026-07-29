@@ -30,6 +30,7 @@ func init() {
 	rootCmd.AddCommand(newVCCmd())
 	rootCmd.AddCommand(newVPCCmd())
 	rootCmd.AddCommand(newSubnetCmd())
+	rootCmd.AddCommand(newSSPCmd())
 }
 
 func Execute() error {

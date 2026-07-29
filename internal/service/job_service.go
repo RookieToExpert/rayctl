@@ -92,6 +92,7 @@ func (e *ambiguousJobMatchError) Error() string {
 
 type JobGetResult struct {
 	Name                   string
+	WorkloadType           string
 	Namespace              string
 	UID                    string
 	Status                 string
@@ -1148,6 +1149,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 
 	return &JobGetResult{
 		Name:                   identity.Name,
+		WorkloadType:           jobWorkloadType(job, pods),
 		Namespace:              identity.Namespace,
 		UID:                    identity.UID,
 		Status:                 status,
@@ -1606,6 +1608,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 
 	return &JobGetResult{
 		Name:                   identity.Name,
+		WorkloadType:           jobWorkloadType(job, pods),
 		Namespace:              identity.Namespace,
 		UID:                    identity.UID,
 		Status:                 status,
@@ -1633,6 +1636,15 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 			Total:        time.Since(startedAt),
 		},
 	}, nil
+}
+
+func jobWorkloadType(job *unstructured.Unstructured, pods []corev1.Pod) string {
+	if job != nil {
+		if value := strings.TrimSpace(getNestedString(job.Object, "metadata", "labels", sspWorkloadTypeLabel)); value != "" {
+			return strings.ToLower(value)
+		}
+	}
+	return workloadTypeFromPods(pods)
 }
 
 func (s *JobService) checkJobInCurrentCluster(ctx context.Context, identifier string) (*JobCheckResult, error) {
@@ -2561,7 +2573,7 @@ func (s *JobService) resolveJobFromPods(ctx context.Context, identifier string, 
 
 	candidates := make([]corev1.Pod, 0)
 	for _, pod := range allPods.Items {
-		if podMatchesIdentifier(pod, identifier) {
+		if !isSSPManagedWorkloadPod(pod) && podMatchesIdentifier(pod, identifier) {
 			candidates = append(candidates, pod)
 		}
 	}
@@ -2667,10 +2679,10 @@ func (s *JobService) findHostPodForIdentifier(ctx context.Context, identifier st
 	}
 
 	if !looksLikeUUID(id) {
-		if pod, err := s.findSinglePodByName(ctx, id); err == nil && pod != nil {
+		if pod, err := s.findSinglePodByName(ctx, id); err == nil && pod != nil && !isSSPManagedWorkloadPod(*pod) {
 			return pod, nil
 		}
-		if pod, err := s.findSinglePodByJobName(ctx, id); err == nil && pod != nil {
+		if pod, err := s.findSinglePodByJobName(ctx, id); err == nil && pod != nil && !isSSPManagedWorkloadPod(*pod) {
 			return pod, nil
 		}
 	}
@@ -2682,7 +2694,7 @@ func (s *JobService) findHostPodForIdentifier(ctx context.Context, identifier st
 
 	matched := make([]corev1.Pod, 0)
 	for _, pod := range allPods.Items {
-		if podMatchesIdentifier(pod, id) {
+		if !isSSPManagedWorkloadPod(pod) && podMatchesIdentifier(pod, id) {
 			matched = append(matched, pod)
 		}
 	}
@@ -2913,6 +2925,15 @@ func podMatchesIdentifier(pod corev1.Pod, identifier string) bool {
 	case strings.HasPrefix(jobUID, id):
 		return true
 	case logicalNamespace == id:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSSPManagedWorkloadPod(pod corev1.Pod) bool {
+	switch strings.ToLower(strings.TrimSpace(pod.Labels[sspWorkloadTypeLabel])) {
+	case sspTrainingJobWorkloadType, sspAIDWorkloadTypeValue:
 		return true
 	default:
 		return false
@@ -3964,17 +3985,14 @@ func (s *JobService) checkImagePullSecrets(ctx context.Context, identity *jobIde
 			registry = defaultRegistryHost
 		}
 		if err := verifyDockerLogin(ctx, registry, credential.Username, credential.Password); err != nil {
-			status := "FAIL"
-			if isDockerUnavailableError(err) {
-				status = "ERROR"
-			}
+			status, message := classifyDockerLoginError(err, registry)
 			results = append(results, SecretCheckItem{
 				SecretName: secretName,
 				Registry:   registry,
 				Username:   credential.Username,
 				Password:   credential.Password,
 				Status:     status,
-				Message:    err.Error(),
+				Message:    message,
 			})
 			continue
 		}
@@ -4028,7 +4046,7 @@ func verifyDockerLogin(ctx context.Context, registry string, username string, pa
 		if message == "" {
 			message = err.Error()
 		}
-		return fmt.Errorf(message)
+		return fmt.Errorf("%s", message)
 	}
 	return nil
 }
@@ -4039,4 +4057,43 @@ func isDockerUnavailableError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "executable file not found") || strings.Contains(message, "no such file or directory")
+}
+
+func classifyDockerLoginError(err error, registry string) (string, string) {
+	if err == nil {
+		return "OK", "docker login succeeded"
+	}
+	if isDockerRegistryAddressError(err) {
+		return "FAIL", fmt.Sprintf(
+			"镜像地址错误：镜像仓库 %q 无法解析或地址格式不正确，请检查 imagePullSecret 中的 registry 地址。原始错误：%s",
+			strings.TrimSpace(registry),
+			strings.TrimSpace(err.Error()),
+		)
+	}
+	if isDockerUnavailableError(err) {
+		return "ERROR", strings.TrimSpace(err.Error())
+	}
+	return "FAIL", strings.TrimSpace(err.Error())
+}
+
+func isDockerRegistryAddressError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"no such host",
+		"name or service not known",
+		"temporary failure in name resolution",
+		"server misbehaving",
+		"invalid reference format",
+		"unsupported protocol scheme",
+		"missing port in address",
+		"invalid url",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }

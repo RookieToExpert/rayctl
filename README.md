@@ -25,6 +25,20 @@ rayctl natgw get
 rayctl natgw get nat-muxi-ailab
 rayctl afs get
 rayctl afs get afs-tangrui
+
+# 查看 VC 节点，或按节点名、IP、ACN UID 从 VC 移除节点
+rayctl vc node list vc-c550-ai4s-sys
+rayctl vc node remove vc-c550-ai4s-sys 10.12.138.140 --dry-run
+rayctl vc node remove vc-c550-ai4s-sys 10.12.138.140 -y
+
+# 通过 PT 平台 API 获取 SSP TrainingJob，并用 PT HC Pod 诊断 Pending 原因
+export KUBECONFIG=~/kubeconfigpt
+rayctl ssp job get <job-name-or-uid>
+rayctl ssp job get <job-name-or-uid> --workspace ws-t-llm-frontier
+
+# 查看 SSP AID 开发机、资源规格、挂载卷、SSH DNAT 和 Pod 状态
+rayctl ssp aid get <aid-name-or-uid>
+rayctl ssp aid get <aid-name-or-uid> --workspace ws-t-wamcritic
 ```
 
 ## Project Initialization

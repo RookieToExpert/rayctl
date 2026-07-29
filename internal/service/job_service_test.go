@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -138,5 +139,39 @@ func TestLocateJobByUIDUsesPodOwnerReference(t *testing.T) {
 	}
 	if identity.VClusterName != "vc-uid-fast-path" {
 		t.Fatalf("vcluster = %q, want vc-uid-fast-path", identity.VClusterName)
+	}
+}
+
+func TestClassifyDockerLoginErrorPrioritizesRegistryAddress(t *testing.T) {
+	err := fmt.Errorf(`Error response from daemon: Get "https://registry2.d.pjlab.org/v2/": dial tcp: lookup registry2.d.pjlab.org on 127.0.0.53:53: no such host`)
+	status, message := classifyDockerLoginError(err, "registry2.d.pjlab.org")
+	if status != "FAIL" {
+		t.Fatalf("status = %q, want FAIL", status)
+	}
+	if !strings.HasPrefix(message, "镜像地址错误：") {
+		t.Fatalf("message = %q, want address error first", message)
+	}
+	if !strings.Contains(message, "no such host") {
+		t.Fatalf("message = %q, want original error", message)
+	}
+}
+
+func TestClassifyDockerLoginErrorKeepsUnauthorizedAsCredentialFailure(t *testing.T) {
+	err := fmt.Errorf("unauthorized: authentication required")
+	status, message := classifyDockerLoginError(err, "registry2.d.pjlab.org.cn")
+	if status != "FAIL" || message != err.Error() {
+		t.Fatalf("status = %q, message = %q", status, message)
+	}
+}
+
+func TestIsSSPManagedWorkloadPod(t *testing.T) {
+	for _, workloadType := range []string{SSPWorkloadTypeTrainingJob, SSPWorkloadTypeAID} {
+		pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sspWorkloadTypeLabel: workloadType}}}
+		if !isSSPManagedWorkloadPod(pod) {
+			t.Fatalf("workload type %q was not classified as SSP managed", workloadType)
+		}
+	}
+	if isSSPManagedWorkloadPod(corev1.Pod{}) {
+		t.Fatal("unlabelled ECP pod was classified as SSP managed")
 	}
 }

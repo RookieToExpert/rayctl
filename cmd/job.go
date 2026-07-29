@@ -3,11 +3,13 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
@@ -19,6 +21,9 @@ import (
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
+
+const defaultJobGetTimeout = 10 * time.Second
+const jobTypeDetectionTimeout = time.Second
 
 func newJobCmd() *cobra.Command {
 	jobCmd := &cobra.Command{
@@ -33,6 +38,9 @@ func newJobCmd() *cobra.Command {
 
 func newJobGetCmd() *cobra.Command {
 	var debugTiming bool
+	var longOutput bool
+	var workspace string
+	var queryTimeout time.Duration
 
 	getCmd := &cobra.Command{
 		Use:   "get <job-name-or-pod-name-or-uid> [job-name-or-pod-name-or-uid...]",
@@ -46,25 +54,165 @@ func newJobGetCmd() *cobra.Command {
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
 			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
-			for i, identifier := range args {
-				queryIdentifier := normalizeJobGetIdentifier(identifier)
-				results, err := jobService.GetJobs(context.Background(), queryIdentifier)
-				if err != nil {
-					return fmt.Errorf("job %q: %w", identifier, err)
+			var sspJobService *service.SSPJobService
+			if vcClient != nil {
+				sspJobService = service.NewSSPJobService(clientset, vcClient)
+			}
+			printed := false
+			printSeparator := func() {
+				if printed {
+					fmt.Fprintln(getCmd.OutOrStdout())
 				}
-				for j, result := range results {
+				printed = true
+			}
+			printSSPJob := func(ctx context.Context, identifier string, detection *service.SSPWorkloadDetection) error {
+				result, err := sspJobService.GetJobWithDetection(ctx, identifier, workspace, longOutput, detection)
+				if err != nil {
+					return err
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				printSeparator()
+				output.PrintSSPJobDetail(result, longOutput)
+				return nil
+			}
+			printECPJobs := func(ctx context.Context, results []*service.JobGetResult) error {
+				for _, result := range results {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					if vcClient != nil {
 						if vcUID := virtualClusterUIDFromName(result.VClusterName); vcUID != "" {
-							resource, err := vcClient.FindResourceByUID(context.Background(), vcUID, "virtualClusters")
+							resource, err := vcClient.FindResourceByUID(ctx, vcUID, "virtualClusters")
+							if ctx.Err() != nil {
+								return ctx.Err()
+							}
 							if err == nil && strings.TrimSpace(resource.Name) != "" {
 								result.VClusterName = strings.TrimSpace(resource.Name)
 							}
 						}
 					}
-					if i > 0 || j > 0 {
-						fmt.Fprintln(getCmd.OutOrStdout())
-					}
+					printSeparator()
 					output.PrintJobDetail(result, debugTiming)
+				}
+				return nil
+			}
+
+			for _, identifier := range args {
+				ctx := getCmd.Context()
+				cancel := func() {}
+				if queryTimeout > 0 {
+					ctx, cancel = context.WithTimeout(ctx, queryTimeout)
+				}
+				queryErr := func() error {
+					queryIdentifier := normalizeJobGetIdentifier(identifier)
+					detectedType := ""
+					if sspJobService != nil {
+						detectCtx, stopDetection := context.WithTimeout(ctx, jobTypeDetectionTimeout)
+						detection, detectErr := sspJobService.DetectWorkload(detectCtx, queryIdentifier)
+						stopDetection()
+						if detectErr == nil {
+							detectedType = detection.Type
+							switch detection.Type {
+							case service.SSPWorkloadTypeTrainingJob:
+								return printSSPJob(ctx, queryIdentifier, detection)
+							case service.SSPWorkloadTypeAID:
+								return fmt.Errorf("is an SSP AID workload; use rayctl ssp aid get %s", queryIdentifier)
+							}
+						}
+					}
+
+					if sspJobService == nil || detectedType == service.WorkloadTypeECPVCJob {
+						results, err := jobService.GetJobs(ctx, queryIdentifier)
+						if err != nil {
+							return err
+						}
+						return printECPJobs(ctx, results)
+					}
+
+					type ecpQueryResult struct {
+						results []*service.JobGetResult
+						err     error
+					}
+					type sspQueryResult struct {
+						result *service.SSPJobGetResult
+						err    error
+					}
+					queryCtx, stopQueries := context.WithCancel(ctx)
+					defer stopQueries()
+					ecpResults := make(chan ecpQueryResult, 1)
+					sspResults := make(chan sspQueryResult, 1)
+					go func() {
+						results, err := jobService.GetJobs(queryCtx, queryIdentifier)
+						ecpResults <- ecpQueryResult{results: results, err: err}
+					}()
+					go func() {
+						result, err := sspJobService.GetJob(queryCtx, queryIdentifier, workspace, longOutput)
+						sspResults <- sspQueryResult{result: result, err: err}
+					}()
+
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case sspResult := <-sspResults:
+						if sspResult.err == nil {
+							stopQueries()
+							if err := ctx.Err(); err != nil {
+								return err
+							}
+							printSeparator()
+							output.PrintSSPJobDetail(sspResult.result, longOutput)
+							return nil
+						}
+						if isSSPKubeconfigMismatch(sspResult.err) {
+							stopQueries()
+							return sspResult.err
+						}
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case ecpResult := <-ecpResults:
+							stopQueries()
+							if ecpResult.err != nil {
+								return ecpResult.err
+							}
+							if jobResultsContainSSPTrainingJob(ecpResult.results) {
+								return fmt.Errorf("is an SSP TrainingJob but its AIT record could not be loaded: %w", sspResult.err)
+							}
+							return printECPJobs(ctx, ecpResult.results)
+						}
+					case ecpResult := <-ecpResults:
+						if ecpResult.err == nil && !jobResultsContainSSPTrainingJob(ecpResult.results) {
+							stopQueries()
+							return printECPJobs(ctx, ecpResult.results)
+						}
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case sspResult := <-sspResults:
+							stopQueries()
+							if sspResult.err == nil {
+								if err := ctx.Err(); err != nil {
+									return err
+								}
+								printSeparator()
+								output.PrintSSPJobDetail(sspResult.result, longOutput)
+								return nil
+							}
+							if isSSPKubeconfigMismatch(sspResult.err) {
+								return sspResult.err
+							}
+							if ecpResult.err != nil {
+								return ecpResult.err
+							}
+							return fmt.Errorf("is an SSP TrainingJob but its AIT record could not be loaded: %w", sspResult.err)
+						}
+					}
+				}()
+				cancel()
+				if queryErr != nil {
+					return formatJobGetError(ctx, identifier, queryTimeout, queryErr)
 				}
 			}
 			return nil
@@ -72,8 +220,32 @@ func newJobGetCmd() *cobra.Command {
 	}
 
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
+	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "SSP TrainingJob 显示首个 Pod 的最新日志")
+	getCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 SSP workspace 名称，可避免历史任务跨 workspace 查询")
+	getCmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
 	getCmd.AddCommand(newJobGetClusterCmd())
 	return getCmd
+}
+
+func isSSPKubeconfigMismatch(err error) bool {
+	var mismatch *service.SSPKubeconfigMismatchError
+	return errors.As(err, &mismatch)
+}
+
+func formatJobGetError(ctx context.Context, identifier string, timeout time.Duration, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("job %q 查询超过 %s，已自动停止；请检查当前 kubeconfig 是否对应任务所在的 HC 集群（D/PT），也可通过 -k 指定正确的 kubeconfig", identifier, timeout)
+	}
+	return fmt.Errorf("job %q: %w", identifier, err)
+}
+
+func jobResultsContainSSPTrainingJob(results []*service.JobGetResult) bool {
+	for _, result := range results {
+		if result != nil && strings.EqualFold(strings.TrimSpace(result.WorkloadType), service.SSPWorkloadTypeTrainingJob) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeJobGetIdentifier(value string) string {

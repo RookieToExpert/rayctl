@@ -74,8 +74,10 @@ type clientProfile struct {
 
 type VirtualCluster struct {
 	UID         string `json:"uid"`
+	ID          string `json:"id"`
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
+	TenantID    string `json:"tenant_id"`
 	Region      string `json:"region"`
 	State       string `json:"state"`
 	ProfileName string `json:"-"`
@@ -307,19 +309,38 @@ type IAMMemberRelationPolicy struct {
 }
 
 type AIComputeNode struct {
-	ID          string `json:"id"`
-	UID         string `json:"uid"`
-	Name        string `json:"name"`
-	DisplayName string `json:"display_name"`
-	TenantID    string `json:"tenant_id"`
-	State       string `json:"state"`
-	Properties  struct {
+	ID           string `json:"id"`
+	UID          string `json:"uid"`
+	Name         string `json:"name"`
+	DisplayName  string `json:"display_name"`
+	ResourceType string `json:"resource_type"`
+	TenantID     string `json:"tenant_id"`
+	Zone         string `json:"zone"`
+	State        string `json:"state"`
+	Properties   struct {
 		MachineType        string `json:"machine_type"`
 		VirtualClusterName string `json:"virtual_cluster_name"`
+		NodePoolName       string `json:"node_pool_name"`
 		HostIP             string `json:"host_ip"`
 		HostName           string `json:"host_name"`
 	} `json:"properties"`
 	ProfileName string `json:"-"`
+}
+
+type VirtualClusterNode struct {
+	AIComputeNode
+	Kind string `json:"-"`
+}
+
+type virtualClusterNodeListResponse struct {
+	AIComputeNodes []AIComputeNode `json:"ai_compute_nodes"`
+	BareMetalNodes []AIComputeNode `json:"bare_metal_nodes"`
+	TotalSize      int             `json:"total_size"`
+	NextPageToken  string          `json:"next_page_token"`
+}
+
+type virtualClusterNodeRemoveResponse struct {
+	AIComputeNodes []AIComputeNode `json:"ai_compute_nodes"`
 }
 
 type virtualClusterListResponse struct {
@@ -398,6 +419,7 @@ type aiComputeNodeListResponse struct {
 type storageVolumePageResponse struct {
 	Resources     []StorageVolumeResource `json:"resources"`
 	NextPageToken string                  `json:"next_page_token"`
+	TotalSize     int                     `json:"total_size"`
 }
 
 type telemetryResourceListResponse struct {
@@ -2216,6 +2238,145 @@ func (c *VirtualClusterClient) ListAIComputeNodes(ctx context.Context) ([]AIComp
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("no platform profile available")
+}
+
+func (c *VirtualClusterClient) ListVirtualClusterNodes(
+	ctx context.Context,
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+) ([]VirtualClusterNode, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	subscriptionID = firstNonEmpty(strings.TrimSpace(subscriptionID), strings.TrimSpace(profile.Subscription))
+	region = firstNonEmpty(strings.TrimSpace(region), strings.TrimSpace(profile.Region))
+	virtualClusterName = strings.TrimSpace(virtualClusterName)
+	if subscriptionID == "" {
+		return nil, fmt.Errorf("subscription id is required for virtual cluster node lookup")
+	}
+	if virtualClusterName == "" {
+		return nil, fmt.Errorf("virtual cluster name is required")
+	}
+
+	const pageSize = 100
+	result := make([]VirtualClusterNode, 0)
+	for skip := 0; ; {
+		u, _ := url.Parse(profile.BaseURL)
+		u.Path = fmt.Sprintf(
+			"/compute/ecp/v1/subscriptions/%s/resourceGroups/%s/regions/%s/virtualClusters/%s/nodePools/-/nodes",
+			subscriptionID,
+			profile.ResourceGroup,
+			region,
+			virtualClusterName,
+		)
+		query := u.Query()
+		query.Set("page_size", strconv.Itoa(pageSize))
+		query.Set("filter", "")
+		query.Set("skip", strconv.Itoa(skip))
+		u.RawQuery = query.Encode()
+
+		var payload virtualClusterNodeListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		for _, node := range payload.AIComputeNodes {
+			node.ProfileName = profile.Name
+			result = append(result, VirtualClusterNode{AIComputeNode: node, Kind: "ACN"})
+		}
+		for _, node := range payload.BareMetalNodes {
+			node.ProfileName = profile.Name
+			result = append(result, VirtualClusterNode{AIComputeNode: node, Kind: "BMS"})
+		}
+
+		pageCount := len(payload.AIComputeNodes) + len(payload.BareMetalNodes)
+		if pageCount == 0 || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) {
+			break
+		}
+		if pageCount < pageSize && strings.TrimSpace(payload.NextPageToken) == "" {
+			break
+		}
+		skip += pageCount
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) RemoveAIComputeNodesFromVirtualCluster(
+	ctx context.Context,
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+	acnUIDs []string,
+) ([]AIComputeNode, error) {
+	reqURL, payload, profile, err := c.buildAIComputeNodeRemoveRequest(profileName, subscriptionID, region, virtualClusterName, acnUIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	var response virtualClusterNodeRemoveResponse
+	if err := c.postJSONWithProfile(ctx, profile, reqURL, payload, &response); err != nil {
+		return nil, err
+	}
+	for i := range response.AIComputeNodes {
+		response.AIComputeNodes[i].ProfileName = profile.Name
+	}
+	return response.AIComputeNodes, nil
+}
+
+func (c *VirtualClusterClient) BuildAIComputeNodeRemoveRequest(
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+	acnUIDs []string,
+) (string, map[string]any, error) {
+	reqURL, payload, _, err := c.buildAIComputeNodeRemoveRequest(profileName, subscriptionID, region, virtualClusterName, acnUIDs)
+	return reqURL, payload, err
+}
+
+func (c *VirtualClusterClient) buildAIComputeNodeRemoveRequest(
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+	acnUIDs []string,
+) (string, map[string]any, clientProfile, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return "", nil, clientProfile{}, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	subscriptionID = firstNonEmpty(strings.TrimSpace(subscriptionID), strings.TrimSpace(profile.Subscription))
+	region = firstNonEmpty(strings.TrimSpace(region), strings.TrimSpace(profile.Region))
+	virtualClusterName = strings.TrimSpace(virtualClusterName)
+	if subscriptionID == "" {
+		return "", nil, clientProfile{}, fmt.Errorf("subscription id is required for virtual cluster node removal")
+	}
+	if virtualClusterName == "" {
+		return "", nil, clientProfile{}, fmt.Errorf("virtual cluster name is required")
+	}
+	if len(acnUIDs) == 0 {
+		return "", nil, clientProfile{}, fmt.Errorf("at least one acn uid is required")
+	}
+
+	u, _ := url.Parse(profile.BaseURL)
+	u.Path = fmt.Sprintf(
+		"/compute/ecp/v1/subscriptions/%s/resourceGroups/%s/regions/%s/virtualClusters/%s/AIComputeNodes:remove",
+		subscriptionID,
+		profile.ResourceGroup,
+		region,
+		virtualClusterName,
+	)
+	payload := map[string]any{
+		"subscription_name":    subscriptionID,
+		"resource_group_name":  profile.ResourceGroup,
+		"region":               region,
+		"virtual_cluster_name": virtualClusterName,
+		"acn_uids":             acnUIDs,
+	}
+	return u.String(), payload, profile, nil
 }
 
 func (c *VirtualClusterClient) GetVolcanoJob(ctx context.Context, vclusterName string, namespace string, jobName string) (*unstructured.Unstructured, error) {
