@@ -47,3 +47,29 @@ func TestFormatJobGetTimeoutError(t *testing.T) {
 		}
 	}
 }
+
+func TestJobGetHelpIncludesClusterUsage(t *testing.T) {
+	cmd := newJobGetCmd()
+	help := strings.Join([]string{cmd.Short, cmd.Long, cmd.Example}, "\n")
+	for _, fragment := range []string{
+		"按 VC 分区",
+		"job get cluster vc-a3-intern-delivery",
+		"job get cluster -a pending",
+		"--all-status",
+	} {
+		if !strings.Contains(help, fragment) {
+			t.Fatalf("job get help does not contain %q:\n%s", fragment, help)
+		}
+	}
+
+	clusterCmd, _, err := cmd.Find([]string{"cluster"})
+	if err != nil {
+		t.Fatalf("find cluster subcommand: %v", err)
+	}
+	clusterHelp := strings.Join([]string{clusterCmd.Long, clusterCmd.Example}, "\n")
+	for _, fragment := range []string{"Running 和 Pending", "--all-status", "当前租户全部 VC"} {
+		if !strings.Contains(clusterHelp, fragment) {
+			t.Fatalf("job get cluster help does not contain %q:\n%s", fragment, clusterHelp)
+		}
+	}
+}

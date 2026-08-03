@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"rayctl/internal/platform"
@@ -15,6 +16,7 @@ type UserGetResult struct {
 	TenantCode string
 	Status     string
 	Source     string
+	Groups     []AuthGroupItem
 	Jobs       []JobClusterItem
 }
 
@@ -53,6 +55,10 @@ func (s *UserService) Get(ctx context.Context, identifier string, includeJobs bo
 
 	results := make([]*UserGetResult, 0, len(users))
 	for _, user := range users {
+		groups, err := s.vcClient.ListUserGroups(ctx, user.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list groups for user %q: %w", firstNonEmpty(user.Username, user.ID), err)
+		}
 		submittedJobs := make([]JobClusterItem, 0)
 		if includeJobs {
 			for _, item := range jobList {
@@ -72,8 +78,31 @@ func (s *UserService) Get(ctx context.Context, identifier string, includeJobs bo
 			TenantCode: user.TenantCode,
 			Status:     user.Status,
 			Source:     user.Source,
+			Groups:     userGroupItems(groups),
 			Jobs:       submittedJobs,
 		})
 	}
 	return results, nil
+}
+
+func userGroupItems(groups []platform.IAMGroup) []AuthGroupItem {
+	items := make([]AuthGroupItem, 0, len(groups))
+	for _, group := range groups {
+		items = append(items, AuthGroupItem{
+			ID:             strings.TrimSpace(group.ID),
+			Name:           strings.TrimSpace(group.Name),
+			DisplayName:    strings.TrimSpace(group.DisplayName),
+			PosixGroupName: strings.TrimSpace(group.PosixGroupName),
+			Status:         strings.TrimSpace(group.Status),
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left := firstNonEmpty(items[i].DisplayName, items[i].Name, items[i].PosixGroupName, items[i].ID)
+		right := firstNonEmpty(items[j].DisplayName, items[j].Name, items[j].PosixGroupName, items[j].ID)
+		if left != right {
+			return left < right
+		}
+		return items[i].ID < items[j].ID
+	})
+	return items
 }

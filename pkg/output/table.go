@@ -604,6 +604,28 @@ func PrintUserDetail(result *service.UserGetResult) {
 		},
 	)
 
+	fmt.Fprintln(os.Stdout)
+	groupRows := make([][]string, 0, maxInt(1, len(result.Groups)))
+	if len(result.Groups) == 0 {
+		groupRows = append(groupRows, []string{"-", "-", "-"})
+	} else {
+		for _, group := range result.Groups {
+			groupRows = append(groupRows, []string{
+				emptyDash(firstNonEmptyOutput(group.DisplayName, group.Name, group.PosixGroupName)),
+				emptyDash(group.PosixGroupName),
+				emptyDash(group.ID),
+			})
+		}
+	}
+	printBoxTableWithOptions(
+		[]string{"用户组", "POSIX", "ID"},
+		groupRows,
+		[]int{32, 28, 36},
+		tableOptions{
+			minWidths: []int{10, 10, 18},
+		},
+	)
+
 	if len(result.Jobs) == 0 {
 		return
 	}

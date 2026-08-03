@@ -26,7 +26,7 @@ func newUserGetCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "get <username-or-userid>",
-		Short: "根据 username 或 userid 查询用户信息",
+		Short: "根据 username 或 userid 查询用户信息和所属用户组",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()

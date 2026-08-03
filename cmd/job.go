@@ -44,8 +44,18 @@ func newJobGetCmd() *cobra.Command {
 
 	getCmd := &cobra.Command{
 		Use:   "get <job-name-or-pod-name-or-uid> [job-name-or-pod-name-or-uid...]",
-		Short: "根据任务名、Pod 名或 UID 查询 Job",
-		Args:  cobra.MinimumNArgs(1),
+		Short: "查询单个任务，或按 VC 分区列出任务",
+		Long: "根据任务名、Pod 名或 UID 查询 ECP/SSP 任务详情。\n" +
+			"也可以使用 cluster 子命令查看指定 VC 分区或当前租户全部 VC 的任务列表；默认只显示 Running 和 Pending 任务。",
+		Example: strings.Join([]string{
+			"  rayctl job get example-job",
+			"  rayctl job get cluster vc-a3-intern-delivery",
+			"  rayctl job get cluster vc-a3-intern-delivery pending",
+			"  rayctl job get cluster vc-a3-intern-delivery --all-status",
+			"  rayctl job get cluster -a",
+			"  rayctl job get cluster -a pending",
+		}, "\n"),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(getCmd *cobra.Command, args []string) error {
 			clientset, dynamicClient, err := newJobClients()
 			if err != nil {
@@ -259,6 +269,15 @@ func newJobGetClusterCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cluster [cluster-name-or-uid] [pending|running|active|all]",
 		Short: "查看某个分区下的任务列表",
+		Long: "查看指定 VC 分区下的任务列表，默认只显示 Running 和 Pending 任务。\n" +
+			"可用 pending、running 或 active 过滤状态；使用 --all-status 显示包括已结束任务在内的全部状态；使用 -a 查询当前租户全部 VC。",
+		Example: strings.Join([]string{
+			"  rayctl job get cluster vc-a3-intern-delivery",
+			"  rayctl job get cluster vc-a3-intern-delivery pending",
+			"  rayctl job get cluster vc-a3-intern-delivery --all-status",
+			"  rayctl job get cluster -a",
+			"  rayctl job get cluster -a running",
+		}, "\n"),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if allVC {
 				if len(args) > 1 {

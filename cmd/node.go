@@ -336,8 +336,12 @@ func normalizeNodeIdentifier(value string) string {
 func newNodeCordonCmd() *cobra.Command {
 	// 定义 cordon 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:   "cordon <node-name>",
-		Short: "封锁节点并将其标记为维修状态",
+		Use:   "cordon <node-name-or-ip>",
+		Short: "通过节点名或 IP 封锁节点并将其标记为维修状态",
+		Example: strings.Join([]string{
+			"  rayctl node cordon host-10-140-214-222",
+			"  rayctl node cordon 10.140.214.222",
+		}, "\n"),
 		// 强制要求必须提供 1 个位置参数，即节点名称
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -352,7 +356,7 @@ func newNodeCordonCmd() *cobra.Command {
 			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
 			// nodeService.Cordon 定义于 internal/service/node_service.go
-			result, err := nodeService.Cordon(context.Background(), args[0])
+			result, err := nodeService.Cordon(cmd.Context(), normalizeNodeIdentifier(args[0]))
 			if err != nil {
 				return err
 			}
@@ -372,8 +376,12 @@ func newNodeCordonCmd() *cobra.Command {
 func newNodeUncordonCmd() *cobra.Command {
 	// 定义 uncordon 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:   "uncordon <node-name>",
-		Short: "解封节点并清除维修标签",
+		Use:   "uncordon <node-name-or-ip>",
+		Short: "通过节点名或 IP 解封节点并清除维修标签",
+		Example: strings.Join([]string{
+			"  rayctl node uncordon host-10-140-214-222",
+			"  rayctl node uncordon 10.140.214.222",
+		}, "\n"),
 		// 强制要求必须提供 1 个位置参数，即节点名称
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -388,7 +396,7 @@ func newNodeUncordonCmd() *cobra.Command {
 			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
 			// nodeService.Uncordon 定义于 internal/service/node_service.go
-			result, err := nodeService.Uncordon(context.Background(), args[0])
+			result, err := nodeService.Uncordon(cmd.Context(), normalizeNodeIdentifier(args[0]))
 			if err != nil {
 				return err
 			}
