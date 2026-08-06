@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -717,6 +718,10 @@ func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
 	if result == nil {
 		return
 	}
+	permissions := result.Permissions
+	if !long {
+		permissions = deduplicateAuthPermissions(permissions)
+	}
 
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
@@ -728,7 +733,7 @@ func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
 			{"STATUS", emptyDash(result.Status)},
 			{"SOURCE", emptyDash(result.Source)},
 			{"用户组数量", strconv.Itoa(len(result.Groups))},
-			{"权限数量", strconv.Itoa(len(result.Permissions))},
+			{"权限数量", strconv.Itoa(len(permissions))},
 		},
 		[]int{14, 72},
 		tableOptions{
@@ -747,12 +752,12 @@ func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
 	)
 
 	fmt.Fprintln(os.Stdout)
-	permissionRows := make([][]string, 0, maxInt(1, len(result.Permissions)))
+	permissionRows := make([][]string, 0, maxInt(1, len(permissions)))
 	if !long {
-		if len(result.Permissions) == 0 {
+		if len(permissions) == 0 {
 			permissionRows = append(permissionRows, []string{"-", "-"})
 		} else {
-			for _, item := range result.Permissions {
+			for _, item := range permissions {
 				permissionRows = append(permissionRows, []string{
 					emptyDash(formatAuthScopeForDisplay(item.Scope)),
 					emptyDash(item.Roles),
@@ -874,9 +879,44 @@ func formatAuthScopeForDisplay(scope string) string {
 	return scope
 }
 
+func deduplicateAuthPermissions(items []service.AuthPermissionItem) []service.AuthPermissionItem {
+	result := make([]service.AuthPermissionItem, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		scope := strings.Trim(strings.TrimPrefix(strings.TrimSpace(item.Scope), "/rm"), "/")
+		roles := normalizedAuthRoles(item.Roles)
+		if roles == "" {
+			roles = normalizedAuthRoles(item.RoleNames)
+		}
+		key := scope + "\x00" + roles
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, item)
+	}
+	return result
+}
+
+func normalizedAuthRoles(value string) string {
+	parts := strings.Split(value, ",")
+	roles := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if role := strings.TrimSpace(part); role != "" {
+			roles = append(roles, role)
+		}
+	}
+	sort.Strings(roles)
+	return strings.Join(roles, ",")
+}
+
 func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 	if result == nil {
 		return
+	}
+	permissions := result.Permissions
+	if !long {
+		permissions = deduplicateAuthPermissions(permissions)
 	}
 
 	printBoxTableWithOptions(
@@ -888,7 +928,7 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 			{"POSIX", emptyDash(result.PosixGroupName)},
 			{"TENANT CODE", emptyDash(result.TenantCode)},
 			{"STATUS", emptyDash(result.Status)},
-			{"权限数量", strconv.Itoa(len(result.Permissions))},
+			{"权限数量", strconv.Itoa(len(permissions))},
 		},
 		[]int{14, 72},
 		tableOptions{
@@ -906,12 +946,12 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 	)
 
 	fmt.Fprintln(os.Stdout)
-	permissionRows := make([][]string, 0, maxInt(1, len(result.Permissions)))
+	permissionRows := make([][]string, 0, maxInt(1, len(permissions)))
 	if !long {
-		if len(result.Permissions) == 0 {
+		if len(permissions) == 0 {
 			permissionRows = append(permissionRows, []string{"-", "-"})
 		} else {
-			for _, item := range result.Permissions {
+			for _, item := range permissions {
 				permissionRows = append(permissionRows, []string{
 					emptyDash(formatAuthScopeForDisplay(item.Scope)),
 					emptyDash(item.Roles),

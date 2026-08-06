@@ -13,13 +13,23 @@ import (
 )
 
 const (
-	disallowPrivilegedContainersPolicyName = "disallow-privileged-containers"
-	disallowPrivilegedRuleName             = "privileged-containers"
-	policySelectorLabelKey                 = "vcluster.loft.sh/vcluster-name"
-	policySelectorNamespaceLabelKey        = "vcluster.loft.sh/vcluster-namespace"
-	policyLegacySelectorLabelKey           = "cluster.x-k8s.io/vcluster-name"
-	policyNamespaceLabelPrefix             = "vcluster.loft.sh/ns-label-vc-"
+	policySelectorLabelKey          = "vcluster.loft.sh/vcluster-name"
+	policySelectorNamespaceLabelKey = "vcluster.loft.sh/vcluster-namespace"
+	policyLegacySelectorLabelKey    = "cluster.x-k8s.io/vcluster-name"
+	policyNamespaceLabelPrefix      = "vcluster.loft.sh/ns-label-vc-"
 )
+
+var supportedClusterPolicyRules = map[string][]string{
+	"disallow-capabilities":          {"adding-capabilities"},
+	"disallow-host-namespaces":       {"host-namespaces"},
+	"disallow-host-path":             {"host-path"},
+	"disallow-host-ports":            {"host-ports-none"},
+	"disallow-host-ports-range":      {"host-port-range"},
+	"disallow-host-process":          {"host-process-containers"},
+	"disallow-privileged-containers": {"privileged-containers"},
+	"disallow-proc-mount":            {"check-proc-mount"},
+	"disallow-selinux":               {"selinux-type", "selinux-user-role"},
+}
 
 var clusterPolicyGVR = schema.GroupVersionResource{
 	Group:    "kyverno.io",
@@ -69,8 +79,9 @@ func NewPolicyService(dynamicClient dynamic.Interface, clusterService *ClusterSe
 
 func (s *PolicyService) UpdateClusterPolicy(ctx context.Context, policyName string, clusterIdentifier string) (*PolicyUpdateResult, error) {
 	policyName = strings.TrimSpace(policyName)
-	if policyName != disallowPrivilegedContainersPolicyName {
-		return nil, fmt.Errorf("当前 policy update 仅支持 %q", disallowPrivilegedContainersPolicyName)
+	ruleNames, ok := supportedClusterPolicyRules[policyName]
+	if !ok {
+		return nil, unsupportedClusterPolicyError("update", policyName)
 	}
 	if s.dynamicClient == nil {
 		return nil, fmt.Errorf("policy update requires kubernetes dynamic client")
@@ -94,7 +105,7 @@ func (s *PolicyService) UpdateClusterPolicy(ctx context.Context, policyName stri
 		return nil, fmt.Errorf("get clusterpolicy %q: %w", policyName, err)
 	}
 
-	updatedObj, alreadyPresent, err := ensureDisallowPrivilegedPolicyExclusion(policy, selectorValue)
+	updatedObj, alreadyPresent, err := ensureClusterPolicyExclusion(policy, ruleNames, selectorValue)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +114,7 @@ func (s *PolicyService) UpdateClusterPolicy(ctx context.Context, policyName stri
 		PolicyName:     policyName,
 		ClusterName:    clusterResult.ClusterName,
 		ClusterUID:     clusterResult.ClusterUID,
-		RuleName:       disallowPrivilegedRuleName,
+		RuleName:       strings.Join(ruleNames, ", "),
 		SelectorKey:    policySelectorLabelKey,
 		SelectorValue:  selectorValue,
 		AlreadyPresent: alreadyPresent,
@@ -121,8 +132,9 @@ func (s *PolicyService) UpdateClusterPolicy(ctx context.Context, policyName stri
 
 func (s *PolicyService) GetClusterPolicy(ctx context.Context, policyName string, clusterIdentifier string) (*PolicyGetResult, error) {
 	policyName = strings.TrimSpace(policyName)
-	if policyName != disallowPrivilegedContainersPolicyName {
-		return nil, fmt.Errorf("当前 policy get 仅支持 %q", disallowPrivilegedContainersPolicyName)
+	ruleNames, ok := supportedClusterPolicyRules[policyName]
+	if !ok {
+		return nil, unsupportedClusterPolicyError("get", policyName)
 	}
 	if s.dynamicClient == nil {
 		return nil, fmt.Errorf("policy get requires kubernetes dynamic client")
@@ -133,7 +145,7 @@ func (s *PolicyService) GetClusterPolicy(ctx context.Context, policyName string,
 		return nil, fmt.Errorf("get clusterpolicy %q: %w", policyName, err)
 	}
 
-	items, err := extractDisallowPrivilegedWhitelist(policy)
+	items, err := extractClusterPolicyWhitelist(policy, ruleNames)
 	if err != nil {
 		return nil, err
 	}
@@ -198,9 +210,25 @@ func sortPolicyWhitelistItems(items []PolicyWhitelistItem) {
 	})
 }
 
-func ensureDisallowPrivilegedPolicyExclusion(policy *unstructured.Unstructured, selectorValue string) (*unstructured.Unstructured, bool, error) {
+func supportedClusterPolicyNames() []string {
+	names := make([]string, 0, len(supportedClusterPolicyRules))
+	for name := range supportedClusterPolicyRules {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func unsupportedClusterPolicyError(operation string, policyName string) error {
+	return fmt.Errorf("policy %s 不支持 %q；当前支持: %s", operation, policyName, strings.Join(supportedClusterPolicyNames(), ", "))
+}
+
+func ensureClusterPolicyExclusion(policy *unstructured.Unstructured, ruleNames []string, selectorValue string) (*unstructured.Unstructured, bool, error) {
 	if policy == nil {
 		return nil, false, fmt.Errorf("clusterpolicy is required")
+	}
+	if len(ruleNames) == 0 {
+		return nil, false, fmt.Errorf("clusterpolicy %q has no configured target rules", policy.GetName())
 	}
 
 	rules, found, err := unstructured.NestedSlice(policy.Object, "spec", "rules")
@@ -211,59 +239,73 @@ func ensureDisallowPrivilegedPolicyExclusion(policy *unstructured.Unstructured, 
 		return nil, false, fmt.Errorf("clusterpolicy %q has no spec.rules", policy.GetName())
 	}
 
-	ruleIndex := -1
+	ruleIndexes := make(map[string]int, len(ruleNames))
 	for i, item := range rules {
 		ruleMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		if strings.TrimSpace(fmt.Sprintf("%v", ruleMap["name"])) == disallowPrivilegedRuleName {
-			ruleIndex = i
-			break
+		name := strings.TrimSpace(fmt.Sprintf("%v", ruleMap["name"]))
+		for _, target := range ruleNames {
+			if name == target {
+				ruleIndexes[target] = i
+				break
+			}
 		}
 	}
-	if ruleIndex < 0 {
-		return nil, false, fmt.Errorf("clusterpolicy %q has no rule named %q", policy.GetName(), disallowPrivilegedRuleName)
+	for _, ruleName := range ruleNames {
+		if _, found := ruleIndexes[ruleName]; !found {
+			return nil, false, fmt.Errorf("clusterpolicy %q has no rule named %q", policy.GetName(), ruleName)
+		}
 	}
 
-	ruleMap, ok := rules[ruleIndex].(map[string]any)
-	if !ok {
-		return nil, false, fmt.Errorf("clusterpolicy rule %q has unexpected format", disallowPrivilegedRuleName)
-	}
+	updatedAnyRule := false
+	for _, ruleName := range ruleNames {
+		ruleIndex := ruleIndexes[ruleName]
+		ruleMap, ok := rules[ruleIndex].(map[string]any)
+		if !ok {
+			return nil, false, fmt.Errorf("clusterpolicy rule %q has unexpected format", ruleName)
+		}
 
-	excludeMap, _, err := unstructured.NestedMap(ruleMap, "exclude")
-	if err != nil {
-		return nil, false, fmt.Errorf("read clusterpolicy exclude block: %w", err)
-	}
-	anyItems, found, err := unstructured.NestedSlice(ruleMap, "exclude", "any")
-	if err != nil {
-		return nil, false, fmt.Errorf("read clusterpolicy exclude.any: %w", err)
-	}
-	if !found {
-		anyItems = make([]any, 0)
-	}
+		excludeMap, _, err := unstructured.NestedMap(ruleMap, "exclude")
+		if err != nil {
+			return nil, false, fmt.Errorf("read clusterpolicy rule %q exclude block: %w", ruleName, err)
+		}
+		anyItems, found, err := unstructured.NestedSlice(ruleMap, "exclude", "any")
+		if err != nil {
+			return nil, false, fmt.Errorf("read clusterpolicy rule %q exclude.any: %w", ruleName, err)
+		}
+		if !found {
+			anyItems = make([]any, 0)
+		}
 
-	if hasNamespaceSelectorExclusion(anyItems, policySelectorLabelKey, selectorValue) {
-		return policy.DeepCopy(), true, nil
-	}
+		if hasClusterPolicyExclusion(anyItems, selectorValue) {
+			continue
+		}
 
-	anyItems = append(anyItems, map[string]any{
-		"resources": map[string]any{
-			"kinds": []any{"Pod"},
-			"namespaceSelector": map[string]any{
-				"matchLabels": map[string]any{
-					policySelectorLabelKey: selectorValue,
+		anyItems = append(anyItems, map[string]any{
+			"resources": map[string]any{
+				"kinds": []any{"Pod"},
+				"namespaceSelector": map[string]any{
+					"matchLabels": map[string]any{
+						policySelectorLabelKey: selectorValue,
+					},
 				},
 			},
-		},
-	})
+		})
 
-	if excludeMap == nil {
-		excludeMap = make(map[string]any)
+		if excludeMap == nil {
+			excludeMap = make(map[string]any)
+		}
+		excludeMap["any"] = anyItems
+		ruleMap["exclude"] = excludeMap
+		rules[ruleIndex] = ruleMap
+		updatedAnyRule = true
 	}
-	excludeMap["any"] = anyItems
-	ruleMap["exclude"] = excludeMap
-	rules[ruleIndex] = ruleMap
+
+	if !updatedAnyRule {
+		return policy.DeepCopy(), true, nil
+	}
 
 	updated := policy.DeepCopy()
 	if err := unstructured.SetNestedSlice(updated.Object, rules, "spec", "rules"); err != nil {
@@ -272,24 +314,41 @@ func ensureDisallowPrivilegedPolicyExclusion(policy *unstructured.Unstructured, 
 	return updated, false, nil
 }
 
-func hasNamespaceSelectorExclusion(items []any, selectorKey string, selectorValue string) bool {
+func hasClusterPolicyExclusion(items []any, selectorValue string) bool {
+	uid := uidFromPolicySelectorValue(selectorValue)
 	for _, item := range items {
 		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 		matchLabels, found, err := unstructured.NestedStringMap(itemMap, "resources", "namespaceSelector", "matchLabels")
+		if err == nil && found {
+			for _, selectorKey := range []string{policySelectorLabelKey, policySelectorNamespaceLabelKey, policyLegacySelectorLabelKey} {
+				if strings.TrimSpace(matchLabels[selectorKey]) == selectorValue {
+					return true
+				}
+			}
+		}
+
+		matchExpressions, found, err := unstructured.NestedSlice(itemMap, "resources", "selector", "matchExpressions")
 		if err != nil || !found {
 			continue
 		}
-		if strings.TrimSpace(matchLabels[selectorKey]) == selectorValue {
-			return true
+		for _, expression := range matchExpressions {
+			expressionMap, ok := expression.(map[string]any)
+			if !ok {
+				continue
+			}
+			key := strings.TrimSpace(fmt.Sprintf("%v", expressionMap["key"]))
+			if uid != "" && key == policyNamespaceLabelPrefix+uid {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func extractDisallowPrivilegedWhitelist(policy *unstructured.Unstructured) ([]PolicyWhitelistItem, error) {
+func extractClusterPolicyWhitelist(policy *unstructured.Unstructured, ruleNames []string) ([]PolicyWhitelistItem, error) {
 	if policy == nil {
 		return nil, fmt.Errorf("clusterpolicy is required")
 	}
@@ -302,31 +361,41 @@ func extractDisallowPrivilegedWhitelist(policy *unstructured.Unstructured) ([]Po
 		return nil, fmt.Errorf("clusterpolicy %q has no spec.rules", policy.GetName())
 	}
 
-	var ruleMap map[string]any
+	targetRules := make(map[string]struct{}, len(ruleNames))
+	for _, ruleName := range ruleNames {
+		targetRules[ruleName] = struct{}{}
+	}
+	foundRules := make(map[string]struct{}, len(ruleNames))
+	result := make([]PolicyWhitelistItem, 0)
+	seen := make(map[string]struct{})
 	for _, item := range rules {
 		current, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		if strings.TrimSpace(fmt.Sprintf("%v", current["name"])) == disallowPrivilegedRuleName {
-			ruleMap = current
-			break
+		ruleName := strings.TrimSpace(fmt.Sprintf("%v", current["name"]))
+		if _, wanted := targetRules[ruleName]; !wanted {
+			continue
+		}
+		foundRules[ruleName] = struct{}{}
+		anyItems, found, err := unstructured.NestedSlice(current, "exclude", "any")
+		if err != nil {
+			return nil, fmt.Errorf("read clusterpolicy rule %q exclude.any: %w", ruleName, err)
+		}
+		if !found {
+			continue
+		}
+		extractClusterPolicyWhitelistItems(anyItems, &result, seen)
+	}
+	for _, ruleName := range ruleNames {
+		if _, found := foundRules[ruleName]; !found {
+			return nil, fmt.Errorf("clusterpolicy %q has no rule named %q", policy.GetName(), ruleName)
 		}
 	}
-	if ruleMap == nil {
-		return nil, fmt.Errorf("clusterpolicy %q has no rule named %q", policy.GetName(), disallowPrivilegedRuleName)
-	}
+	return result, nil
+}
 
-	anyItems, found, err := unstructured.NestedSlice(ruleMap, "exclude", "any")
-	if err != nil {
-		return nil, fmt.Errorf("read clusterpolicy exclude.any: %w", err)
-	}
-	if !found {
-		return nil, nil
-	}
-
-	result := make([]PolicyWhitelistItem, 0)
-	seen := make(map[string]struct{})
+func extractClusterPolicyWhitelistItems(anyItems []any, result *[]PolicyWhitelistItem, seen map[string]struct{}) {
 	for _, item := range anyItems {
 		itemMap, ok := item.(map[string]any)
 		if !ok {
@@ -341,7 +410,7 @@ func extractDisallowPrivilegedWhitelist(policy *unstructured.Unstructured) ([]Po
 				if uid == "" {
 					continue
 				}
-				appendPolicyWhitelistItem(&result, seen, PolicyWhitelistItem{
+				appendPolicyWhitelistItem(result, seen, PolicyWhitelistItem{
 					ClusterUID:    uid,
 					SelectorKey:   selectorKey,
 					SelectorValue: selectorValue,
@@ -370,14 +439,13 @@ func extractDisallowPrivilegedWhitelist(policy *unstructured.Unstructured) ([]Po
 			if operator == "" || operator == "<nil>" {
 				operator = "Exists"
 			}
-			appendPolicyWhitelistItem(&result, seen, PolicyWhitelistItem{
+			appendPolicyWhitelistItem(result, seen, PolicyWhitelistItem{
 				ClusterUID:    uid,
 				SelectorKey:   selectorKey,
 				SelectorValue: operator,
 			})
 		}
 	}
-	return result, nil
 }
 
 func appendPolicyWhitelistItem(result *[]PolicyWhitelistItem, seen map[string]struct{}, item PolicyWhitelistItem) {
