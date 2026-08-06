@@ -70,6 +70,23 @@ type PolicyWhitelistItem struct {
 	SelectorValue string
 }
 
+type SupportedPolicyItem struct {
+	PolicyName string
+	RuleNames  []string
+}
+
+func SupportedClusterPolicies() []SupportedPolicyItem {
+	names := supportedClusterPolicyNames()
+	items := make([]SupportedPolicyItem, 0, len(names))
+	for _, name := range names {
+		items = append(items, SupportedPolicyItem{
+			PolicyName: name,
+			RuleNames:  append([]string(nil), supportedClusterPolicyRules[name]...),
+		})
+	}
+	return items
+}
+
 func NewPolicyService(dynamicClient dynamic.Interface, clusterService *ClusterService) *PolicyService {
 	return &PolicyService{
 		dynamicClient:  dynamicClient,

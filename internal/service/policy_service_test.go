@@ -1,10 +1,25 @@
 package service
 
 import (
+	"reflect"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+func TestSupportedClusterPolicies(t *testing.T) {
+	items := SupportedClusterPolicies()
+	if len(items) != 9 {
+		t.Fatalf("SupportedClusterPolicies() returned %d items, want 9", len(items))
+	}
+	if items[0].PolicyName != "disallow-capabilities" || items[len(items)-1].PolicyName != "disallow-selinux" {
+		t.Fatalf("SupportedClusterPolicies() is not sorted: first=%q last=%q", items[0].PolicyName, items[len(items)-1].PolicyName)
+	}
+	wantSELinuxRules := []string{"selinux-type", "selinux-user-role"}
+	if !reflect.DeepEqual(items[len(items)-1].RuleNames, wantSELinuxRules) {
+		t.Fatalf("disallow-selinux rules = %v, want %v", items[len(items)-1].RuleNames, wantSELinuxRules)
+	}
+}
 
 func TestEnsureClusterPolicyExclusionUpdatesEveryTargetRule(t *testing.T) {
 	policy := testClusterPolicy("disallow-selinux", "selinux-type", "selinux-user-role")

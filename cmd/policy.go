@@ -25,18 +25,25 @@ func newPolicyCmd() *cobra.Command {
 
 func newPolicyGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get <policy-name> [vc-name-or-uid]",
+		Use:   "get [policy-name] [vc-name-or-uid]",
 		Short: "查看集群策略白名单",
 		Long: "查看 HC 上受支持的 Pod 安全 ClusterPolicy 白名单。\n" +
+			"不传参数时列出 rayctl 当前覆盖的全部 policy；\n" +
 			"不传 VC 时列出所有已加入白名单的 vcluster；传 VC 时检查该 vcluster 是否已加入白名单。\n" +
 			"支持 disallow-capabilities、disallow-host-namespaces、disallow-host-path、disallow-host-ports、\n" +
 			"disallow-host-ports-range、disallow-host-process、disallow-privileged-containers、disallow-proc-mount、disallow-selinux。",
 		Example: strings.Join([]string{
+			"  rayctl policy get",
 			"  rayctl policy get disallow-privileged-containers",
 			"  rayctl policy get disallow-privileged-containers vc-c550-h3c-test",
 		}, "\n"),
-		Args: cobra.RangeArgs(1, 2),
+		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				output.PrintSupportedClusterPolicies(service.SupportedClusterPolicies())
+				return nil
+			}
+
 			clientset, err := kube.NewClientset(kubeconfig)
 			if err != nil {
 				return err

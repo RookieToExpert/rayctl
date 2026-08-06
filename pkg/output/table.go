@@ -1675,6 +1675,30 @@ func PrintPolicyUpdateResult(result *service.PolicyUpdateResult) {
 	)
 }
 
+func PrintSupportedClusterPolicies(items []service.SupportedPolicyItem) {
+	rows := make([][]string, 0, maxInt(1, len(items)))
+	if len(items) == 0 {
+		rows = append(rows, []string{"-", "-"})
+	} else {
+		for _, item := range items {
+			rows = append(rows, []string{
+				emptyDash(item.PolicyName),
+				emptyDash(strings.Join(item.RuleNames, ", ")),
+			})
+		}
+	}
+
+	printBoxTableWithOptions(
+		[]string{"POLICY", "RULES"},
+		rows,
+		[]int{40, 64},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 0)...),
+			minWidths:   []int{24, 20},
+		},
+	)
+}
+
 func PrintECPWorkloadLogs(result *service.ECPWorkloadLogResult) {
 	if result == nil {
 		return
