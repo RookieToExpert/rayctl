@@ -33,6 +33,7 @@ func newSSPAIDCmd() *cobra.Command {
 
 func newSSPAIDGetCmd() *cobra.Command {
 	var workspace string
+	var region string
 	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "get <aid-name-or-uid>",
@@ -47,7 +48,7 @@ func newSSPAIDGetCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
 			}
-			result, err := service.NewSSPAIDService(clientset, platformClient).GetAID(context.Background(), args[0], workspace, longOutput)
+			result, err := service.NewSSPAIDService(clientset, platformClient).GetAIDInRegion(cmd.Context(), args[0], workspace, region, longOutput)
 			if err != nil {
 				return err
 			}
@@ -56,6 +57,7 @@ func newSSPAIDGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免已停止开发机跨 workspace 查询")
+	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03；默认自动识别")
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示首个 Pod 的最新日志")
 	return cmd
 }

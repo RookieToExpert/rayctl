@@ -12,10 +12,10 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const defaultKubeconfigPath = "/root/kubeconfig"
 const (
-	defaultClientQPS   = 50
-	defaultClientBurst = 100
+	defaultKubeconfigFileName = "kubeconfig"
+	defaultClientQPS          = 50
+	defaultClientBurst        = 100
 )
 
 type KubeconfigIdentity struct {
@@ -83,7 +83,7 @@ func ResolveKubeconfigIdentity(kubeconfig string) (*KubeconfigIdentity, error) {
 	case strings.TrimSpace(os.Getenv("KUBECONFIG")) != "":
 		rules.Precedence = filepath.SplitList(strings.TrimSpace(os.Getenv("KUBECONFIG")))
 	default:
-		rules.Precedence = []string{defaultKubeconfigPath}
+		rules.Precedence = []string{defaultKubeconfigPath()}
 	}
 
 	if !hasExistingKubeconfig(rules.Precedence) {
@@ -130,7 +130,15 @@ func resolveKubeconfigPath(kubeconfig string) string {
 	if path := strings.TrimSpace(os.Getenv("KUBECONFIG")); path != "" {
 		return path
 	}
-	return defaultKubeconfigPath
+	return defaultKubeconfigPath()
+}
+
+func defaultKubeconfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return defaultKubeconfigFileName
+	}
+	return filepath.Join(home, defaultKubeconfigFileName)
 }
 
 func hasExistingKubeconfig(paths []string) bool {

@@ -17,6 +17,8 @@ import (
 
 const sspAIDWorkloadType = sspAIDWorkloadTypeValue
 
+const sspNodeZoneLabel = "topology.sensecore.cn/zone"
+
 type SSPAIDService struct {
 	clientset kubernetes.Interface
 	platform  *platform.VirtualClusterClient
@@ -97,6 +99,10 @@ func NewSSPAIDService(clientset kubernetes.Interface, platformClient *platform.V
 }
 
 func (s *SSPAIDService) GetAID(ctx context.Context, identifier string, workspace string, includeLogs bool) (*SSPAIDGetResult, error) {
+	return s.GetAIDInRegion(ctx, identifier, workspace, "", includeLogs)
+}
+
+func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, workspace string, requestedRegion string, includeLogs bool) (*SSPAIDGetResult, error) {
 	if s.clientset == nil {
 		return nil, fmt.Errorf("kubernetes client is required")
 	}
@@ -114,13 +120,14 @@ func (s *SSPAIDService) GetAID(ctx context.Context, identifier string, workspace
 
 	seedPods, err := s.findAIDPods(ctx, identifier, "")
 	if err != nil {
-		return nil, fmt.Errorf("locate AID pods in PT HC: %w", err)
+		return nil, fmt.Errorf("locate AID pods in HC: %w", err)
 	}
-	workspaces, err := s.sspBase.resolveWorkspaceCandidates(ctx, workspace, seedPods)
+	region := s.resolveAIDRegion(ctx, requestedRegion, seedPods)
+	workspaces, err := s.sspBase.resolveWorkspaceCandidatesForRegion(ctx, workspace, seedPods, region)
 	if err != nil {
 		return nil, err
 	}
-	subscription, err := s.sspBase.resolveSubscription(ctx, seedPods)
+	subscription, err := s.sspBase.resolveSubscriptionForRegion(ctx, seedPods, region)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +136,7 @@ func (s *SSPAIDService) GetAID(ctx context.Context, identifier string, workspace
 	if looksLikeUUID(identifier) && len(seedPods) > 0 {
 		lookupIdentifier = firstNonEmpty(seedPods[0].Labels[sspWorkloadNameLabel], identifier)
 	}
-	candidates, lookupErr := s.findPlatformAIDs(ctx, subscription, lookupIdentifier, workspaces)
+	candidates, lookupErr := s.findPlatformAIDs(ctx, subscription, region, lookupIdentifier, workspaces)
 	if len(candidates) == 0 {
 		if lookupErr != nil {
 			return nil, fmt.Errorf("query SSP AID API: %w", lookupErr)
@@ -137,7 +144,7 @@ func (s *SSPAIDService) GetAID(ctx context.Context, identifier string, workspace
 		if workspace != "" {
 			return nil, fmt.Errorf("AID %q not found in workspace %q", identifier, workspace)
 		}
-		return nil, fmt.Errorf("AID %q not found in PT workspaces", identifier)
+		return nil, fmt.Errorf("AID %q not found in %s workspaces", identifier, region)
 	}
 	if len(candidates) > 1 {
 		values := make([]string, 0, len(candidates))
@@ -166,7 +173,7 @@ func (s *SSPAIDService) GetAID(ctx context.Context, identifier string, workspace
 	return s.buildResult(ctx, aid, hostNamespace, pods, dnatRules, includeLogs), nil
 }
 
-func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription string, identifier string, workspaces []sspWorkspaceRef) ([]sspAIDCandidate, error) {
+func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription string, region string, identifier string, workspaces []sspWorkspaceRef) ([]sspAIDCandidate, error) {
 	type lookupResult struct {
 		workspace sspWorkspaceRef
 		aids      []platform.SSPAID
@@ -187,7 +194,7 @@ func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription strin
 				return
 			}
 			defer func() { <-semaphore }()
-			aids, err := s.platform.FindSSPAIDs(ctx, subscription, sspDefaultRegion, workspace.Name, identifier)
+			aids, err := s.platform.FindSSPAIDs(ctx, subscription, region, workspace.Name, identifier)
 			results <- lookupResult{workspace: workspace, aids: aids, err: err}
 		}()
 	}
@@ -208,6 +215,55 @@ func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription strin
 		}
 	}
 	return candidates, firstErr
+}
+
+func (s *SSPAIDService) resolveAIDRegion(ctx context.Context, requested string, pods []corev1.Pod) string {
+	if region := strings.TrimSpace(requested); region != "" {
+		return region
+	}
+	seenNodes := make(map[string]struct{})
+	for _, pod := range pods {
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" {
+			continue
+		}
+		if _, exists := seenNodes[nodeName]; exists {
+			continue
+		}
+		seenNodes[nodeName] = struct{}{}
+		node, err := s.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		if region := regionFromSSPZone(node.Labels[sspNodeZoneLabel]); region != "" {
+			return region
+		}
+	}
+	if nodes, err := s.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 10}); err == nil {
+		for _, node := range nodes.Items {
+			if region := regionFromSSPZone(node.Labels[sspNodeZoneLabel]); region != "" {
+				return region
+			}
+		}
+	}
+	if s.platform != nil {
+		if region := s.platform.CurrentRegion(); region != "" {
+			return region
+		}
+	}
+	return sspDefaultRegion
+}
+
+func regionFromSSPZone(zone string) string {
+	zone = strings.TrimSpace(zone)
+	if len(zone) >= 2 {
+		last := zone[len(zone)-1]
+		previous := zone[len(zone)-2]
+		if ((last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z')) && previous >= '0' && previous <= '9' {
+			return zone[:len(zone)-1]
+		}
+	}
+	return zone
 }
 
 func (s *SSPAIDService) findAIDPods(ctx context.Context, identifier string, namespace string) ([]corev1.Pod, error) {
@@ -318,7 +374,7 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 	switch {
 	case len(pods) == 0:
 		result.Stage = "scheduling"
-		result.Diagnosis = []string{"平台尚未在 PT HC 创建 AID Pod，当前更可能仍在开发机控制器或队列处理阶段。"}
+		result.Diagnosis = []string{"平台尚未在当前 HC 创建 AID Pod，当前更可能仍在开发机控制器或队列处理阶段。"}
 		result.Instruction = "确认所选队列可用并稍后重试；Pod 创建后本命令会展示具体调度原因。"
 	case assigned == 0:
 		result.Stage = "scheduling"

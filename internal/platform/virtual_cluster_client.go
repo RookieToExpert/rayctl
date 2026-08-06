@@ -40,7 +40,7 @@ const (
 	defaultResourceGroup          = "default"
 	defaultRegion                 = "cn-pj-01"
 	defaultPageLimit              = 100
-	defaultConfigPath             = "/root/.rayctl/platform.json"
+	defaultConfigFileName         = "platform.json"
 )
 
 type VirtualClusterClient struct {
@@ -572,7 +572,7 @@ type ConfigSnapshot struct {
 }
 
 func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
-	if client, ok := newVirtualClusterClientFromFile(defaultConfigPath); ok {
+	if client, ok := newVirtualClusterClientFromFile(DefaultConfigPath()); ok {
 		return client, true
 	}
 
@@ -712,7 +712,14 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 }
 
 func DefaultConfigPath() string {
-	return defaultConfigPath
+	if override := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_CONFIG")); override != "" {
+		return filepath.Clean(override)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return filepath.Join(".rayctl", defaultConfigFileName)
+	}
+	return filepath.Join(home, ".rayctl", defaultConfigFileName)
 }
 
 func (c *VirtualClusterClient) CurrentProfileName() string {
@@ -720,6 +727,17 @@ func (c *VirtualClusterClient) CurrentProfileName() string {
 		return ""
 	}
 	return strings.TrimSpace(c.currentProfile)
+}
+
+func (c *VirtualClusterClient) CurrentRegion() string {
+	if c == nil {
+		return ""
+	}
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return strings.TrimSpace(c.region)
+	}
+	return strings.TrimSpace(profile.Region)
 }
 
 func (c *VirtualClusterClient) CurrentSigninURL() string {

@@ -363,8 +363,13 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 }
 
 func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requested string, pods []corev1.Pod) ([]sspWorkspaceRef, error) {
+	return s.resolveWorkspaceCandidatesForRegion(ctx, requested, pods, sspDefaultRegion)
+}
+
+func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context, requested string, pods []corev1.Pod, region string) ([]sspWorkspaceRef, error) {
+	region = firstNonEmpty(strings.TrimSpace(region), sspDefaultRegion)
 	if requested != "" {
-		workspaces, err := s.platform.ListSSPWorkspaces(ctx, sspDefaultRegion)
+		workspaces, err := s.platform.ListSSPWorkspaces(ctx, region)
 		if err == nil {
 			for _, workspace := range workspaces {
 				if strings.EqualFold(strings.TrimSpace(workspace.Name), requested) {
@@ -402,7 +407,7 @@ func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requeste
 			LabelSelector: sspWorkspaceNameLabel,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("list PT workspace namespaces: %w", err)
+			return nil, fmt.Errorf("list SSP workspace namespaces: %w", err)
 		}
 		for _, namespace := range namespaces.Items {
 			name := strings.TrimSpace(namespace.Labels[sspWorkspaceNameLabel])
@@ -414,7 +419,7 @@ func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requeste
 			byName[name] = sspWorkspaceRef{Name: name}
 		}
 	}
-	platformWorkspaces, platformErr := s.platform.ListSSPWorkspaces(ctx, sspDefaultRegion)
+	platformWorkspaces, platformErr := s.platform.ListSSPWorkspaces(ctx, region)
 	for _, workspace := range platformWorkspaces {
 		name := strings.TrimSpace(workspace.Name)
 		if name == "" {
@@ -428,7 +433,7 @@ func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requeste
 		if platformErr != nil {
 			return nil, fmt.Errorf("resolve SSP workspaces from current kubeconfig and platform API: %w", platformErr)
 		}
-		return nil, fmt.Errorf("no SSP workspace found in PT")
+		return nil, fmt.Errorf("no SSP workspace found in region %s", region)
 	}
 
 	return sortedSSPWorkspaceRefs(byName), nil
@@ -444,6 +449,11 @@ func sortedSSPWorkspaceRefs(byName map[string]sspWorkspaceRef) []sspWorkspaceRef
 }
 
 func (s *SSPJobService) resolveSubscription(ctx context.Context, pods []corev1.Pod) (string, error) {
+	return s.resolveSubscriptionForRegion(ctx, pods, sspDefaultRegion)
+}
+
+func (s *SSPJobService) resolveSubscriptionForRegion(ctx context.Context, pods []corev1.Pod, region string) (string, error) {
+	region = firstNonEmpty(strings.TrimSpace(region), sspDefaultRegion)
 	for _, pod := range pods {
 		if value := firstNonEmpty(
 			pod.Labels[sspSubscriptionIDLabel],
@@ -455,19 +465,19 @@ func (s *SSPJobService) resolveSubscription(ctx context.Context, pods []corev1.P
 			return value, nil
 		}
 	}
-	if configured := s.platform.ConfiguredSubscriptionForRegion(sspDefaultRegion); configured != "" {
+	if configured := s.platform.ConfiguredSubscriptionForRegion(region); configured != "" {
 		return configured, nil
 	}
 	nodes, err := s.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 50})
 	if err != nil {
-		return "", fmt.Errorf("subscription_id is empty in the PT platform profile and node labels cannot be read: %w", err)
+		return "", fmt.Errorf("subscription_id is empty in the %s platform profile and node labels cannot be read: %w", region, err)
 	}
 	for _, node := range nodes.Items {
 		if value := strings.TrimSpace(node.Labels[sspTenantIDLabel]); value != "" {
 			return value, nil
 		}
 	}
-	return "", fmt.Errorf("cannot determine PT subscription id; set subscription_id on the cn-pj-03 profile in ~/.rayctl/platform.json")
+	return "", fmt.Errorf("cannot determine subscription id; set subscription_id on the %s profile in ~/.rayctl/platform.json", region)
 }
 
 func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription string, identifier string, workspaces []sspWorkspaceRef) ([]sspJobCandidate, error) {
