@@ -160,9 +160,9 @@ func (s *AuthService) GetResourceAuthWithBearer(ctx context.Context, resourceTyp
 	}
 	resourceName = firstNonEmpty(strings.TrimSpace(resource.Name), resourceName)
 
-	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
+	policies, err := s.vcClient.ListIAMBindingPoliciesForResourceProfile(ctx, resource.ProfileName, resourceName)
 	if err != nil {
-		return nil, fmt.Errorf("list binding policies: %w", err)
+		return nil, fmt.Errorf("list binding policies for profile %q: %w", firstNonEmpty(resource.ProfileName, s.vcClient.CurrentProfileName()), err)
 	}
 
 	items := make([]AuthAFSItem, 0)

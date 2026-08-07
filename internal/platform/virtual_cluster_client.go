@@ -1626,7 +1626,36 @@ func (c *VirtualClusterClient) ListIAMBindingPolicies(ctx context.Context) ([]IA
 	if !ok {
 		return nil, fmt.Errorf("no current platform profile available")
 	}
+	return c.listIAMBindingPoliciesWithProfile(ctx, profile, "")
+}
 
+func (c *VirtualClusterClient) ListIAMBindingPoliciesForProfile(ctx context.Context, profileName string) ([]IAMBindingPolicy, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listIAMBindingPoliciesWithProfile(ctx, profile, "")
+}
+
+func (c *VirtualClusterClient) ListIAMBindingPoliciesForResourceProfile(ctx context.Context, profileName string, resourceName string) ([]IAMBindingPolicy, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	resourceName = escapeIAMFilterValue(resourceName)
+	filter := ""
+	if resourceName != "" {
+		filter = fmt.Sprintf(
+			`(member_identify="*%s*" OR role_name="*%s*" OR scope="*%s*")`,
+			resourceName,
+			resourceName,
+			resourceName,
+		)
+	}
+	return c.listIAMBindingPoliciesWithProfile(ctx, profile, filter)
+}
+
+func (c *VirtualClusterClient) listIAMBindingPoliciesWithProfile(ctx context.Context, profile clientProfile, filter string) ([]IAMBindingPolicy, error) {
 	pageToken := "1"
 	result := make([]IAMBindingPolicy, 0)
 	for {
@@ -1635,6 +1664,9 @@ func (c *VirtualClusterClient) ListIAMBindingPolicies(ctx context.Context) ([]IA
 		query := u.Query()
 		query.Set("page_token", pageToken)
 		query.Set("pageSize", fmt.Sprintf("%d", defaultPageLimit))
+		if strings.TrimSpace(filter) != "" {
+			query.Set("filter", filter)
+		}
 		query.Set("order_by", "create_time desc")
 		u.RawQuery = query.Encode()
 
