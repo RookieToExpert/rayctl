@@ -43,10 +43,12 @@ var (
 )
 
 const (
-	defaultTailLogLines  = int64(10)
-	defaultEventLimit    = 10
-	defaultRegistryHost  = "registry2.d.pjlab.org.cn"
-	jobUIDLookupPageSize = int64(5000)
+	defaultTailLogLines         = int64(10)
+	defaultEventLimit           = 10
+	defaultRegistryHost         = "registry2.d.pjlab.org.cn"
+	jobUIDLookupPageSize        = int64(5000)
+	platformJobScanTimeout      = 4 * time.Second
+	platformJobProbeConcurrency = 16
 )
 
 type JobService struct {
@@ -62,6 +64,7 @@ type jobIdentity struct {
 	Submitter     string
 	PodGroupName  string
 	VClusterName  string
+	ProfileName   string
 	HostNamespace string
 	HostJobName   string
 }
@@ -96,6 +99,9 @@ type JobGetResult struct {
 	Namespace              string
 	UID                    string
 	Status                 string
+	CreatedAt              string
+	StartedAt              string
+	EndedAt                string
 	Terminal               bool
 	Stage                  string
 	Instruction            string
@@ -633,7 +639,11 @@ func normalizeJobFrameworkType(value string) string {
 }
 
 func (s *JobService) GetJobs(ctx context.Context, identifier string) ([]*JobGetResult, error) {
-	result, err := s.GetJob(ctx, identifier)
+	return s.GetJobsWithLogs(ctx, identifier, false)
+}
+
+func (s *JobService) GetJobsWithLogs(ctx context.Context, identifier string, includeLogs bool) ([]*JobGetResult, error) {
+	result, err := s.getJob(ctx, identifier, includeLogs)
 	if err == nil {
 		return []*JobGetResult{result}, nil
 	}
@@ -659,7 +669,7 @@ func (s *JobService) GetJobs(ctx context.Context, identifier string) ([]*JobGetR
 		}
 		seen[key] = struct{}{}
 
-		jobResult, getErr := s.getJobByIdentity(ctx, match)
+		jobResult, getErr := s.getJobByIdentity(ctx, match, includeLogs)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -687,18 +697,42 @@ func (s *JobService) GetClusterJobs(ctx context.Context, identifier string, incl
 		return nil, fmt.Errorf("platform client is required for cluster job listing")
 	}
 
-	targetName, vcRef, _, err := s.resolveClusterTarget(ctx, identifier)
+	targetName, vcRef, profileName, _, err := s.resolveClusterTarget(ctx, identifier)
 	if err != nil {
 		return nil, err
 	}
-
-	list, err := s.vcClient.ListVolcanoJobs(ctx, vcRef, "default")
-	if err != nil {
-		return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", targetName, err)
+	showInactive := includeInactive || strings.EqualFold(strings.TrimSpace(statusFilter), "all")
+	if !showInactive && strings.TrimSpace(profileName) != "" {
+		return s.getActiveClusterJobs(ctx, targetName, vcRef, profileName, statusFilter)
 	}
-	allPods, err := s.vcClient.ListPods(ctx, vcRef, "default")
-	if err != nil {
-		return nil, fmt.Errorf("list pods for cluster %q: %w", targetName, err)
+
+	var list []unstructured.Unstructured
+	var allPods []corev1.Pod
+	var jobsErr, podsErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if strings.TrimSpace(profileName) != "" {
+			list, jobsErr = s.vcClient.ListVolcanoJobsForProfile(ctx, profileName, vcRef, "default")
+			return
+		}
+		list, jobsErr = s.vcClient.ListVolcanoJobs(ctx, vcRef, "default")
+	}()
+	go func() {
+		defer wg.Done()
+		if strings.TrimSpace(profileName) != "" {
+			allPods, podsErr = s.vcClient.ListPodsForProfile(ctx, profileName, vcRef, "default")
+			return
+		}
+		allPods, podsErr = s.vcClient.ListPods(ctx, vcRef, "default")
+	}()
+	wg.Wait()
+	if jobsErr != nil {
+		return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", targetName, jobsErr)
+	}
+	if podsErr != nil {
+		return nil, fmt.Errorf("list pods for cluster %q: %w", targetName, podsErr)
 	}
 	podsByJob := make(map[string][]corev1.Pod)
 	for _, pod := range allPods {
@@ -729,7 +763,7 @@ func (s *JobService) GetClusterJobs(ctx context.Context, identifier string, incl
 			activeJobCount++
 			activePodCount += activeCount
 		}
-		if !includeInactive && !isActiveVolcanoJobPhase(status) {
+		if !showInactive && !isActiveVolcanoJobPhase(status) {
 			continue
 		}
 		items = append(items, JobClusterItem{
@@ -743,6 +777,140 @@ func (s *JobService) GetClusterJobs(ctx context.Context, identifier string, incl
 		})
 	}
 
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
+			return items[i].CreatedAtTime.After(items[j].CreatedAtTime)
+		}
+		return items[i].JobName < items[j].JobName
+	})
+	items = filterClusterItemsByStatus(items, statusFilter)
+
+	return &JobClusterListResult{
+		ClusterName:    targetName,
+		Items:          items,
+		ActiveJobCount: activeJobCount,
+		ActivePodCount: activePodCount,
+		TotalJobCount:  totalJobCount,
+		TotalPodCount:  totalPodCount,
+		StatusFilter:   normalizeClusterStatusFilter(statusFilter),
+	}, nil
+}
+
+func (s *JobService) getActiveClusterJobs(ctx context.Context, targetName string, vcRef string, profileName string, statusFilter string) (*JobClusterListResult, error) {
+	var totalJobCount int
+	var allPods []corev1.Pod
+	var jobsErr, podsErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		totalJobCount, jobsErr = s.vcClient.CountVolcanoJobsForProfile(ctx, profileName, vcRef, "default")
+	}()
+	go func() {
+		defer wg.Done()
+		allPods, podsErr = s.vcClient.ListPodsForProfile(ctx, profileName, vcRef, "default")
+	}()
+	wg.Wait()
+	if jobsErr != nil {
+		return nil, fmt.Errorf("count volcano jobs for cluster %q: %w", targetName, jobsErr)
+	}
+	if podsErr != nil {
+		return nil, fmt.Errorf("list pods for cluster %q: %w", targetName, podsErr)
+	}
+
+	podsByJob := make(map[string][]corev1.Pod)
+	for _, pod := range allPods {
+		jobName := firstNonEmpty(strings.TrimSpace(pod.Labels["volcano.sh/job-name"]), deriveJobName(pod))
+		if strings.TrimSpace(jobName) == "" {
+			continue
+		}
+		podsByJob[jobName] = append(podsByJob[jobName], pod)
+	}
+
+	totalPodCount := 0
+	activeNames := make([]string, 0)
+	for jobName, pods := range podsByJob {
+		totalPodCount += len(pods)
+		_, _, activeCount := summarizeJobPods(pods)
+		if activeCount > 0 {
+			activeNames = append(activeNames, jobName)
+		}
+	}
+	sort.Strings(activeNames)
+
+	type activeJobResult struct {
+		item       JobClusterItem
+		activePods int
+		active     bool
+	}
+	results := make(chan activeJobResult, len(activeNames))
+	semaphore := make(chan struct{}, platformJobProbeConcurrency)
+	for _, jobName := range activeNames {
+		jobName := jobName
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				return
+			}
+
+			pods := podsByJob[jobName]
+			_, pendingPods, activePods := summarizeJobPods(pods)
+			status := "Running"
+			if pendingPods > 0 {
+				status = "Pending"
+			}
+			submitter := "-"
+			createdAt := time.Time{}
+			for _, pod := range pods {
+				submitter = firstNonEmpty(strings.TrimSpace(pod.Labels["lepton.sensetime.com/submitter"]), strings.TrimSpace(pod.Annotations["lepton.sensetime.com/submitter"]), submitter)
+				if createdAt.IsZero() || pod.CreationTimestamp.Time.Before(createdAt) {
+					createdAt = pod.CreationTimestamp.Time
+				}
+			}
+
+			job, getErr := s.vcClient.GetVolcanoJobForProfile(ctx, profileName, vcRef, "default", jobName)
+			if getErr == nil {
+				status = extractVolcanoJobPhase(job)
+				submitter = firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), submitter)
+				createdAt = job.GetCreationTimestamp().Time
+			}
+			if !isActiveVolcanoJobPhase(status) {
+				results <- activeJobResult{}
+				return
+			}
+			results <- activeJobResult{
+				active:     true,
+				activePods: activePods,
+				item: JobClusterItem{
+					ClusterName:    targetName,
+					JobName:        jobName,
+					Submitter:      submitter,
+					Status:         status,
+					CreatedAt:      createdAt.In(utcPlus8).Format("2006-01-02 15:04:05"),
+					CreatedAtShort: createdAt.In(utcPlus8).Format("01-02 15:04"),
+					CreatedAtTime:  createdAt,
+				},
+			}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	items := make([]JobClusterItem, 0, len(activeNames))
+	activeJobCount := 0
+	activePodCount := 0
+	for result := range results {
+		if !result.active {
+			continue
+		}
+		activeJobCount++
+		activePodCount += result.activePods
+		items = append(items, result.item)
+	}
 	sort.Slice(items, func(i, j int) bool {
 		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
 			return items[i].CreatedAtTime.After(items[j].CreatedAtTime)
@@ -1006,9 +1174,13 @@ func filterClusterItemsByStatus(items []JobClusterItem, statusFilter string) []J
 }
 
 func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResult, error) {
+	return s.getJob(ctx, identifier, false)
+}
+
+func (s *JobService) getJob(ctx context.Context, identifier string, includeLogs bool) (*JobGetResult, error) {
 	startedAt := time.Now()
 	if s.vcClient != nil {
-		if result, err := s.getJobViaPlatform(ctx, identifier); err == nil {
+		if result, err := s.getJobViaPlatform(ctx, identifier, includeLogs); err == nil {
 			result.Timings.Total = time.Since(startedAt)
 			return result, nil
 		} else {
@@ -1026,13 +1198,13 @@ func (s *JobService) GetJob(ctx context.Context, identifier string) (*JobGetResu
 		return nil, err
 	}
 
-	return s.buildJobGetResultFromCurrentCluster(ctx, identifier, *identity, pods, job, locateDuration, startedAt)
+	return s.buildJobGetResultFromCurrentCluster(ctx, identifier, *identity, pods, job, locateDuration, startedAt, includeLogs)
 }
 
-func (s *JobService) getJobByIdentity(ctx context.Context, identity jobIdentity) (*JobGetResult, error) {
+func (s *JobService) getJobByIdentity(ctx context.Context, identity jobIdentity, includeLogs bool) (*JobGetResult, error) {
 	startedAt := time.Now()
 	if s.vcClient != nil && strings.TrimSpace(identity.VClusterName) != "" {
-		return s.getJobViaPlatformByIdentity(ctx, identity, identity.Name, 0, startedAt)
+		return s.getJobViaPlatformByIdentity(ctx, identity, identity.Name, 0, startedAt, includeLogs)
 	}
 
 	hostNamespace := strings.TrimSpace(identity.HostNamespace)
@@ -1051,10 +1223,10 @@ func (s *JobService) getJobByIdentity(ctx context.Context, identity jobIdentity)
 		return nil, err
 	}
 
-	return s.buildJobGetResultFromCurrentCluster(ctx, identity.Name, *resolvedIdentity, pods, job, 0, startedAt)
+	return s.buildJobGetResultFromCurrentCluster(ctx, identity.Name, *resolvedIdentity, pods, job, 0, startedAt, includeLogs)
 }
 
-func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, identifier string, identity jobIdentity, pods []corev1.Pod, job *unstructured.Unstructured, locateDuration time.Duration, startedAt time.Time) (*JobGetResult, error) {
+func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, identifier string, identity jobIdentity, pods []corev1.Pod, job *unstructured.Unstructured, locateDuration time.Duration, startedAt time.Time, includeLogs bool) (*JobGetResult, error) {
 	status := "-"
 	terminal := false
 	if job != nil {
@@ -1091,24 +1263,25 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 	}
 
 	inspectPod := chooseInspectPod(pods)
-	recentLogLines := []string{"-"}
+	logPod := chooseMasterLogPod(pods)
+	var recentLogLines []string
 	var kubeLogsDuration time.Duration
 
-	if inspectPod != nil {
-		if podHasRunnableLogs(*inspectPod) {
+	if includeLogs {
+		if logPod != nil && podHasRunnableLogs(*logPod) {
 			logsBegin := time.Now()
-			lines, err := s.tailPodLogs(ctx, inspectPod.Namespace, inspectPod.Name, defaultTailLogLines)
+			lines, err := s.tailPodLogs(ctx, logPod.Namespace, logPod.Name, defaultTailLogLines)
 			kubeLogsDuration = time.Since(logsBegin)
 			if err != nil {
 				recentLogLines = []string{fmt.Sprintf("log unavailable: %v", err)}
 			} else {
 				recentLogLines = lines
 			}
+		} else if logPod != nil {
+			recentLogLines = []string{fmt.Sprintf("pod phase is %s, logs are not available yet", logPod.Status.Phase)}
 		} else {
-			recentLogLines = []string{fmt.Sprintf("pod phase is %s, logs are not available yet", inspectPod.Status.Phase)}
+			recentLogLines = []string{"no pods found for this job"}
 		}
-	} else {
-		recentLogLines = []string{"no pods found for this job"}
 	}
 
 	formatBegin := time.Now()
@@ -1146,6 +1319,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
 	stage, diagnosis = ensurePVCGetDiagnosis(status, terminal, stage, diagnosis, pvcRefs)
 	imagePullSecrets = s.resolveImagePullSecretsFromKube(ctx, firstNonEmpty(identity.HostNamespace, identity.Namespace), imagePullSecrets)
+	createdAt, jobStartedAt, endedAt := extractJobLifecycleTimes(job, pods, status)
 
 	return &JobGetResult{
 		Name:                   identity.Name,
@@ -1153,6 +1327,9 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 		Namespace:              identity.Namespace,
 		UID:                    identity.UID,
 		Status:                 status,
+		CreatedAt:              createdAt,
+		StartedAt:              jobStartedAt,
+		EndedAt:                endedAt,
 		Terminal:               terminal,
 		Stage:                  stage,
 		Instruction:            instruction,
@@ -1267,7 +1444,7 @@ func (s *JobService) checkPlatformJob(ctx context.Context, identity *jobIdentity
 					message = "PVC 的 AKSK 错误"
 				}
 			}
-		} else if pvc, pvcErr := s.vcClient.GetPersistentVolumeClaim(ctx, identity.VClusterName, identity.Namespace, pvcRef.ClaimName); pvcErr != nil {
+		} else if pvc, pvcErr := s.getPlatformPersistentVolumeClaim(ctx, identity, identity.Namespace, pvcRef.ClaimName); pvcErr != nil {
 			message = classifyPVCErrorMessage(pvcErr)
 		} else {
 			status = dashIfEmpty(string(pvc.Status.Phase))
@@ -1373,12 +1550,10 @@ func (s *JobService) checkPlatformJob(ctx context.Context, identity *jobIdentity
 	podEvidence := make([]CheckEvidenceItem, 0)
 	podGroupEvidence := make([]CheckEvidenceItem, 0)
 	if stage == "startup" || stage == "failed" {
+		diagnosticPods := selectDiagnosticPods(pods, stage)
 		eventNamespace := firstNonEmpty(identity.HostNamespace, identity.Namespace)
 		if strings.TrimSpace(eventNamespace) != "" {
-			for _, pod := range pods {
-				if stage == "startup" && isPodReady(pod) {
-					continue
-				}
+			for _, pod := range diagnosticPods {
 				eventUID := string(pod.UID)
 				if strings.TrimSpace(identity.HostNamespace) != "" {
 					hostPod, hostPodErr := s.findPodByNameInNamespace(ctx, identity.HostNamespace, pod.Name)
@@ -1403,10 +1578,7 @@ func (s *JobService) checkPlatformJob(ctx context.Context, identity *jobIdentity
 			}
 		}
 		if len(podEvidence) == 0 && s.vcClient != nil && strings.TrimSpace(identity.VClusterName) != "" && strings.TrimSpace(identity.Namespace) != "" {
-			for _, pod := range pods {
-				if stage == "startup" && isPodReady(pod) {
-					continue
-				}
+			for _, pod := range diagnosticPods {
 				podEvents, eventErr := s.vcClient.ListEvents(ctx, identity.VClusterName, identity.Namespace, pod.Name, "")
 				if eventErr != nil {
 					continue
@@ -1463,6 +1635,27 @@ func (s *JobService) checkPlatformJob(ctx context.Context, identity *jobIdentity
 	}, nil
 }
 
+func selectDiagnosticPods(pods []corev1.Pod, stage string) []corev1.Pod {
+	candidates := make([]corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		switch stage {
+		case "failed":
+			if isFailedPod(pod) {
+				candidates = append(candidates, pod)
+			}
+		case "startup":
+			if !isPodReady(pod) {
+				candidates = append(candidates, pod)
+			}
+		}
+	}
+	inspectPod := chooseInspectPod(candidates)
+	if inspectPod == nil {
+		return nil
+	}
+	return []corev1.Pod{*inspectPod}
+}
+
 func (s *JobService) findPodByNameInNamespace(ctx context.Context, namespace string, podName string) (*corev1.Pod, error) {
 	namespace = strings.TrimSpace(namespace)
 	podName = strings.TrimSpace(podName)
@@ -1477,7 +1670,7 @@ func (s *JobService) findPodByNameInNamespace(ctx context.Context, namespace str
 	return pod, nil
 }
 
-func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (*JobGetResult, error) {
+func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string, includeLogs bool) (*JobGetResult, error) {
 	startedAt := time.Now()
 	locateBegin := time.Now()
 	identity, err := s.locateJobForPlatform(ctx, identifier)
@@ -1486,19 +1679,30 @@ func (s *JobService) getJobViaPlatform(ctx context.Context, identifier string) (
 		return nil, err
 	}
 
-	return s.getJobViaPlatformByIdentity(ctx, *identity, identifier, locateDuration, startedAt)
+	return s.getJobViaPlatformByIdentity(ctx, *identity, identifier, locateDuration, startedAt, includeLogs)
 }
 
-func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity jobIdentity, _ string, locateDuration time.Duration, startedAt time.Time) (*JobGetResult, error) {
+func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity jobIdentity, _ string, locateDuration time.Duration, startedAt time.Time, includeLogs bool) (*JobGetResult, error) {
 	jobBegin := time.Now()
-	job, err := s.vcClient.GetVolcanoJob(ctx, identity.VClusterName, identity.Namespace, identity.Name)
+	var job *unstructured.Unstructured
+	var err error
+	if strings.TrimSpace(identity.ProfileName) != "" {
+		job, err = s.vcClient.GetVolcanoJobForProfile(ctx, identity.ProfileName, identity.VClusterName, identity.Namespace, identity.Name)
+	} else {
+		job, err = s.vcClient.GetVolcanoJob(ctx, identity.VClusterName, identity.Namespace, identity.Name)
+	}
 	platformJobDuration := time.Since(jobBegin)
 	if err != nil {
 		return nil, err
 	}
 
 	podsBegin := time.Now()
-	pods, err := s.vcClient.ListJobPods(ctx, identity.VClusterName, identity.Namespace, identity.Name)
+	var pods []corev1.Pod
+	if strings.TrimSpace(identity.ProfileName) != "" {
+		pods, err = s.vcClient.ListJobPodsForProfile(ctx, identity.ProfileName, identity.VClusterName, identity.Namespace, identity.Name)
+	} else {
+		pods, err = s.vcClient.ListJobPods(ctx, identity.VClusterName, identity.Namespace, identity.Name)
+	}
 	platformPodsDuration := time.Since(podsBegin)
 	if err != nil {
 		return nil, err
@@ -1544,18 +1748,19 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		"-",
 	)
 	inspectPod := chooseInspectPod(pods)
-	recentLogLines := []string{"no pods found for this job"}
+	logPod := chooseMasterLogPod(pods)
+	var recentLogLines []string
 	var platformLogsDuration time.Duration
-	if inspectPod != nil {
-		if podHasRunnableLogs(*inspectPod) {
+	if includeLogs {
+		if logPod != nil && podHasRunnableLogs(*logPod) {
 			logsBegin := time.Now()
-			logs, logErr := s.vcClient.GetPodLogs(ctx, identity.VClusterName, inspectPod.Namespace, inspectPod.Name, defaultTailLogLines)
+			logs, logErr := s.vcClient.GetPodLogs(ctx, identity.VClusterName, logPod.Namespace, logPod.Name, defaultTailLogLines)
 			platformLogsDuration = time.Since(logsBegin)
 			if logErr == nil {
 				recentLogLines = logs
 			} else if strings.TrimSpace(identity.HostNamespace) != "" {
 				fallbackBegin := time.Now()
-				fallbackLogs, fallbackErr := s.tailPodLogs(ctx, identity.HostNamespace, inspectPod.Name, defaultTailLogLines)
+				fallbackLogs, fallbackErr := s.tailPodLogs(ctx, identity.HostNamespace, logPod.Name, defaultTailLogLines)
 				platformLogsDuration += time.Since(fallbackBegin)
 				if fallbackErr == nil {
 					recentLogLines = fallbackLogs
@@ -1565,8 +1770,10 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 			} else {
 				recentLogLines = []string{fmt.Sprintf("log unavailable: %v", logErr)}
 			}
+		} else if logPod != nil {
+			recentLogLines = []string{fmt.Sprintf("pod phase is %s, logs are not available yet", logPod.Status.Phase)}
 		} else {
-			recentLogLines = []string{fmt.Sprintf("pod phase is %s, logs are not available yet", inspectPod.Status.Phase)}
+			recentLogLines = []string{"no pods found for this job"}
 		}
 	}
 
@@ -1605,6 +1812,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
 	stage, diagnosis = ensurePVCGetDiagnosis(status, terminal, stage, diagnosis, pvcRefs)
 	imagePullSecrets = s.resolveImagePullSecrets(ctx, &identity, imagePullSecrets)
+	createdAt, jobStartedAt, endedAt := extractJobLifecycleTimes(job, pods, status)
 
 	return &JobGetResult{
 		Name:                   identity.Name,
@@ -1612,6 +1820,9 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		Namespace:              identity.Namespace,
 		UID:                    identity.UID,
 		Status:                 status,
+		CreatedAt:              createdAt,
+		StartedAt:              jobStartedAt,
+		EndedAt:                endedAt,
 		Terminal:               terminal,
 		Stage:                  stage,
 		Instruction:            instruction,
@@ -1849,15 +2060,15 @@ func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string
 
 	if looksLikePodBackedIdentifier(identifier) {
 		if pod, err := s.findSinglePodByJobName(ctx, identifier); err == nil && pod != nil {
-			return jobIdentityFromPod(*pod), nil
+			return s.platformIdentityFromHostPod(ctx, *pod), nil
 		}
 		if pod, err := s.findSeedPodForJobName(ctx, identifier); err == nil && pod != nil {
-			return jobIdentityFromPod(*pod), nil
+			return s.platformIdentityFromHostPod(ctx, *pod), nil
 		}
 	}
 
 	if pod, err := s.findHostPodForIdentifier(ctx, identifier); err == nil && pod != nil {
-		return jobIdentityFromPod(*pod), nil
+		return s.platformIdentityFromHostPod(ctx, *pod), nil
 	}
 
 	identity, _, err := s.resolveJobIdentity(ctx, identifier)
@@ -1868,6 +2079,17 @@ func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string
 		return nil, fmt.Errorf("unable to determine vcluster for %q", identifier)
 	}
 	return identity, nil
+}
+
+func (s *JobService) platformIdentityFromHostPod(ctx context.Context, pod corev1.Pod) *jobIdentity {
+	identity := jobIdentityFromPod(pod)
+	if s.vcClient != nil {
+		identity.ProfileName = strings.TrimSpace(s.vcClient.CurrentProfileName())
+	}
+	if strings.TrimSpace(identity.VClusterName) == "" {
+		identity.VClusterName = s.resolveVClusterNameFromNamespace(ctx, pod.Namespace)
+	}
+	return identity
 }
 
 type jobUIDLookupResult struct {
@@ -2052,9 +2274,45 @@ func (s *JobService) findSeedPodForJobName(ctx context.Context, jobName string) 
 }
 
 func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier string) (*jobIdentity, error) {
+	currentProfile := strings.TrimSpace(s.vcClient.CurrentProfileName())
+	currentClusters, currentErr := s.vcClient.ListCurrentProfileVirtualClusters(ctx)
+	if currentErr == nil {
+		identity, err := s.findPlatformJobIdentityInClusters(ctx, identifier, currentClusters)
+		if err == nil {
+			return identity, nil
+		}
+		var ambiguousErr *ambiguousJobMatchError
+		if errors.As(err, &ambiguousErr) {
+			return nil, err
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+	}
+
 	vclusters, err := s.vcClient.ListVirtualClusters(ctx)
 	if err != nil {
+		if currentErr != nil {
+			return nil, currentErr
+		}
 		return nil, err
+	}
+	if currentErr == nil && currentProfile != "" {
+		filtered := vclusters[:0]
+		for _, vc := range vclusters {
+			if strings.EqualFold(strings.TrimSpace(vc.ProfileName), currentProfile) {
+				continue
+			}
+			filtered = append(filtered, vc)
+		}
+		vclusters = filtered
+	}
+	return s.findPlatformJobIdentityInClusters(ctx, identifier, vclusters)
+}
+
+func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, identifier string, vclusters []platform.VirtualCluster) (*jobIdentity, error) {
+	if len(vclusters) == 0 {
+		return nil, fmt.Errorf("platform volcano job %q not found", identifier)
 	}
 
 	type searchResult struct {
@@ -2062,7 +2320,11 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		err      error
 	}
 
+	scanCtx, cancel := context.WithTimeout(ctx, platformJobScanTimeout)
+	defer cancel()
+
 	results := make(chan searchResult, len(vclusters))
+	semaphore := make(chan struct{}, platformJobProbeConcurrency)
 	var wg sync.WaitGroup
 
 	for _, vc := range vclusters {
@@ -2070,8 +2332,15 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-scanCtx.Done():
+				results <- searchResult{err: scanCtx.Err()}
+				return
+			}
 			for _, vcRef := range platformVCRefs(vc) {
-				job, getErr := s.vcClient.GetVolcanoJob(ctx, vcRef, "default", identifier)
+				job, getErr := s.vcClient.GetVolcanoJobForProfile(scanCtx, vc.ProfileName, vcRef, "default", identifier)
 				if getErr != nil {
 					continue
 				}
@@ -2084,6 +2353,7 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 						Submitter:    firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), "-"),
 						PodGroupName: fmt.Sprintf("%s-%s", job.GetName(), string(job.GetUID())),
 						VClusterName: vcRef,
+						ProfileName:  vc.ProfileName,
 					},
 				}
 				return
@@ -2128,13 +2398,16 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 			Matches:    matches,
 		}
 	}
+	if err := scanCtx.Err(); err != nil {
+		return nil, fmt.Errorf("platform volcano job %q scan did not finish: %w", identifier, err)
+	}
 
 	return nil, fmt.Errorf("platform volcano job %q not found", identifier)
 }
 
 func platformVCRefs(vc platform.VirtualCluster) []string {
-	candidates := make([]string, 0, 3)
-	seen := make(map[string]struct{}, 3)
+	candidates := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
 	add := func(value string) {
 		value = strings.TrimSpace(value)
 		if value == "" {
@@ -2147,11 +2420,12 @@ func platformVCRefs(vc platform.VirtualCluster) []string {
 		candidates = append(candidates, value)
 	}
 
-	add(vc.Name)
 	if uid := strings.TrimSpace(vc.UID); uid != "" {
 		add("vc-" + uid)
-		add(uid)
+		return candidates
 	}
+	add(vc.Name)
+	add(vc.DisplayName)
 	return candidates
 }
 
@@ -2338,6 +2612,89 @@ func extractVolcanoJobPhase(job *unstructured.Unstructured) string {
 	))
 }
 
+func extractJobLifecycleTimes(job *unstructured.Unstructured, pods []corev1.Pod, status string) (string, string, string) {
+	createdAt := time.Time{}
+	startedAt := time.Time{}
+	endedAt := time.Time{}
+	if job != nil {
+		createdAt = job.GetCreationTimestamp().Time
+		conditions, _, _ := unstructured.NestedSlice(job.Object, "status", "conditions")
+		for _, raw := range conditions {
+			condition, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			phase := strings.ToLower(firstNonEmpty(
+				getNestedText(condition, "phase"),
+				getNestedText(condition, "type"),
+				getNestedText(condition, "status"),
+			))
+			transition := parseJobTimestamp(firstNonEmpty(
+				getNestedText(condition, "lastTransitionTime"),
+				getNestedText(condition, "transitionTime"),
+				getNestedText(condition, "lastUpdateTime"),
+			))
+			if phase == "running" && !transition.IsZero() && (startedAt.IsZero() || transition.Before(startedAt)) {
+				startedAt = transition
+			}
+			if isTerminalVolcanoJobPhase(phase) && transition.After(endedAt) {
+				endedAt = transition
+			}
+		}
+		stateTransition := parseJobTimestamp(getNestedText(job.Object, "status", "state", "lastTransitionTime"))
+		if strings.EqualFold(status, "Running") && startedAt.IsZero() {
+			startedAt = stateTransition
+		}
+		if isTerminalVolcanoJobPhase(status) && endedAt.IsZero() {
+			endedAt = stateTransition
+		}
+	}
+
+	for _, pod := range pods {
+		if pod.Status.StartTime != nil {
+			value := pod.Status.StartTime.Time
+			if startedAt.IsZero() || value.Before(startedAt) {
+				startedAt = value
+			}
+		}
+		if !isTerminalVolcanoJobPhase(status) {
+			continue
+		}
+		statuses := append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...)
+		statuses = append(statuses, pod.Status.ContainerStatuses...)
+		for _, container := range statuses {
+			if container.State.Terminated == nil {
+				continue
+			}
+			value := container.State.Terminated.FinishedAt.Time
+			if value.After(endedAt) {
+				endedAt = value
+			}
+		}
+	}
+
+	return formatJobTime(createdAt), formatJobTime(startedAt), formatJobTime(endedAt)
+}
+
+func parseJobTimestamp(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
+func formatJobTime(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.In(utcPlus8).Format("2006-01-02 15:04:05")
+}
+
 func isActiveVolcanoJobPhase(phase string) bool {
 	switch strings.ToLower(strings.TrimSpace(phase)) {
 	case "running", "pending":
@@ -2399,40 +2756,31 @@ func desiredReplicaTotal(job *unstructured.Unstructured) int {
 	return 0
 }
 
-func (s *JobService) resolveClusterTarget(ctx context.Context, identifier string) (string, string, map[string]struct{}, error) {
+func (s *JobService) resolveClusterTarget(ctx context.Context, identifier string) (string, string, string, map[string]struct{}, error) {
 	id := strings.TrimSpace(identifier)
 	if id == "" {
-		return "", "", nil, fmt.Errorf("cluster identifier is required")
+		return "", "", "", nil, fmt.Errorf("cluster identifier is required")
 	}
 
 	if s.vcClient == nil {
-		return id, id, clusterRefSet(clusterRefCandidates(id)), nil
+		return id, id, "", clusterRefSet(clusterRefCandidates(id)), nil
 	}
 
-	vclusters, err := s.vcClient.ListVirtualClusters(ctx)
+	vclusters, err := s.vcClient.ListCurrentProfileVirtualClusters(ctx)
 	if err != nil {
-		return id, id, clusterRefSet(clusterRefCandidates(id)), nil
+		vclusters = nil
+	}
+	selected := matchingVirtualClusters(vclusters, id)
+	if len(selected) == 0 {
+		vclusters, err = s.vcClient.ListVirtualClusters(ctx)
+		if err != nil {
+			return id, id, "", clusterRefSet(clusterRefCandidates(id)), nil
+		}
+		selected = matchingVirtualClusters(vclusters, id)
 	}
 
-	exact := make([]platform.VirtualCluster, 0)
-	fuzzy := make([]platform.VirtualCluster, 0)
-	for _, vc := range vclusters {
-		candidates := clusterRefCandidates(vc.Name, vc.DisplayName, vc.UID, "vc-"+strings.TrimSpace(vc.UID))
-		if clusterCandidateContains(candidates, id, true) {
-			exact = append(exact, vc)
-			continue
-		}
-		if clusterCandidateContains(candidates, id, false) {
-			fuzzy = append(fuzzy, vc)
-		}
-	}
-
-	selected := exact
 	if len(selected) == 0 {
-		selected = fuzzy
-	}
-	if len(selected) == 0 {
-		return id, id, clusterRefSet(clusterRefCandidates(id)), nil
+		return id, id, "", clusterRefSet(clusterRefCandidates(id)), nil
 	}
 	if len(selected) > 1 {
 		names := make([]string, 0, len(selected))
@@ -2440,12 +2788,32 @@ func (s *JobService) resolveClusterTarget(ctx context.Context, identifier string
 			names = append(names, firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID)))
 		}
 		sort.Strings(names)
-		return "", "", nil, fmt.Errorf("multiple clusters matched %q: %s", id, strings.Join(names, ", "))
+		return "", "", "", nil, fmt.Errorf("multiple clusters matched %q: %s", id, strings.Join(names, ", "))
 	}
 
 	vc := selected[0]
 	display := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
-	return display, firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID)), clusterRefSet(clusterRefCandidates(vc.Name, vc.DisplayName, vc.UID, "vc-"+strings.TrimSpace(vc.UID))), nil
+	return display, firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID)), strings.TrimSpace(vc.ProfileName), clusterRefSet(clusterRefCandidates(vc.Name, vc.DisplayName, vc.UID, "vc-"+strings.TrimSpace(vc.UID))), nil
+}
+
+func matchingVirtualClusters(vclusters []platform.VirtualCluster, identifier string) []platform.VirtualCluster {
+	exact := make([]platform.VirtualCluster, 0)
+	fuzzy := make([]platform.VirtualCluster, 0)
+	for _, vc := range vclusters {
+		candidates := clusterRefCandidates(vc.Name, vc.DisplayName, vc.UID, "vc-"+strings.TrimSpace(vc.UID))
+		if clusterCandidateContains(candidates, identifier, true) {
+			exact = append(exact, vc)
+			continue
+		}
+		if clusterCandidateContains(candidates, identifier, false) {
+			fuzzy = append(fuzzy, vc)
+		}
+	}
+
+	if len(exact) > 0 {
+		return exact
+	}
+	return fuzzy
 }
 
 func clusterRefCandidates(values ...string) []string {
@@ -2853,6 +3221,20 @@ func chooseInspectPod(pods []corev1.Pod) *corev1.Pod {
 		return podInspectLess(pods[i], pods[j])
 	})
 	return &pods[0]
+}
+
+func chooseMasterLogPod(pods []corev1.Pod) *corev1.Pod {
+	masters := make([]corev1.Pod, 0, 1)
+	for _, pod := range pods {
+		taskSpec := firstNonEmpty(pod.Labels["volcano.sh/task-spec"], pod.Annotations["volcano.sh/task-spec"])
+		if strings.EqualFold(strings.TrimSpace(taskSpec), "master") || strings.Contains(strings.ToLower(pod.Name), "-master-") {
+			masters = append(masters, pod)
+		}
+	}
+	if len(masters) > 0 {
+		return chooseInspectPod(masters)
+	}
+	return chooseInspectPod(append([]corev1.Pod(nil), pods...))
 }
 
 func podInspectLess(left corev1.Pod, right corev1.Pod) bool {
@@ -3299,6 +3681,36 @@ func normalizeSpecDetails(secretSet map[string]struct{}, claimSet map[string]Vol
 	return secrets, claims
 }
 
+func (s *JobService) getPlatformSecret(ctx context.Context, identity *jobIdentity, namespace string, secretName string) (*corev1.Secret, error) {
+	if s.vcClient == nil || identity == nil {
+		return nil, fmt.Errorf("platform job identity is required")
+	}
+	if strings.TrimSpace(identity.ProfileName) != "" {
+		return s.vcClient.GetSecretForProfile(ctx, identity.ProfileName, identity.VClusterName, namespace, secretName)
+	}
+	return s.vcClient.GetSecret(ctx, identity.VClusterName, namespace, secretName)
+}
+
+func (s *JobService) getPlatformPersistentVolumeClaim(ctx context.Context, identity *jobIdentity, namespace string, claimName string) (*corev1.PersistentVolumeClaim, error) {
+	if s.vcClient == nil || identity == nil {
+		return nil, fmt.Errorf("platform job identity is required")
+	}
+	if strings.TrimSpace(identity.ProfileName) != "" {
+		return s.vcClient.GetPersistentVolumeClaimForProfile(ctx, identity.ProfileName, identity.VClusterName, namespace, claimName)
+	}
+	return s.vcClient.GetPersistentVolumeClaim(ctx, identity.VClusterName, namespace, claimName)
+}
+
+func (s *JobService) getPlatformPersistentVolume(ctx context.Context, identity *jobIdentity, pvName string) (*corev1.PersistentVolume, error) {
+	if s.vcClient == nil || identity == nil {
+		return nil, fmt.Errorf("platform job identity is required")
+	}
+	if strings.TrimSpace(identity.ProfileName) != "" {
+		return s.vcClient.GetPersistentVolumeForProfile(ctx, identity.ProfileName, identity.VClusterName, pvName)
+	}
+	return s.vcClient.GetPersistentVolume(ctx, identity.VClusterName, pvName)
+}
+
 func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobIdentity, refs []VolumeClaimRef) []VolumeClaimRef {
 	if len(refs) == 0 {
 		return refs
@@ -3321,7 +3733,7 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 		}
 		switch {
 		case s.vcClient != nil && vclusterName != "" && namespace != "":
-			pvc, err := s.vcClient.GetPersistentVolumeClaim(ctx, vclusterName, namespace, ref.ClaimName)
+			pvc, err := s.getPlatformPersistentVolumeClaim(ctx, identity, namespace, ref.ClaimName)
 			if err == nil {
 				current.Status = dashIfEmpty(string(pvc.Status.Phase))
 				current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
@@ -3329,14 +3741,14 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 				if current.PVName != "" {
 					if pv, pvErr := s.clientset.CoreV1().PersistentVolumes().Get(ctx, current.PVName, metav1.GetOptions{}); pvErr == nil {
 						current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
-					} else if pv, pvErr := s.vcClient.GetPersistentVolume(ctx, vclusterName, current.PVName); pvErr == nil {
+					} else if pv, pvErr := s.getPlatformPersistentVolume(ctx, identity, current.PVName); pvErr == nil {
 						current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
 					}
 					if current.BackendPV == "" {
 						current.BackendPV = strings.TrimSpace(current.PVName)
 					}
 				}
-				s.enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx, vclusterName, namespace, pvc, &current)
+				s.enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx, identity, namespace, pvc, &current)
 			} else {
 				current.Status = "Unknown"
 				current.Message = classifyPVCErrorMessage(err)
@@ -3468,14 +3880,13 @@ func (s *JobService) enrichObjectStorageVolumeClaimRef(ctx context.Context, host
 	}
 }
 
-func (s *JobService) enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx context.Context, vclusterName string, namespace string, pvc *corev1.PersistentVolumeClaim, ref *VolumeClaimRef) {
-	if ref == nil || strings.TrimSpace(ref.FrontendVolume) != "" || s.vcClient == nil || pvc == nil {
+func (s *JobService) enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx context.Context, identity *jobIdentity, namespace string, pvc *corev1.PersistentVolumeClaim, ref *VolumeClaimRef) {
+	if ref == nil || strings.TrimSpace(ref.FrontendVolume) != "" || s.vcClient == nil || identity == nil || pvc == nil {
 		return
 	}
 
-	vclusterName = strings.TrimSpace(vclusterName)
 	namespace = strings.TrimSpace(namespace)
-	if vclusterName == "" || namespace == "" {
+	if strings.TrimSpace(identity.VClusterName) == "" || namespace == "" {
 		return
 	}
 
@@ -3491,7 +3902,7 @@ func (s *JobService) enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx con
 	secretName := strings.TrimSpace(firstNonEmpty(pvc.Annotations["secretName"], pvc.Annotations["afs.secretName"]))
 	endpoint := ""
 	if secretName != "" {
-		secret, secretErr := s.vcClient.GetSecret(ctx, vclusterName, namespace, secretName)
+		secret, secretErr := s.getPlatformSecret(ctx, identity, namespace, secretName)
 		if secretErr == nil && secret != nil {
 			endpoint = decodeObjectStorageEndpoint(secret)
 		}
@@ -3633,14 +4044,14 @@ func pvcRefsToChecks(refs []VolumeClaimRef) []PVCCheckItem {
 	return items
 }
 
-func (s *JobService) resolveImagePullSecretsFromPlatform(ctx context.Context, vclusterName string, namespace string, secretNames []string) []string {
-	if s.vcClient == nil || strings.TrimSpace(vclusterName) == "" || strings.TrimSpace(namespace) == "" {
+func (s *JobService) resolveImagePullSecretsFromPlatform(ctx context.Context, identity *jobIdentity, namespace string, secretNames []string) []string {
+	if s.vcClient == nil || identity == nil || strings.TrimSpace(identity.VClusterName) == "" || strings.TrimSpace(namespace) == "" {
 		return secretNames
 	}
 
 	resolved := make([]string, 0, len(secretNames))
 	for _, secretName := range secretNames {
-		secret, err := s.vcClient.GetSecret(ctx, vclusterName, namespace, secretName)
+		secret, err := s.getPlatformSecret(ctx, identity, namespace, secretName)
 		if err != nil {
 			resolved = append(resolved, secretName)
 			continue
@@ -3664,7 +4075,7 @@ func (s *JobService) resolveImagePullSecrets(ctx context.Context, identity *jobI
 		return s.resolveImagePullSecretsFromKube(ctx, hostNamespace, secretNames)
 	}
 	if vclusterName != "" && namespace != "" {
-		return s.resolveImagePullSecretsFromPlatform(ctx, vclusterName, namespace, secretNames)
+		return s.resolveImagePullSecretsFromPlatform(ctx, identity, namespace, secretNames)
 	}
 	return secretNames
 }
@@ -3941,10 +4352,10 @@ func (s *JobService) checkImagePullSecrets(ctx context.Context, identity *jobIde
 		case useHostSecret:
 			secret, err = s.clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 			if err != nil && apierrors.IsNotFound(err) && s.vcClient != nil && identity != nil && vclusterName != "" && vcNamespace != "" {
-				secret, err = s.vcClient.GetSecret(ctx, vclusterName, vcNamespace, secretName)
+				secret, err = s.getPlatformSecret(ctx, identity, vcNamespace, secretName)
 			}
 		case s.vcClient != nil && identity != nil && strings.TrimSpace(identity.VClusterName) != "" && strings.TrimSpace(namespace) != "":
-			secret, err = s.vcClient.GetSecret(ctx, identity.VClusterName, namespace, secretName)
+			secret, err = s.getPlatformSecret(ctx, identity, namespace, secretName)
 		default:
 			err = fmt.Errorf("unable to determine secret namespace")
 		}

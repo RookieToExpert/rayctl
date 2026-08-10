@@ -2432,56 +2432,191 @@ func (c *VirtualClusterClient) buildAIComputeNodeRemoveRequest(
 func (c *VirtualClusterClient) GetVolcanoJob(ctx context.Context, vclusterName string, namespace string, jobName string) (*unstructured.Unstructured, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs/%s", namespace, jobName), nil)
-		var obj unstructured.Unstructured
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &obj); err != nil {
+		obj, err := c.getVolcanoJobWithProfile(ctx, profile, vclusterName, namespace, jobName)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return &obj, nil
+		return obj, nil
 	}
 	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) GetVolcanoJobForProfile(ctx context.Context, profileName string, vclusterName string, namespace string, jobName string) (*unstructured.Unstructured, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.getVolcanoJobWithProfile(ctx, profile, vclusterName, namespace, jobName)
+}
+
+func (c *VirtualClusterClient) getVolcanoJobWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, jobName string) (*unstructured.Unstructured, error) {
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs/%s", namespace, jobName), nil)
+	var obj unstructured.Unstructured
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &obj); err != nil {
+		return nil, err
+	}
+	return &obj, nil
 }
 
 func (c *VirtualClusterClient) ListVolcanoJobs(ctx context.Context, vclusterName string, namespace string) ([]unstructured.Unstructured, error) {
 	return c.ListVolcanoJobsByLabelSelector(ctx, vclusterName, namespace, "")
 }
 
-func (c *VirtualClusterClient) ListVolcanoJobsByLabelSelector(ctx context.Context, vclusterName string, namespace string, labelSelector string) ([]unstructured.Unstructured, error) {
-	query := url.Values{}
-	if strings.TrimSpace(labelSelector) != "" {
-		query.Set("labelSelector", strings.TrimSpace(labelSelector))
+func (c *VirtualClusterClient) ListVolcanoJobsForProfile(ctx context.Context, profileName string, vclusterName string, namespace string) ([]unstructured.Unstructured, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listVolcanoJobsWithProfile(ctx, profile, vclusterName, namespace, "")
+}
+
+func (c *VirtualClusterClient) ListVolcanoJobMetadataForProfile(ctx context.Context, profileName string, vclusterName string, namespace string) ([]metav1.PartialObjectMetadata, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs", namespace), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build volcano job metadata request: %w", err)
+	}
+	headers, err := c.authHeadersForProfile(profile, reqURL, http.MethodGet)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	req.Header.Set("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", reqURL, err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read response from %s: %w", reqURL, readErr)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	var list metav1.PartialObjectMetadataList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	return list.Items, nil
+}
+
+func (c *VirtualClusterClient) CountVolcanoJobsForProfile(ctx context.Context, profileName string, vclusterName string, namespace string) (int, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return 0, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	query := url.Values{}
+	query.Set("page_size", "1")
+	query.Set("skip", "0")
+	query.Set("filter", "")
+	query.Set("order", "created_at desc")
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/apis/batch.volcano.sh/v1alpha1/jobs", query)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build volcano job count request: %w", err)
+	}
+	headers, err := c.authHeadersForProfile(profile, reqURL, http.MethodGet)
+	if err != nil {
+		return 0, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	req.Header.Set("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("request %s: %w", reqURL, err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return 0, fmt.Errorf("read response from %s: %w", reqURL, readErr)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return 0, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var list metav1.PartialObjectMetadataList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return 0, fmt.Errorf("decode response from %s: %w", reqURL, err)
+	}
+	if list.RemainingItemCount != nil {
+		return len(list.Items) + int(*list.RemainingItemCount), nil
+	}
+
+	items, err := c.ListVolcanoJobMetadataForProfile(ctx, profileName, vclusterName, namespace)
+	if err != nil {
+		return 0, err
+	}
+	return len(items), nil
+}
+
+func (c *VirtualClusterClient) ListVolcanoJobsByLabelSelector(ctx context.Context, vclusterName string, namespace string, labelSelector string) ([]unstructured.Unstructured, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs", namespace), query)
-		var list unstructured.UnstructuredList
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &list); err != nil {
+		items, err := c.listVolcanoJobsWithProfile(ctx, profile, vclusterName, namespace, labelSelector)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return list.Items, nil
+		return items, nil
 	}
 	return nil, lastErr
 }
 
-func (c *VirtualClusterClient) ListPods(ctx context.Context, vclusterName string, namespace string) ([]corev1.Pod, error) {
+func (c *VirtualClusterClient) listVolcanoJobsWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, labelSelector string) ([]unstructured.Unstructured, error) {
 	query := url.Values{}
-	query.Set("filter", fmt.Sprintf("namespace=%q", namespace))
-	query.Set("order", "name asc")
+	if strings.TrimSpace(labelSelector) != "" {
+		query.Set("labelSelector", strings.TrimSpace(labelSelector))
+	}
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs", namespace), query)
+	var list unstructured.UnstructuredList
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
 
+func (c *VirtualClusterClient) ListPods(ctx context.Context, vclusterName string, namespace string) ([]corev1.Pod, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/api/v1/pods", query)
-		var podList corev1.PodList
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &podList); err != nil {
+		pods, err := c.listPodsWithProfile(ctx, profile, vclusterName, namespace)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return podList.Items, nil
+		return pods, nil
 	}
 	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) ListPodsForProfile(ctx context.Context, profileName string, vclusterName string, namespace string) ([]corev1.Pod, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listPodsWithProfile(ctx, profile, vclusterName, namespace)
+}
+
+func (c *VirtualClusterClient) listPodsWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string) ([]corev1.Pod, error) {
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods", url.PathEscape(strings.TrimSpace(namespace)))
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, path, nil)
+	var podList corev1.PodList
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &podList); err != nil {
+		return nil, err
+	}
+	return podList.Items, nil
 }
 
 func (c *VirtualClusterClient) GetPodGroup(ctx context.Context, vclusterName string, namespace string, podGroupName string) (*unstructured.Unstructured, error) {
@@ -2501,43 +2636,91 @@ func (c *VirtualClusterClient) GetPodGroup(ctx context.Context, vclusterName str
 func (c *VirtualClusterClient) GetSecret(ctx context.Context, vclusterName string, namespace string, secretName string) (*corev1.Secret, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", namespace, secretName), nil)
-		var secret corev1.Secret
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &secret); err != nil {
+		secret, err := c.getSecretWithProfile(ctx, profile, vclusterName, namespace, secretName)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return &secret, nil
+		return secret, nil
 	}
 	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) GetSecretForProfile(ctx context.Context, profileName string, vclusterName string, namespace string, secretName string) (*corev1.Secret, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.getSecretWithProfile(ctx, profile, vclusterName, namespace, secretName)
+}
+
+func (c *VirtualClusterClient) getSecretWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, secretName string) (*corev1.Secret, error) {
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", namespace, secretName), nil)
+	var secret corev1.Secret
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &secret); err != nil {
+		return nil, err
+	}
+	return &secret, nil
 }
 
 func (c *VirtualClusterClient) GetPersistentVolumeClaim(ctx context.Context, vclusterName string, namespace string, claimName string) (*corev1.PersistentVolumeClaim, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/persistentvolumeclaims/%s", namespace, claimName), nil)
-		var pvc corev1.PersistentVolumeClaim
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &pvc); err != nil {
+		pvc, err := c.getPersistentVolumeClaimWithProfile(ctx, profile, vclusterName, namespace, claimName)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return &pvc, nil
+		return pvc, nil
 	}
 	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) GetPersistentVolumeClaimForProfile(ctx context.Context, profileName string, vclusterName string, namespace string, claimName string) (*corev1.PersistentVolumeClaim, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.getPersistentVolumeClaimWithProfile(ctx, profile, vclusterName, namespace, claimName)
+}
+
+func (c *VirtualClusterClient) getPersistentVolumeClaimWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, claimName string) (*corev1.PersistentVolumeClaim, error) {
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/namespaces/%s/persistentvolumeclaims/%s", namespace, claimName), nil)
+	var pvc corev1.PersistentVolumeClaim
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &pvc); err != nil {
+		return nil, err
+	}
+	return &pvc, nil
 }
 
 func (c *VirtualClusterClient) GetPersistentVolume(ctx context.Context, vclusterName string, pvName string) (*corev1.PersistentVolume, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/persistentvolumes/%s", pvName), nil)
-		var pv corev1.PersistentVolume
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &pv); err != nil {
+		pv, err := c.getPersistentVolumeWithProfile(ctx, profile, vclusterName, pvName)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return &pv, nil
+		return pv, nil
 	}
 	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) GetPersistentVolumeForProfile(ctx context.Context, profileName string, vclusterName string, pvName string) (*corev1.PersistentVolume, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.getPersistentVolumeWithProfile(ctx, profile, vclusterName, pvName)
+}
+
+func (c *VirtualClusterClient) getPersistentVolumeWithProfile(ctx context.Context, profile clientProfile, vclusterName string, pvName string) (*corev1.PersistentVolume, error) {
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/api/v1/persistentvolumes/%s", pvName), nil)
+	var pv corev1.PersistentVolume
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &pv); err != nil {
+		return nil, err
+	}
+	return &pv, nil
 }
 
 func (c *VirtualClusterClient) ListClusterRoleBindings(ctx context.Context, vclusterName string, labelSelector string) ([]rbacv1.ClusterRoleBinding, error) {
@@ -3014,22 +3197,38 @@ func uidSearchCandidates(uid string) []string {
 }
 
 func (c *VirtualClusterClient) ListJobPods(ctx context.Context, vclusterName string, namespace string, jobName string) ([]corev1.Pod, error) {
+	var lastErr error
+	for _, profile := range c.orderedProfiles() {
+		pods, err := c.listJobPodsWithProfile(ctx, profile, vclusterName, namespace, jobName)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return pods, nil
+	}
+	return nil, lastErr
+}
+
+func (c *VirtualClusterClient) ListJobPodsForProfile(ctx context.Context, profileName string, vclusterName string, namespace string, jobName string) ([]corev1.Pod, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listJobPodsWithProfile(ctx, profile, vclusterName, namespace, jobName)
+}
+
+func (c *VirtualClusterClient) listJobPodsWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, jobName string) ([]corev1.Pod, error) {
 	query := url.Values{}
 	query.Set("labelSelector", fmt.Sprintf("volcano.sh/job-name=%s", jobName))
 	query.Set("filter", fmt.Sprintf("namespace=%q", namespace))
 	query.Set("order", "name asc")
 
-	var lastErr error
-	for _, profile := range c.orderedProfiles() {
-		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/api/v1/pods", query)
-		var podList corev1.PodList
-		if err := c.getJSONWithProfile(ctx, profile, reqURL, &podList); err != nil {
-			lastErr = err
-			continue
-		}
-		return podList.Items, nil
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/api/v1/pods", query)
+	var podList corev1.PodList
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &podList); err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	return podList.Items, nil
 }
 
 func (c *VirtualClusterClient) ListEvents(ctx context.Context, vclusterName string, namespace string, name string, kind string) ([]corev1.Event, error) {

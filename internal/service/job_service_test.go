@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"rayctl/internal/platform"
 )
 
 func TestEnsurePVCGetDiagnosisForPendingPVC(t *testing.T) {
@@ -50,6 +54,92 @@ func TestEnsurePVCGetDiagnosisDoesNotDuplicatePVCConclusion(t *testing.T) {
 	}})
 	if len(diagnosis) != 1 || diagnosis[0] != existing[0] {
 		t.Fatalf("diagnosis = %#v", diagnosis)
+	}
+}
+
+func TestSelectDiagnosticPodsUsesSingleInspectPod(t *testing.T) {
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "large-job-worker-1", Labels: map[string]string{"volcano.sh/task-spec": "worker"}},
+			Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "large-job-master-0", Labels: map[string]string{"volcano.sh/task-spec": "master"}},
+			Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "large-job-worker-0", Labels: map[string]string{"volcano.sh/task-spec": "worker"}},
+			Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		},
+	}
+
+	selected := selectDiagnosticPods(pods, "startup")
+	if len(selected) != 1 {
+		t.Fatalf("selected %d pods, want 1", len(selected))
+	}
+	if selected[0].Name != "large-job-master-0" {
+		t.Fatalf("selected pod = %q, want master pod", selected[0].Name)
+	}
+}
+
+func TestChooseMasterLogPodPrefersMaster(t *testing.T) {
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "example-worker-0", Labels: map[string]string{"volcano.sh/task-spec": "worker"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "example-master-0", Labels: map[string]string{"volcano.sh/task-spec": "master"}}},
+	}
+	selected := chooseMasterLogPod(pods)
+	if selected == nil || selected.Name != "example-master-0" {
+		t.Fatalf("selected pod = %#v, want example-master-0", selected)
+	}
+}
+
+func TestMatchingVirtualClustersPrefersExactName(t *testing.T) {
+	clusters := []platform.VirtualCluster{
+		{Name: "vc-a3-241ceshi-old", UID: "old"},
+		{Name: "vc-a3-241ceshi", UID: "current", ProfileName: "ailabdev"},
+	}
+
+	matches := matchingVirtualClusters(clusters, "vc-a3-241ceshi")
+	if len(matches) != 1 {
+		t.Fatalf("matchingVirtualClusters() returned %d matches, want 1", len(matches))
+	}
+	if matches[0].UID != "current" || matches[0].ProfileName != "ailabdev" {
+		t.Fatalf("matchingVirtualClusters() = %#v, want exact current-profile cluster", matches[0])
+	}
+}
+
+func TestPlatformVCRefsUsesCanonicalUIDOnly(t *testing.T) {
+	refs := platformVCRefs(platform.VirtualCluster{
+		Name:        "vc-a3-241ceshi",
+		DisplayName: "A3 test cluster",
+		UID:         "019fc690-f9fa-780b-95c8-4eae54511b56",
+	})
+	if len(refs) != 1 || refs[0] != "vc-019fc690-f9fa-780b-95c8-4eae54511b56" {
+		t.Fatalf("platformVCRefs() = %#v, want canonical vc UID only", refs)
+	}
+}
+
+func TestExtractJobLifecycleTimes(t *testing.T) {
+	created := time.Date(2026, 8, 11, 1, 0, 0, 0, time.UTC)
+	job := &unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{
+			"conditions": []any{
+				map[string]any{"phase": "Running", "lastTransitionTime": "2026-08-11T02:00:00Z"},
+				map[string]any{"phase": "Completed", "lastTransitionTime": "2026-08-11T03:00:00Z"},
+			},
+		},
+	}}
+	job.SetCreationTimestamp(metav1.NewTime(created))
+
+	createdAt, startedAt, endedAt := extractJobLifecycleTimes(job, nil, "Completed")
+	if createdAt != "2026-08-11 09:00:00" {
+		t.Fatalf("createdAt = %q", createdAt)
+	}
+	if startedAt != "2026-08-11 10:00:00" {
+		t.Fatalf("startedAt = %q", startedAt)
+	}
+	if endedAt != "2026-08-11 11:00:00" {
+		t.Fatalf("endedAt = %q", endedAt)
 	}
 }
 

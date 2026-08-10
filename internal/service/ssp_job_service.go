@@ -593,6 +593,7 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 	}
 	result.PodResources, result.Nodes = makeSSPPodResourceItems(pods, job.Spec.VCJob.Tasks)
 	inspectPod := chooseInspectPod(append([]corev1.Pod(nil), pods...))
+	logPod := chooseMasterLogPod(pods)
 	if inspectPod != nil {
 		result.InspectPod = inspectPod.Name
 	}
@@ -643,8 +644,8 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 	default:
 		result.Stage = "running"
 		result.Diagnosis = []string{fmt.Sprintf("任务已有 %d/%d 个 Pod Ready。", ready, len(pods))}
-		if includeLogs && inspectPod != nil && podHasRunnableLogs(*inspectPod) {
-			lines, err := s.jobHelper.tailPodLogs(ctx, inspectPod.Namespace, inspectPod.Name, defaultTailLogLines)
+		if includeLogs && logPod != nil && podHasRunnableLogs(*logPod) {
+			lines, err := s.jobHelper.tailPodLogs(ctx, logPod.Namespace, logPod.Name, defaultTailLogLines)
 			if err != nil {
 				result.RecentLogLines = []string{fmt.Sprintf("log unavailable: %v", err)}
 			} else {

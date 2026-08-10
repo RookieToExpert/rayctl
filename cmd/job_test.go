@@ -41,7 +41,7 @@ func TestFormatJobGetTimeoutError(t *testing.T) {
 	defer cancel()
 	<-ctx.Done()
 	err := formatJobGetError(ctx, "example-job", defaultJobGetTimeout, context.DeadlineExceeded)
-	for _, fragment := range []string{"example-job", "10s", "kubeconfig", "D/PT"} {
+	for _, fragment := range []string{"example-job", "10s", "平台 API", "HC API", "kubeconfig", "platform profile"} {
 		if !strings.Contains(err.Error(), fragment) {
 			t.Fatalf("timeout error %q does not contain %q", err, fragment)
 		}

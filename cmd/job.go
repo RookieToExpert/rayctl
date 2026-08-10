@@ -104,7 +104,7 @@ func newJobGetCmd() *cobra.Command {
 						}
 					}
 					printSeparator()
-					output.PrintJobDetail(result, debugTiming)
+					output.PrintJobDetail(result, longOutput, debugTiming)
 				}
 				return nil
 			}
@@ -134,7 +134,7 @@ func newJobGetCmd() *cobra.Command {
 					}
 
 					if sspJobService == nil || detectedType == service.WorkloadTypeECPVCJob {
-						results, err := jobService.GetJobs(ctx, queryIdentifier)
+						results, err := jobService.GetJobsWithLogs(ctx, queryIdentifier, longOutput)
 						if err != nil {
 							return err
 						}
@@ -154,7 +154,7 @@ func newJobGetCmd() *cobra.Command {
 					ecpResults := make(chan ecpQueryResult, 1)
 					sspResults := make(chan sspQueryResult, 1)
 					go func() {
-						results, err := jobService.GetJobs(queryCtx, queryIdentifier)
+						results, err := jobService.GetJobsWithLogs(queryCtx, queryIdentifier, longOutput)
 						ecpResults <- ecpQueryResult{results: results, err: err}
 					}()
 					go func() {
@@ -230,7 +230,7 @@ func newJobGetCmd() *cobra.Command {
 	}
 
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
-	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "SSP TrainingJob 显示首个 Pod 的最新日志")
+	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 master Pod 的最新日志")
 	getCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 SSP workspace 名称，可避免历史任务跨 workspace 查询")
 	getCmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
 	getCmd.AddCommand(newJobGetClusterCmd())
@@ -244,7 +244,7 @@ func isSSPKubeconfigMismatch(err error) bool {
 
 func formatJobGetError(ctx context.Context, identifier string, timeout time.Duration, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("job %q 查询超过 %s，已自动停止；请检查当前 kubeconfig 是否对应任务所在的 HC 集群（D/PT），也可通过 -k 指定正确的 kubeconfig", identifier, timeout)
+		return fmt.Errorf("job %q 查询超过 %s，已自动停止；可能是平台 API、HC API 或 Pending 诊断请求响应较慢，请检查 kubeconfig 与 platform profile，也可通过 --timeout 临时增加查询时间", identifier, timeout)
 	}
 	return fmt.Errorf("job %q: %w", identifier, err)
 }

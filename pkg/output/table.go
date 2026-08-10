@@ -198,7 +198,7 @@ func PrintNodeMutationResult(result *service.NodeMutationResult) {
 	)
 }
 
-func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
+func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming bool) {
 	summaryRows := [][]string{
 		{"TYPE", "ECP VCJob"},
 		{"JOB", result.Name},
@@ -209,6 +209,11 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 		{"SUBMITTER", result.Submitter},
 		{"PODGROUP", result.PodGroupName},
 		{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+		{"STARTED", emptyDash(result.StartedAt)},
+	}
+	if result.Terminal {
+		summaryRows = append(summaryRows, []string{"ENDED", emptyDash(result.EndedAt)})
 	}
 	for _, line := range result.Diagnosis {
 		summaryRows = append(summaryRows, []string{"结论", emptyDash(line)})
@@ -275,19 +280,19 @@ func PrintJobDetail(result *service.JobGetResult, debugTiming bool) {
 			fmt.Fprintln(os.Stdout)
 			printJobEvidenceTable("POD EVENTS", result.CheckEvidence)
 		default:
-			if shouldShowJobLogs(result) {
-				fmt.Fprintln(os.Stdout)
-				logRows := make([][]string, 0, len(result.RecentLogLines))
-				for _, line := range result.RecentLogLines {
-					logRows = append(logRows, []string{line})
-				}
-				printBoxTableWithMaxWidths(
-					[]string{"LATEST LOGS"},
-					logRows,
-					[]int{110},
-				)
-			}
 		}
+	}
+	if longOutput && shouldShowJobLogs(result) {
+		fmt.Fprintln(os.Stdout)
+		logRows := make([][]string, 0, len(result.RecentLogLines))
+		for _, line := range result.RecentLogLines {
+			logRows = append(logRows, []string{line})
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"LATEST LOGS"},
+			logRows,
+			[]int{110},
+		)
 	}
 
 	if debugTiming {
@@ -330,6 +335,10 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 		{"PRIORITY", emptyDash(result.Priority)},
 		{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
 		{"CREATED", emptyDash(result.CreatedAt)},
+		{"STARTED", emptyDash(result.StartedAt)},
+	}
+	if result.Terminal {
+		summaryRows = append(summaryRows, []string{"ENDED", emptyDash(result.EndedAt)})
 	}
 	for _, line := range result.Diagnosis {
 		summaryRows = append(summaryRows, []string{"结论", emptyDash(line)})
@@ -1982,7 +1991,7 @@ func printJobEvidenceTable(title string, evidence []service.CheckEvidenceItem) {
 }
 
 func shouldShowJobLogs(result *service.JobGetResult) bool {
-	if result == nil || result.Terminal {
+	if result == nil || len(result.RecentLogLines) == 0 {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(result.Stage)) {
