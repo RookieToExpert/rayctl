@@ -18,6 +18,7 @@ rayctl --kubeconfig=/path/to/config node get ecp
 
 # 并行查询多个 ECP/SSP 任务，输出仍按输入顺序展示
 rayctl job get job-a job-b job-c
+rayctl ecs check ais-a ecs-b ais-c
 
 # 列出当前 profile 下的资源，或按名称/UID 查看单个资源
 rayctl vpc get

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,6 +36,12 @@ type ECSService struct {
 
 type ECSCheckResult struct {
 	Items []ECSCheckItem
+}
+
+type ECSCheckQueryResult struct {
+	Identifier string
+	Result     *ECSCheckResult
+	Err        error
 }
 
 type ECSCheckItem struct {
@@ -68,6 +75,23 @@ type vmResourceContext struct {
 	ResourceName string
 }
 
+type ecsCheckSnapshot struct {
+	service     *ECSService
+	vmis        []unstructured.Unstructured
+	vmiContexts []vmResourceContext
+	vmiOnce     sync.Once
+	vmiErr      error
+
+	vmOnce     sync.Once
+	vmContexts []vmResourceContext
+	vmErr      error
+
+	fallbackOnce sync.Once
+	fallbackECS  []platform.ECSVirtualMachine
+	fallbackAIS  []platform.AISpace
+	fallbackErr  error
+}
+
 func NewECSService(dynamicClient dynamic.Interface, vcClient *platform.VirtualClusterClient) *ECSService {
 	if vcClient == nil {
 		return NewECSServiceWithPlatform(dynamicClient, nil)
@@ -87,43 +111,60 @@ func (s *ECSService) Check(ctx context.Context, keyword string) (*ECSCheckResult
 	if keyword == "" {
 		return nil, fmt.Errorf("ecs/ais identifier is required")
 	}
+	snapshot, err := s.newECSCheckSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return s.checkWithSnapshot(ctx, keyword, snapshot)
+}
+
+func (s *ECSService) CheckMany(ctx context.Context, keywords []string, maxParallel int) []ECSCheckQueryResult {
+	snapshot, snapshotErr := s.newECSCheckSnapshot()
+	return boundedMap(ctx, keywords, maxParallel, func(queryCtx context.Context, keyword string) ECSCheckQueryResult {
+		result := ECSCheckQueryResult{Identifier: keyword}
+		if snapshotErr != nil {
+			result.Err = snapshotErr
+			return result
+		}
+		result.Result, result.Err = s.checkWithSnapshot(queryCtx, keyword, snapshot)
+		return result
+	})
+}
+
+func (s *ECSService) newECSCheckSnapshot() (*ecsCheckSnapshot, error) {
 	if s.vcClient == nil {
 		return nil, fmt.Errorf("ecs/ais 查询需要平台配置")
 	}
+	return &ecsCheckSnapshot{service: s}, nil
+}
 
-	vmiCall := asyncCall(ctx, func(ctx context.Context) (*unstructured.UnstructuredList, error) {
-		return s.dynamicClient.Resource(kubevirtVMIGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
-	})
+func (s *ECSService) checkWithSnapshot(ctx context.Context, keyword string, snapshot *ecsCheckSnapshot) (*ECSCheckResult, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return nil, fmt.Errorf("ecs/ais identifier is required")
+	}
 	ecsCall := asyncCall(ctx, func(ctx context.Context) ([]platform.ECSVirtualMachine, error) {
 		return s.vcClient.FindCurrentProfileECSVirtualMachines(ctx, keyword)
 	})
 	aisCall := asyncCall(ctx, func(ctx context.Context) ([]platform.AISpace, error) {
 		return s.vcClient.FindCurrentProfileAISpaces(ctx, keyword)
 	})
-	vmiResult := <-vmiCall
+	contexts, err := snapshot.baseVMIContexts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	ecsResult := <-ecsCall
 	aisResult := <-aisCall
 
-	if vmiResult.Err != nil {
-		return nil, fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", vmiResult.Err)
-	}
-
 	matchedECS := filterECSResources(ecsResult.Value, keyword)
 	matchedAIS := filterAISpaces(aisResult.Value, keyword)
-	contexts := buildVMIResourceContexts(vmiResult.Value.Items)
 	if len(matchedECS) == 0 && len(matchedAIS) == 0 {
-		ecsFallbackCall := asyncCall(ctx, s.vcClient.ListECSVirtualMachines)
-		aisFallbackCall := asyncCall(ctx, s.vcClient.ListAISpaces)
-		ecsFallback := <-ecsFallbackCall
-		aisFallback := <-aisFallbackCall
-		if ecsFallback.Err != nil {
-			return nil, fmt.Errorf("list ecs resources: %w", ecsFallback.Err)
+		fallbackECS, fallbackAIS, err := snapshot.fallbackResources(ctx)
+		if err != nil {
+			return nil, err
 		}
-		if aisFallback.Err != nil {
-			return nil, fmt.Errorf("list ais resources: %w", aisFallback.Err)
-		}
-		matchedECS = filterECSResources(ecsFallback.Value, keyword)
-		matchedAIS = filterAISpaces(aisFallback.Value, keyword)
+		matchedECS = filterECSResources(fallbackECS, keyword)
+		matchedAIS = filterAISpaces(fallbackAIS, keyword)
 	}
 
 	if len(matchedECS) == 0 && len(matchedAIS) == 0 {
@@ -131,11 +172,11 @@ func (s *ECSService) Check(ctx context.Context, keyword string) (*ECSCheckResult
 	}
 
 	if !resourcesHaveVMContext(contexts, matchedECS, matchedAIS, keyword) {
-		vmList, err := s.dynamicClient.Resource(kubevirtVMGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		var err error
+		contexts, err = snapshot.allVMContexts(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", err)
+			return nil, err
 		}
-		contexts = buildVMResourceContexts(vmList.Items, vmiResult.Value.Items)
 	}
 
 	creatorIDs := make([]string, 0, len(matchedECS)+len(matchedAIS))
@@ -212,6 +253,51 @@ func (s *ECSService) Check(ctx context.Context, keyword string) (*ECSCheckResult
 	})
 
 	return &ECSCheckResult{Items: items}, nil
+}
+
+func (s *ecsCheckSnapshot) baseVMIContexts(ctx context.Context) ([]vmResourceContext, error) {
+	s.vmiOnce.Do(func() {
+		vmiList, err := s.service.dynamicClient.Resource(kubevirtVMIGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			s.vmiErr = fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", err)
+			return
+		}
+		s.vmis = vmiList.Items
+		s.vmiContexts = buildVMIResourceContexts(vmiList.Items)
+	})
+	return s.vmiContexts, s.vmiErr
+}
+
+func (s *ecsCheckSnapshot) allVMContexts(ctx context.Context) ([]vmResourceContext, error) {
+	s.vmOnce.Do(func() {
+		vmList, err := s.service.dynamicClient.Resource(kubevirtVMGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			s.vmErr = fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", err)
+			return
+		}
+		s.vmContexts = buildVMResourceContexts(vmList.Items, s.vmis)
+	})
+	return s.vmContexts, s.vmErr
+}
+
+func (s *ecsCheckSnapshot) fallbackResources(ctx context.Context) ([]platform.ECSVirtualMachine, []platform.AISpace, error) {
+	s.fallbackOnce.Do(func() {
+		ecsCall := asyncCall(ctx, s.service.vcClient.ListECSVirtualMachines)
+		aisCall := asyncCall(ctx, s.service.vcClient.ListAISpaces)
+		ecsResult := <-ecsCall
+		aisResult := <-aisCall
+		if ecsResult.Err != nil {
+			s.fallbackErr = fmt.Errorf("list ecs resources: %w", ecsResult.Err)
+			return
+		}
+		if aisResult.Err != nil {
+			s.fallbackErr = fmt.Errorf("list ais resources: %w", aisResult.Err)
+			return
+		}
+		s.fallbackECS = ecsResult.Value
+		s.fallbackAIS = aisResult.Value
+	})
+	return s.fallbackECS, s.fallbackAIS, s.fallbackErr
 }
 
 func (s *ECSService) ResolveSingle(ctx context.Context, keyword string) (*ECSCheckItem, error) {

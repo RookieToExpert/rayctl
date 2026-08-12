@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,9 +28,10 @@ func newECSCmd() *cobra.Command {
 
 func newECSCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "check <ais-name-or-ecs-name-or-uid> [ais-name-or-ecs-name-or-uid...]",
-		Short: "根据 AIS/ECS 名称或 UID 查询 HC 中的 VM、namespace、node、创建人和内网 IP",
-		Args:  cobra.MinimumNArgs(1),
+		Use:     "check <ais-name-or-ecs-name-or-uid> [ais-name-or-ecs-name-or-uid...]",
+		Short:   "并行查询一个或多个 AIS/ECS 的 VM、namespace、node、创建人和内网 IP",
+		Example: "  rayctl ecs check ais-example ecs-example another-uid",
+		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dynamicClient, err := kube.NewDynamicClient(kubeconfig)
 			if err != nil {
@@ -38,17 +40,21 @@ func newECSCheckCmd() *cobra.Command {
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
 			ecsService := service.NewECSService(dynamicClient, vcClient)
-			for i, identifier := range args {
-				result, err := ecsService.Check(context.Background(), identifier)
-				if err != nil {
-					return fmt.Errorf("ecs %q: %w", identifier, err)
+			results := ecsService.CheckMany(cmd.Context(), args, 4)
+			printed := false
+			queryErrors := make([]error, 0)
+			for _, result := range results {
+				if result.Err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("ecs %q: %w", result.Identifier, result.Err))
+					continue
 				}
-				if i > 0 {
+				if printed {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
-				output.PrintECSCheckDetail(result)
+				output.PrintECSCheckDetail(result.Result)
+				printed = true
 			}
-			return nil
+			return errors.Join(queryErrors...)
 		},
 	}
 
