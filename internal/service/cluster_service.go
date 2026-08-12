@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -13,8 +16,6 @@ import (
 )
 
 const (
-	clusterNamespaceUIDLabelKey     = "resource.compute.sensecore.cn/vc-uid"
-	clusterNamespaceNameLabelKey    = "cluster.x-k8s.io/cluster-name"
 	clusterVirtualNamespaceLabelKey = "vcluster.loft.sh/vcluster-namespace"
 	clusterLogicalNamespaceLabelKey = "vcluster.loft.sh/custom-namespace-name"
 	clusterLogicalNamespaceAnnotKey = "vcluster.loft.sh/object-name"
@@ -22,7 +23,7 @@ const (
 
 type ClusterService struct {
 	clientset kubernetes.Interface
-	vcClient  *platform.VirtualClusterClient
+	vcClient  ClusterPlatform
 }
 
 type ClusterNamespaceMapping struct {
@@ -39,10 +40,24 @@ type ClusterGetResult struct {
 }
 
 func NewClusterService(clientset kubernetes.Interface, vcClient *platform.VirtualClusterClient) *ClusterService {
+	if vcClient == nil {
+		return NewClusterServiceWithPlatform(clientset, nil)
+	}
+	return NewClusterServiceWithPlatform(clientset, vcClient)
+}
+
+func NewClusterServiceWithPlatform(clientset kubernetes.Interface, vcClient ClusterPlatform) *ClusterService {
 	return &ClusterService{
 		clientset: clientset,
 		vcClient:  vcClient,
 	}
+}
+
+func (s *ClusterService) ResolveDisplayNamesWithProfiles(ctx context.Context, uids []string) (map[string]string, map[string]string, error) {
+	if s == nil || s.vcClient == nil {
+		return map[string]string{}, map[string]string{}, nil
+	}
+	return s.vcClient.ResolveDisplayNamesWithProfiles(ctx, uids)
 }
 
 func (s *ClusterService) Get(ctx context.Context, identifier string) (*ClusterGetResult, error) {
@@ -55,51 +70,49 @@ func (s *ClusterService) Get(ctx context.Context, identifier string) (*ClusterGe
 	if err != nil {
 		return nil, err
 	}
+	return s.GetResolved(ctx, clusterName, clusterUID)
+}
 
+func (s *ClusterService) GetResolved(ctx context.Context, clusterName string, clusterUID string) (*ClusterGetResult, error) {
+	clusterName = strings.TrimSpace(clusterName)
+	clusterUID = strings.TrimPrefix(strings.TrimSpace(clusterUID), "vc-")
+	if clusterUID == "" {
+		return nil, fmt.Errorf("cluster uid is required")
+	}
 	controlPlaneNamespace := "vc-" + clusterUID
-	namespaces, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list namespaces: %w", err)
+	controlPlaneCall := asyncCall(ctx, func(ctx context.Context) (*corev1.Namespace, error) {
+		return s.clientset.CoreV1().Namespaces().Get(ctx, controlPlaneNamespace, metav1.GetOptions{})
+	})
+	resourceListCall := asyncCall(ctx, func(ctx context.Context) (*corev1.NamespaceList, error) {
+		return s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+			LabelSelector: clusterVirtualNamespaceLabelKey + "=" + controlPlaneNamespace,
+		})
+	})
+	controlPlaneResult := <-controlPlaneCall
+	resourceListResult := <-resourceListCall
+
+	if controlPlaneResult.Err != nil && !apierrors.IsNotFound(controlPlaneResult.Err) {
+		return nil, fmt.Errorf("get control plane namespace %q: %w", controlPlaneNamespace, controlPlaneResult.Err)
+	}
+	if resourceListResult.Err != nil {
+		return nil, fmt.Errorf("list resource namespaces: %w", resourceListResult.Err)
 	}
 
-	controlPlaneFound := false
 	resourceNamespaces := make([]ClusterNamespaceMapping, 0)
-	seenMappings := make(map[string]struct{})
-	for _, ns := range namespaces.Items {
-		switch {
-		case ns.Name == controlPlaneNamespace:
-			controlPlaneFound = true
-		case strings.TrimSpace(ns.Labels[clusterNamespaceUIDLabelKey]) == clusterUID:
-			controlPlaneFound = true
-			if controlPlaneNamespace == "" {
-				controlPlaneNamespace = ns.Name
-			}
-		case strings.TrimSpace(ns.Labels[clusterNamespaceNameLabelKey]) == controlPlaneNamespace:
-			controlPlaneFound = true
-		}
-
-		if strings.TrimSpace(ns.Labels[clusterVirtualNamespaceLabelKey]) != controlPlaneNamespace {
-			continue
-		}
-
+	for _, ns := range resourceListResult.Value.Items {
 		logicalNamespace := firstNonEmpty(
 			strings.TrimSpace(ns.Labels[clusterLogicalNamespaceLabelKey]),
 			strings.TrimSpace(ns.Annotations[clusterLogicalNamespaceAnnotKey]),
 			ns.Name,
 		)
-		key := ns.Name + "|" + logicalNamespace
-		if _, ok := seenMappings[key]; ok {
-			continue
-		}
-		seenMappings[key] = struct{}{}
 		resourceNamespaces = append(resourceNamespaces, ClusterNamespaceMapping{
 			ResourceNamespace: ns.Name,
 			VirtualNamespace:  logicalNamespace,
 		})
 	}
 
-	if !controlPlaneFound && len(resourceNamespaces) == 0 {
-		return nil, fmt.Errorf("cluster %q 在当前 kubeconfig 下没有找到控制面 namespace 或资源 namespace，当前大概率不是 HC kubeconfig", identifier)
+	if controlPlaneResult.Err != nil && len(resourceNamespaces) == 0 {
+		return nil, fmt.Errorf("cluster %q 在当前 kubeconfig 下没有找到控制面 namespace 或资源 namespace，当前大概率不是 HC kubeconfig", firstNonEmpty(clusterName, "vc-"+clusterUID))
 	}
 
 	sort.Slice(resourceNamespaces, func(i, j int) bool {
@@ -141,11 +154,38 @@ func (s *ClusterService) resolveClusterIdentifier(ctx context.Context, identifie
 		return "", "", fmt.Errorf("cluster get requires platform configuration to resolve %q", identifier)
 	}
 
+	exactCtx, cancelExact := context.WithTimeout(ctx, 2*time.Second)
+	cluster, exactErr := s.vcClient.FindExactVirtualCluster(exactCtx, identifier)
+	cancelExact()
+	if exactErr == nil {
+		return firstNonEmpty(cluster.Name, cluster.DisplayName, "vc-"+cluster.UID), cluster.UID, nil
+	}
+
+	if clusters, currentErr := s.vcClient.ListCurrentProfileVirtualClusters(ctx); currentErr == nil {
+		clusterName, clusterUID, matched, matchErr := matchVirtualClusterIdentifier(identifier, clusters)
+		if matchErr != nil {
+			return "", "", matchErr
+		}
+		if matched {
+			return clusterName, clusterUID, nil
+		}
+	}
+
 	clusters, err := s.vcClient.ListVirtualClusters(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("list virtual clusters: %w", err)
 	}
+	clusterName, clusterUID, matched, matchErr := matchVirtualClusterIdentifier(identifier, clusters)
+	if matchErr != nil {
+		return "", "", matchErr
+	}
+	if matched {
+		return clusterName, clusterUID, nil
+	}
+	return "", "", fmt.Errorf("virtual cluster %q not found", identifier)
+}
 
+func matchVirtualClusterIdentifier(identifier string, clusters []platform.VirtualCluster) (string, string, bool, error) {
 	normalized := strings.ToLower(strings.TrimSpace(identifier))
 	var exact []platform.VirtualCluster
 	var fuzzy []platform.VirtualCluster
@@ -182,15 +222,15 @@ func (s *ClusterService) resolveClusterIdentifier(ctx context.Context, identifie
 
 	switch {
 	case len(exact) == 1:
-		return firstNonEmpty(exact[0].Name, exact[0].DisplayName, "vc-"+exact[0].UID), exact[0].UID, nil
+		return firstNonEmpty(exact[0].Name, exact[0].DisplayName, "vc-"+exact[0].UID), exact[0].UID, true, nil
 	case len(exact) > 1:
-		return "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s", identifier, joinVirtualClusterCandidates(exact))
+		return "", "", false, fmt.Errorf("cluster %q matched multiple virtual clusters: %s", identifier, joinVirtualClusterCandidates(exact))
 	case len(fuzzy) == 1:
-		return firstNonEmpty(fuzzy[0].Name, fuzzy[0].DisplayName, "vc-"+fuzzy[0].UID), fuzzy[0].UID, nil
+		return firstNonEmpty(fuzzy[0].Name, fuzzy[0].DisplayName, "vc-"+fuzzy[0].UID), fuzzy[0].UID, true, nil
 	case len(fuzzy) > 1:
-		return "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s", identifier, joinVirtualClusterCandidates(fuzzy))
+		return "", "", false, fmt.Errorf("cluster %q matched multiple virtual clusters: %s", identifier, joinVirtualClusterCandidates(fuzzy))
 	default:
-		return "", "", fmt.Errorf("virtual cluster %q not found", identifier)
+		return "", "", false, nil
 	}
 }
 

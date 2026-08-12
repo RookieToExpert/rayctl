@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"rayctl/internal/platform"
 )
@@ -102,16 +103,42 @@ func (s *VCService) Get(ctx context.Context, identifier string) (*VCDetailResult
 	if identifier == "" {
 		return nil, fmt.Errorf("vc identifier is required")
 	}
+	if !looksLikeVCUID(identifier) {
+		exactCtx, cancelExact := context.WithTimeout(ctx, 2*time.Second)
+		cluster, exactErr := s.vcClient.FindExactVirtualCluster(exactCtx, identifier)
+		cancelExact()
+		if exactErr == nil {
+			item := vcListItemFromPlatform(*cluster)
+			if item.UID != "" && item.Subscription != "" {
+				return vcDetailFromListItem(item), nil
+			}
+		}
+	}
+	if clusters, currentErr := s.vcClient.ListCurrentProfileVirtualClusters(ctx); currentErr == nil {
+		items := make([]VCListItem, 0, len(clusters))
+		for _, cluster := range clusters {
+			items = append(items, vcListItemFromPlatform(cluster))
+		}
+		if result, matched, err := matchVCIdentifier(identifier, items); matched {
+			return result, err
+		}
+	}
 
 	list, err := s.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if result, matched, err := matchVCIdentifier(identifier, list.Items); matched {
+		return result, err
+	}
+	return nil, fmt.Errorf("vc %q not found", identifier)
+}
 
+func matchVCIdentifier(identifier string, items []VCListItem) (*VCDetailResult, bool, error) {
 	normalized := strings.ToLower(identifier)
 	exact := make([]VCListItem, 0)
 	fuzzy := make([]VCListItem, 0)
-	for _, item := range list.Items {
+	for _, item := range items {
 		fields := []string{
 			item.Name,
 			item.UID,
@@ -139,16 +166,36 @@ func (s *VCService) Get(ctx context.Context, identifier string) (*VCDetailResult
 
 	switch {
 	case len(exact) == 1:
-		return vcDetailFromListItem(exact[0]), nil
+		return vcDetailFromListItem(exact[0]), true, nil
 	case len(exact) > 1:
-		return nil, fmt.Errorf("vc %q matched multiple virtual clusters: %s", identifier, joinVCCandidates(exact))
+		return nil, true, fmt.Errorf("vc %q matched multiple virtual clusters: %s", identifier, joinVCCandidates(exact))
 	case len(fuzzy) == 1:
-		return vcDetailFromListItem(fuzzy[0]), nil
+		return vcDetailFromListItem(fuzzy[0]), true, nil
 	case len(fuzzy) > 1:
-		return nil, fmt.Errorf("vc %q matched multiple virtual clusters: %s", identifier, joinVCCandidates(fuzzy))
+		return nil, true, fmt.Errorf("vc %q matched multiple virtual clusters: %s", identifier, joinVCCandidates(fuzzy))
 	default:
-		return nil, fmt.Errorf("vc %q not found", identifier)
+		return nil, false, nil
 	}
+}
+
+func looksLikeVCUID(value string) bool {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "vc-")
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *VCService) ListNodes(ctx context.Context, clusterIdentifier string) (*VCNodeListResult, error) {

@@ -1294,6 +1294,21 @@ func PrintVCList(result *service.VCListResult) {
 }
 
 func PrintVCDetail(result *service.VCDetailResult) {
+	PrintVCOverview(result, nil)
+}
+
+func PrintVCOverview(result *service.VCDetailResult, mapping *service.ClusterGetResult) {
+	printVCOverviewTable(result, mapping)
+	if mapping != nil {
+		printClusterNamespaceMappings(mapping.ResourceNamespaces)
+	}
+}
+
+func PrintVCOverviewSummary(result *service.VCDetailResult, mapping *service.ClusterGetResult) {
+	printVCOverviewTable(result, mapping)
+}
+
+func printVCOverviewTable(result *service.VCDetailResult, mapping *service.ClusterGetResult) {
 	if result == nil {
 		return
 	}
@@ -1305,14 +1320,20 @@ func PrintVCDetail(result *service.VCDetailResult) {
 		{"REGION", emptyDash(result.Region)},
 		{"STATE", emptyDash(result.State)},
 	}
+	if mapping != nil {
+		rows = append(rows,
+			[]string{"CONTROL PLANE NS", emptyDash(mapping.ControlPlaneNamespace)},
+			[]string{"RESOURCE NS COUNT", fmt.Sprintf("%d", mapping.ResourceNamespaceCount)},
+		)
+	}
 
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
 		rows,
-		[]int{12, 72},
+		[]int{20, 72},
 		tableOptions{
 			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...),
-			minWidths:   []int{8, 24},
+			minWidths:   []int{12, 24},
 		},
 	)
 }
@@ -1622,12 +1643,16 @@ func PrintClusterDetail(result *service.ClusterGetResult) {
 		},
 	)
 
+	printClusterNamespaceMappings(result.ResourceNamespaces)
+}
+
+func printClusterNamespaceMappings(items []service.ClusterNamespaceMapping) {
 	fmt.Fprintln(os.Stdout)
-	rows := make([][]string, 0, maxInt(1, len(result.ResourceNamespaces)))
-	if len(result.ResourceNamespaces) == 0 {
+	rows := make([][]string, 0, maxInt(1, len(items)))
+	if len(items) == 0 {
 		rows = append(rows, []string{"-", "-"})
 	} else {
-		for _, item := range result.ResourceNamespaces {
+		for _, item := range items {
 			rows = append(rows, []string{
 				emptyDash(item.ResourceNamespace),
 				emptyDash(item.VirtualNamespace),

@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/platform"
 )
@@ -30,9 +29,8 @@ var (
 )
 
 type ECSService struct {
-	clientset     kubernetes.Interface
 	dynamicClient dynamic.Interface
-	vcClient      *platform.VirtualClusterClient
+	vcClient      ECSPlatform
 }
 
 type ECSCheckResult struct {
@@ -70,9 +68,15 @@ type vmResourceContext struct {
 	ResourceName string
 }
 
-func NewECSService(clientset kubernetes.Interface, dynamicClient dynamic.Interface, vcClient *platform.VirtualClusterClient) *ECSService {
+func NewECSService(dynamicClient dynamic.Interface, vcClient *platform.VirtualClusterClient) *ECSService {
+	if vcClient == nil {
+		return NewECSServiceWithPlatform(dynamicClient, nil)
+	}
+	return NewECSServiceWithPlatform(dynamicClient, vcClient)
+}
+
+func NewECSServiceWithPlatform(dynamicClient dynamic.Interface, vcClient ECSPlatform) *ECSService {
 	return &ECSService{
-		clientset:     clientset,
 		dynamicClient: dynamicClient,
 		vcClient:      vcClient,
 	}
@@ -87,29 +91,51 @@ func (s *ECSService) Check(ctx context.Context, keyword string) (*ECSCheckResult
 		return nil, fmt.Errorf("ecs/ais 查询需要平台配置")
 	}
 
-	vmList, err := s.dynamicClient.Resource(kubevirtVMGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", err)
-	}
-	vmiList, err := s.dynamicClient.Resource(kubevirtVMIGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", err)
+	vmiCall := asyncCall(ctx, func(ctx context.Context) (*unstructured.UnstructuredList, error) {
+		return s.dynamicClient.Resource(kubevirtVMIGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	})
+	ecsCall := asyncCall(ctx, func(ctx context.Context) ([]platform.ECSVirtualMachine, error) {
+		return s.vcClient.FindCurrentProfileECSVirtualMachines(ctx, keyword)
+	})
+	aisCall := asyncCall(ctx, func(ctx context.Context) ([]platform.AISpace, error) {
+		return s.vcClient.FindCurrentProfileAISpaces(ctx, keyword)
+	})
+	vmiResult := <-vmiCall
+	ecsResult := <-ecsCall
+	aisResult := <-aisCall
+
+	if vmiResult.Err != nil {
+		return nil, fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", vmiResult.Err)
 	}
 
-	contexts := buildVMResourceContexts(vmList.Items, vmiList.Items)
-	ecsResources, err := s.vcClient.ListECSVirtualMachines(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list ecs resources: %w", err)
-	}
-	aisResources, err := s.vcClient.ListAISpaces(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list ais resources: %w", err)
+	matchedECS := filterECSResources(ecsResult.Value, keyword)
+	matchedAIS := filterAISpaces(aisResult.Value, keyword)
+	contexts := buildVMIResourceContexts(vmiResult.Value.Items)
+	if len(matchedECS) == 0 && len(matchedAIS) == 0 {
+		ecsFallbackCall := asyncCall(ctx, s.vcClient.ListECSVirtualMachines)
+		aisFallbackCall := asyncCall(ctx, s.vcClient.ListAISpaces)
+		ecsFallback := <-ecsFallbackCall
+		aisFallback := <-aisFallbackCall
+		if ecsFallback.Err != nil {
+			return nil, fmt.Errorf("list ecs resources: %w", ecsFallback.Err)
+		}
+		if aisFallback.Err != nil {
+			return nil, fmt.Errorf("list ais resources: %w", aisFallback.Err)
+		}
+		matchedECS = filterECSResources(ecsFallback.Value, keyword)
+		matchedAIS = filterAISpaces(aisFallback.Value, keyword)
 	}
 
-	matchedECS := filterECSResources(ecsResources, keyword)
-	matchedAIS := filterAISpaces(aisResources, keyword)
 	if len(matchedECS) == 0 && len(matchedAIS) == 0 {
 		return nil, fmt.Errorf("ecs/ais %q not found", keyword)
+	}
+
+	if !resourcesHaveVMContext(contexts, matchedECS, matchedAIS, keyword) {
+		vmList, err := s.dynamicClient.Resource(kubevirtVMGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("ecs/ais 查询依赖 HC kubeconfig，请切换到 HC kubeconfig 后再执行: %w", err)
+		}
+		contexts = buildVMResourceContexts(vmList.Items, vmiResult.Value.Items)
 	}
 
 	creatorIDs := make([]string, 0, len(matchedECS)+len(matchedAIS))
@@ -305,6 +331,37 @@ func buildVMResourceContexts(vms []unstructured.Unstructured, vmis []unstructure
 		})
 	}
 	return result
+}
+
+func buildVMIResourceContexts(vmis []unstructured.Unstructured) []vmResourceContext {
+	result := make([]vmResourceContext, 0, len(vmis))
+	for _, vmi := range vmis {
+		rawBytes, _ := json.Marshal(vmi.Object)
+		result = append(result, vmResourceContext{
+			VMName:       vmi.GetName(),
+			Namespace:    vmi.GetNamespace(),
+			Node:         firstNonEmpty(getNestedString(vmi.Object, "status", "nodeName"), getNestedString(vmi.Object, "metadata", "labels", "kubevirt.io/nodeName")),
+			InternalIP:   getVMIInterfaceIP(vmi.Object),
+			RawText:      strings.ToLower(string(rawBytes)),
+			ResourceUID:  firstNonEmpty(getNestedString(vmi.Object, "metadata", "annotations", "resource.compute.sensecore.cn/uid"), getNestedString(vmi.Object, "metadata", "labels", "resourcemanager_id")),
+			ResourceName: getNestedString(vmi.Object, "metadata", "annotations", "resource.compute.sensecore.cn/name"),
+		})
+	}
+	return result
+}
+
+func resourcesHaveVMContext(contexts []vmResourceContext, ecsResources []platform.ECSVirtualMachine, aisResources []platform.AISpace, keyword string) bool {
+	for _, resource := range ecsResources {
+		if len(matchVMContextsForECS(contexts, resource, keyword)) == 0 {
+			return false
+		}
+	}
+	for _, resource := range aisResources {
+		if len(matchVMContextsForAIS(contexts, resource)) == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func getVMIInterfaceIP(obj map[string]any) string {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"rayctl/internal/kube"
 	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
@@ -20,22 +21,30 @@ func newVCCmd() *cobra.Command {
 
 	vcCmd.AddCommand(newVCGetCmd())
 	vcCmd.AddCommand(newVCNodeCmd())
+	vcCmd.AddCommand(newClusterSetCmd())
 	return vcCmd
 }
 
 func newVCGetCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "get [vc-name-or-uid]",
-		Short: "列出 VC 或查询单个 VC 详情",
-		Args:  cobra.MaximumNArgs(1),
+	var platformOnly bool
+	cmd := &cobra.Command{
+		Use:   "get [vc-name-or-uid...]",
+		Short: "列出 VC，或并行查询一个或多个 VC",
+		Long: "不带参数时列出平台 VC；指定一个 VC 时展示平台信息和 HC namespace 映射；" +
+			"指定多个 VC 时并行查询并仅展示每个 VC 的概要表。",
+		Example: strings.Join([]string{
+			"  rayctl vc get",
+			"  rayctl vc get vc-a3-llmit",
+			"  rayctl vc get vc-a3-llmit vc-a3-deeplink vc-c550-jiaofu",
+			"  rayctl vc get vc-a3-llmit --platform-only",
+		}, "\n"),
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
-			}
-
-			vcService := service.NewVCService(vcClient)
 			if len(args) == 0 {
+				_, vcService, err := newVCPlatformService()
+				if err != nil {
+					return err
+				}
 				result, err := vcService.List(cmd.Context())
 				if err != nil {
 					return err
@@ -44,14 +53,48 @@ func newVCGetCmd() *cobra.Command {
 				return nil
 			}
 
-			result, err := vcService.Get(cmd.Context(), args[0])
-			if err != nil {
-				return err
+			if len(args) == 1 {
+				return runVCGet(cmd, args[0], platformOnly)
 			}
-			output.PrintVCDetail(result)
-			return nil
+			return runParallelVCGet(cmd.Context(), args, platformOnly)
 		},
 	}
+	cmd.Flags().BoolVar(&platformOnly, "platform-only", false, "只显示平台 VC 信息，不查询 HC namespace 映射")
+	return cmd
+}
+
+func runVCGet(cmd *cobra.Command, identifier string, platformOnly bool) error {
+	vcClient, vcService, err := newVCPlatformService()
+	if err != nil {
+		return err
+	}
+	detail, err := vcService.Get(cmd.Context(), identifier)
+	if err != nil {
+		return err
+	}
+	if platformOnly {
+		output.PrintVCDetail(detail)
+		return nil
+	}
+
+	clientset, err := kube.NewClientset(kubeconfig)
+	if err != nil {
+		return err
+	}
+	mapping, err := service.NewClusterService(clientset, vcClient).GetResolved(cmd.Context(), detail.Name, detail.UID)
+	if err != nil {
+		return err
+	}
+	output.PrintVCOverview(detail, mapping)
+	return nil
+}
+
+func newVCPlatformService() (*platform.VirtualClusterClient, *service.VCService, error) {
+	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+	if !ok {
+		return nil, nil, fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	}
+	return vcClient, service.NewVCService(vcClient), nil
 }
 
 func newVCNodeCmd() *cobra.Command {

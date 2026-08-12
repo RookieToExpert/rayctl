@@ -44,11 +44,12 @@ func newJobGetCmd() *cobra.Command {
 
 	getCmd := &cobra.Command{
 		Use:   "get <job-name-or-pod-name-or-uid> [job-name-or-pod-name-or-uid...]",
-		Short: "查询单个任务，或按 VC 分区列出任务",
-		Long: "根据任务名、Pod 名或 UID 查询 ECP/SSP 任务详情。\n" +
+		Short: "并行查询一个或多个任务，或按 VC 分区列出任务",
+		Long: "根据任务名、Pod 名或 UID 并行查询一个或多个 ECP/SSP 任务详情。\n" +
 			"也可以使用 cluster 子命令查看指定 VC 分区或当前租户全部 VC 的任务列表；默认只显示 Running 和 Pending 任务。",
 		Example: strings.Join([]string{
 			"  rayctl job get example-job",
+			"  rayctl job get job-a job-b job-c",
 			"  rayctl job get cluster vc-a3-intern-delivery",
 			"  rayctl job get cluster vc-a3-intern-delivery pending",
 			"  rayctl job get cluster vc-a3-intern-delivery --all-status",
@@ -68,164 +69,15 @@ func newJobGetCmd() *cobra.Command {
 			if vcClient != nil {
 				sspJobService = service.NewSSPJobService(clientset, vcClient)
 			}
-			printed := false
-			printSeparator := func() {
-				if printed {
-					fmt.Fprintln(getCmd.OutOrStdout())
-				}
-				printed = true
-			}
-			printSSPJob := func(ctx context.Context, identifier string, detection *service.SSPWorkloadDetection) error {
-				result, err := sspJobService.GetJobWithDetection(ctx, identifier, workspace, longOutput, detection)
-				if err != nil {
-					return err
-				}
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				printSeparator()
-				output.PrintSSPJobDetail(result, longOutput)
-				return nil
-			}
-			printECPJobs := func(ctx context.Context, results []*service.JobGetResult) error {
-				for _, result := range results {
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-					if vcClient != nil {
-						if vcUID := virtualClusterUIDFromName(result.VClusterName); vcUID != "" {
-							resource, err := vcClient.FindResourceByUID(ctx, vcUID, "virtualClusters")
-							if ctx.Err() != nil {
-								return ctx.Err()
-							}
-							if err == nil && strings.TrimSpace(resource.Name) != "" {
-								result.VClusterName = strings.TrimSpace(resource.Name)
-							}
-						}
-					}
-					printSeparator()
-					output.PrintJobDetail(result, longOutput, debugTiming)
-				}
-				return nil
-			}
-
-			for _, identifier := range args {
-				ctx := getCmd.Context()
-				cancel := func() {}
-				if queryTimeout > 0 {
-					ctx, cancel = context.WithTimeout(ctx, queryTimeout)
-				}
-				queryErr := func() error {
-					queryIdentifier := normalizeJobGetIdentifier(identifier)
-					detectedType := ""
-					if sspJobService != nil {
-						detectCtx, stopDetection := context.WithTimeout(ctx, jobTypeDetectionTimeout)
-						detection, detectErr := sspJobService.DetectWorkload(detectCtx, queryIdentifier)
-						stopDetection()
-						if detectErr == nil {
-							detectedType = detection.Type
-							switch detection.Type {
-							case service.SSPWorkloadTypeTrainingJob:
-								return printSSPJob(ctx, queryIdentifier, detection)
-							case service.SSPWorkloadTypeAID:
-								return fmt.Errorf("is an SSP AID workload; use rayctl ssp aid get %s", queryIdentifier)
-							}
-						}
-					}
-
-					if sspJobService == nil || detectedType == service.WorkloadTypeECPVCJob {
-						results, err := jobService.GetJobsWithLogs(ctx, queryIdentifier, longOutput)
-						if err != nil {
-							return err
-						}
-						return printECPJobs(ctx, results)
-					}
-
-					type ecpQueryResult struct {
-						results []*service.JobGetResult
-						err     error
-					}
-					type sspQueryResult struct {
-						result *service.SSPJobGetResult
-						err    error
-					}
-					queryCtx, stopQueries := context.WithCancel(ctx)
-					defer stopQueries()
-					ecpResults := make(chan ecpQueryResult, 1)
-					sspResults := make(chan sspQueryResult, 1)
-					go func() {
-						results, err := jobService.GetJobsWithLogs(queryCtx, queryIdentifier, longOutput)
-						ecpResults <- ecpQueryResult{results: results, err: err}
-					}()
-					go func() {
-						result, err := sspJobService.GetJob(queryCtx, queryIdentifier, workspace, longOutput)
-						sspResults <- sspQueryResult{result: result, err: err}
-					}()
-
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case sspResult := <-sspResults:
-						if sspResult.err == nil {
-							stopQueries()
-							if err := ctx.Err(); err != nil {
-								return err
-							}
-							printSeparator()
-							output.PrintSSPJobDetail(sspResult.result, longOutput)
-							return nil
-						}
-						if isSSPKubeconfigMismatch(sspResult.err) {
-							stopQueries()
-							return sspResult.err
-						}
-						select {
-						case <-ctx.Done():
-							return ctx.Err()
-						case ecpResult := <-ecpResults:
-							stopQueries()
-							if ecpResult.err != nil {
-								return ecpResult.err
-							}
-							if jobResultsContainSSPTrainingJob(ecpResult.results) {
-								return fmt.Errorf("is an SSP TrainingJob but its AIT record could not be loaded: %w", sspResult.err)
-							}
-							return printECPJobs(ctx, ecpResult.results)
-						}
-					case ecpResult := <-ecpResults:
-						if ecpResult.err == nil && !jobResultsContainSSPTrainingJob(ecpResult.results) {
-							stopQueries()
-							return printECPJobs(ctx, ecpResult.results)
-						}
-						select {
-						case <-ctx.Done():
-							return ctx.Err()
-						case sspResult := <-sspResults:
-							stopQueries()
-							if sspResult.err == nil {
-								if err := ctx.Err(); err != nil {
-									return err
-								}
-								printSeparator()
-								output.PrintSSPJobDetail(sspResult.result, longOutput)
-								return nil
-							}
-							if isSSPKubeconfigMismatch(sspResult.err) {
-								return sspResult.err
-							}
-							if ecpResult.err != nil {
-								return ecpResult.err
-							}
-							return fmt.Errorf("is an SSP TrainingJob but its AIT record could not be loaded: %w", sspResult.err)
-						}
-					}
-				}()
-				cancel()
-				if queryErr != nil {
-					return formatJobGetError(ctx, identifier, queryTimeout, queryErr)
-				}
-			}
-			return nil
+			return runParallelJobGet(
+				getCmd.Context(), args, jobService, sspJobService, vcClient,
+				jobGetOptions{
+					workspace:   workspace,
+					longOutput:  longOutput,
+					debugTiming: debugTiming,
+					timeout:     queryTimeout,
+				},
+			)
 		},
 	}
 

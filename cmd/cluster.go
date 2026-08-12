@@ -1,23 +1,21 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"rayctl/internal/kube"
 	"rayctl/internal/platform"
-	"rayctl/internal/service"
-	"rayctl/pkg/output"
 )
 
 func newClusterCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cluster",
-		Short: "管理 rayctl 当前使用的集群环境",
+		Use:        "cluster",
+		Short:      "兼容旧版 VC 与环境切换命令",
+		Hidden:     true,
+		Deprecated: "请改用 rayctl vc",
 	}
 	cmd.AddCommand(newClusterGetCmd())
 	cmd.AddCommand(newClusterSetCmd())
@@ -36,20 +34,7 @@ func newClusterGetCmd() *cobra.Command {
 		}, "\n"),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			clientset, err := kube.NewClientset(kubeconfig)
-			if err != nil {
-				return err
-			}
-
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
-			clusterService := service.NewClusterService(clientset, vcClient)
-			result, err := clusterService.Get(context.Background(), args[0])
-			if err != nil {
-				return err
-			}
-
-			output.PrintClusterDetail(result)
-			return nil
+			return runVCGet(cmd, args[0], false)
 		},
 	}
 }

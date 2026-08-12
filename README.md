@@ -16,6 +16,9 @@ rayctl node describe worker-01
 rayctl node check worker-01
 rayctl --kubeconfig=/path/to/config node get ecp
 
+# 并行查询多个 ECP/SSP 任务，输出仍按输入顺序展示
+rayctl job get job-a job-b job-c
+
 # 列出当前 profile 下的资源，或按名称/UID 查看单个资源
 rayctl vpc get
 rayctl vpc get vpc-muxi-ailab
@@ -27,6 +30,11 @@ rayctl afs get
 rayctl afs get afs-tangrui
 
 # 查看 VC 节点，或按节点名、IP、ACN UID 从 VC 移除节点
+rayctl vc get
+rayctl vc get vc-a3-llmit
+rayctl vc get vc-a3-llmit vc-a3-deeplink vc-c550-jiaofu
+rayctl vc get vc-a3-llmit --platform-only
+rayctl vc set d
 rayctl vc node list vc-c550-ai4s-sys
 rayctl vc node remove vc-c550-ai4s-sys 10.12.138.140 --dry-run
 rayctl vc node remove vc-c550-ai4s-sys 10.12.138.140 -y

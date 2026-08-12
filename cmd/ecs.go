@@ -31,17 +31,13 @@ func newECSCheckCmd() *cobra.Command {
 		Short: "根据 AIS/ECS 名称或 UID 查询 HC 中的 VM、namespace、node、创建人和内网 IP",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			clientset, err := kube.NewClientset(kubeconfig)
-			if err != nil {
-				return err
-			}
 			dynamicClient, err := kube.NewDynamicClient(kubeconfig)
 			if err != nil {
 				return err
 			}
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
-			ecsService := service.NewECSService(clientset, dynamicClient, vcClient)
+			ecsService := service.NewECSService(dynamicClient, vcClient)
 			for i, identifier := range args {
 				result, err := ecsService.Check(context.Background(), identifier)
 				if err != nil {
@@ -65,17 +61,13 @@ func newECSLoginCmd() *cobra.Command {
 		Short: "通过 virtctl console 直接登录 ECS/AIS 对应的 VM",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			clientset, err := kube.NewClientset(kubeconfig)
-			if err != nil {
-				return err
-			}
 			dynamicClient, err := kube.NewDynamicClient(kubeconfig)
 			if err != nil {
 				return err
 			}
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
-			ecsService := service.NewECSService(clientset, dynamicClient, vcClient)
+			ecsService := service.NewECSService(dynamicClient, vcClient)
 			item, err := ecsService.ResolveSingle(context.Background(), args[0])
 			if err != nil {
 				return err

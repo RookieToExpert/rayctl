@@ -483,7 +483,7 @@ func uidFromPolicySelectorValue(value string) string {
 }
 
 func (s *PolicyService) resolvePolicyWhitelistNames(ctx context.Context, items []PolicyWhitelistItem) {
-	if s == nil || s.clusterService == nil || s.clusterService.vcClient == nil || len(items) == 0 {
+	if s == nil || s.clusterService == nil || len(items) == 0 {
 		return
 	}
 	uids := make([]string, 0, len(items))
@@ -492,7 +492,7 @@ func (s *PolicyService) resolvePolicyWhitelistNames(ctx context.Context, items [
 			uids = append(uids, item.ClusterUID)
 		}
 	}
-	names, tenants, err := s.clusterService.vcClient.ResolveDisplayNamesWithProfiles(ctx, uids)
+	names, tenants, err := s.clusterService.ResolveDisplayNamesWithProfiles(ctx, uids)
 	if err != nil {
 		return
 	}

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,6 +71,37 @@ func TestJobGetHelpIncludesClusterUsage(t *testing.T) {
 	for _, fragment := range []string{"Running 和 Pending", "--all-status", "当前租户全部 VC"} {
 		if !strings.Contains(clusterHelp, fragment) {
 			t.Fatalf("job get cluster help does not contain %q:\n%s", fragment, clusterHelp)
+		}
+	}
+}
+
+func TestRunBoundedJobGetQueriesRunsConcurrentlyAndKeepsInputOrder(t *testing.T) {
+	identifiers := []string{"slow-a", "fast-b", "fast-c", "slow-d", "fast-e"}
+	var active int32
+	var maximum int32
+	results := runBoundedQueries(context.Background(), identifiers, 3, func(_ context.Context, identifier string) jobGetQueryResult {
+		current := atomic.AddInt32(&active, 1)
+		for {
+			observed := atomic.LoadInt32(&maximum)
+			if current <= observed || atomic.CompareAndSwapInt32(&maximum, observed, current) {
+				break
+			}
+		}
+		if strings.HasPrefix(identifier, "slow") {
+			time.Sleep(30 * time.Millisecond)
+		} else {
+			time.Sleep(5 * time.Millisecond)
+		}
+		atomic.AddInt32(&active, -1)
+		return jobGetQueryResult{identifier: identifier}
+	})
+
+	if maximum < 2 || maximum > 3 {
+		t.Fatalf("maximum concurrency = %d, want 2..3", maximum)
+	}
+	for index, result := range results {
+		if result.identifier != identifiers[index] {
+			t.Fatalf("result[%d] = %q, want %q", index, result.identifier, identifiers[index])
 		}
 	}
 }
