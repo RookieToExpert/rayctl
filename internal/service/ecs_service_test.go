@@ -93,6 +93,17 @@ func TestBuildVMIResourceContextsSupportsAISMatching(t *testing.T) {
 	}
 }
 
+func TestMatchVMContextsForAISDoesNotUseNameSubstrings(t *testing.T) {
+	contexts := []vmResourceContext{
+		{VMName: "wanted", Namespace: "default", ResourceName: "ais-ais-zhu", RawText: `{"name":"ais-ais-zhu"}`},
+		{VMName: "other", Namespace: "default", ResourceName: "ais-ais-zhuangpeiqin", RawText: `{"name":"ais-ais-zhuangpeiqin"}`},
+	}
+	matches := matchVMContextsForAIS(contexts, platform.AISpace{Name: "ais-zhu", UID: "019fff80-5540-7715-b784-832622a91c72"})
+	if len(matches) != 1 || matches[0].VMName != "wanted" {
+		t.Fatalf("matches = %#v, want only wanted VM", matches)
+	}
+}
+
 func TestECSCheckExactAISUsesNarrowPlatformLookup(t *testing.T) {
 	vmi := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "kubevirt.io/v1",

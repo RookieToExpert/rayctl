@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -216,6 +218,7 @@ func newNodeDescribeCmd() *cobra.Command {
 		Example: strings.Join([]string{
 			"  rayctl node check host-10-140-214-222",
 			"  rayctl node check 10.140.214.222",
+			"  rayctl node check 10.140.214.222 10.140.214.223",
 		}, "\n"),
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -228,43 +231,100 @@ func newNodeDescribeCmd() *cobra.Command {
 
 			nodeService := service.NewNodeService(clientset)
 			vcClient, hasVCClient := platform.NewVirtualClusterClientFromEnv()
-			resolvedVCNames := make(map[string]string)
-
+			normalizedNames := make([]string, len(args))
 			for i, nodeName := range args {
-				resolvedNodeName := normalizeNodeIdentifier(nodeName)
-				details, err := nodeService.Describe(cmd.Context(), resolvedNodeName)
-				if err != nil {
-					return fmt.Errorf("node %q: %w", nodeName, err)
-				}
+				normalizedNames[i] = normalizeNodeIdentifier(nodeName)
+			}
+			results := nodeService.DescribeMany(cmd.Context(), normalizedNames, 4)
+			if hasVCClient {
+				resolveNodeVCNames(cmd.Context(), vcClient, results, 4)
+			}
 
-				resolveVCBegin := time.Now()
-				vcUID := strings.TrimSpace(details.VClusterUID)
-				if hasVCClient && vcUID != "" {
-					if cachedName, ok := resolvedVCNames[vcUID]; ok {
-						details.VClusterName = cachedName
-					} else {
-						resolveCtx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
-						resource, resolveErr := vcClient.FindResourceByUID(resolveCtx, vcUID, "virtualClusters")
-						cancel()
-						if resolveErr == nil && strings.TrimSpace(resource.Name) != "" {
-							details.VClusterName = strings.TrimSpace(resource.Name)
-						}
-						resolvedVCNames[vcUID] = details.VClusterName
-					}
+			var queryErrors []error
+			printed := 0
+			for i, result := range results {
+				if result.Err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("node %q: %w", args[i], result.Err))
+					continue
 				}
-				details.Timings.ResolveVC = time.Since(resolveVCBegin)
-				if i > 0 {
+				if printed > 0 {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
-				output.PrintNodeDescribe(details, debugTiming, clientDuration)
+				if len(args) > 1 {
+					fmt.Fprintf(cmd.OutOrStdout(), "===== NODE [%d/%d]: %s =====\n\n", i+1, len(args), args[i])
+				}
+				output.PrintNodeDescribe(result.Details, debugTiming, clientDuration)
+				printed++
 			}
-			return nil
+			return errors.Join(queryErrors...)
 		},
 	}
 
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for node check")
 
 	return cmd
+}
+
+func resolveNodeVCNames(ctx context.Context, vcClient *platform.VirtualClusterClient, results []service.NodeDescribeQueryResult, maxParallel int) {
+	indicesByUID := make(map[string][]int)
+	for index, result := range results {
+		if result.Err != nil || result.Details == nil {
+			continue
+		}
+		uid := strings.TrimSpace(result.Details.VClusterUID)
+		if uid != "" {
+			indicesByUID[uid] = append(indicesByUID[uid], index)
+		}
+	}
+	if len(indicesByUID) == 0 {
+		return
+	}
+	if maxParallel < 1 {
+		maxParallel = 1
+	}
+
+	uids := make(chan string)
+	resolved := make(map[string]string, len(indicesByUID))
+	resolveDurations := make(map[string]time.Duration, len(indicesByUID))
+	var resultMu sync.Mutex
+	var workers sync.WaitGroup
+	if maxParallel > len(indicesByUID) {
+		maxParallel = len(indicesByUID)
+	}
+	workers.Add(maxParallel)
+	for range maxParallel {
+		go func() {
+			defer workers.Done()
+			for uid := range uids {
+				startedAt := time.Now()
+				resolveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				resource, err := vcClient.FindResourceByUID(resolveCtx, uid, "virtualClusters")
+				cancel()
+				name := ""
+				if err == nil {
+					name = strings.TrimSpace(resource.Name)
+				}
+				resultMu.Lock()
+				resolved[uid] = name
+				resolveDurations[uid] = time.Since(startedAt)
+				resultMu.Unlock()
+			}
+		}()
+	}
+	for uid := range indicesByUID {
+		uids <- uid
+	}
+	close(uids)
+	workers.Wait()
+
+	for uid, indices := range indicesByUID {
+		for _, index := range indices {
+			if resolved[uid] != "" {
+				results[index].Details.VClusterName = resolved[uid]
+			}
+			results[index].Details.Timings.ResolveVC = resolveDurations[uid]
+		}
+	}
 }
 
 func parseNodeIPFilters(target string) []string {
@@ -336,14 +396,14 @@ func normalizeNodeIdentifier(value string) string {
 func newNodeCordonCmd() *cobra.Command {
 	// 定义 cordon 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:   "cordon <node-name-or-ip>",
-		Short: "通过节点名或 IP 封锁节点并将其标记为维修状态",
+		Use:   "cordon <node-name-or-ip> [node-name-or-ip...]",
+		Short: "并行封锁一个或多个节点并将其标记为维修状态",
 		Example: strings.Join([]string{
 			"  rayctl node cordon host-10-140-214-222",
 			"  rayctl node cordon 10.140.214.222",
+			"  rayctl node cordon 10.140.214.222 10.140.214.223",
 		}, "\n"),
-		// 强制要求必须提供 1 个位置参数，即节点名称
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 1. 初始化 Kubernetes 客户端
 			// kube.NewClientset 定义于 internal/kube/client.go
@@ -352,19 +412,8 @@ func newNodeCordonCmd() *cobra.Command {
 				return err
 			}
 
-			// 2. 实例化 NodeService，对指定节点执行 Cordon 和打维修标签的组合逻辑
-			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
-			// nodeService.Cordon 定义于 internal/service/node_service.go
-			result, err := nodeService.Cordon(cmd.Context(), normalizeNodeIdentifier(args[0]))
-			if err != nil {
-				return err
-			}
-
-			// 3. 打印节点状态变更的结果
-			// output.PrintNodeMutationResult 定义于 pkg/output/table.go
-			output.PrintNodeMutationResult(result)
-			return nil
+			return runNodeMutations(cmd, args, nodeService.Cordon)
 		},
 	}
 
@@ -376,14 +425,14 @@ func newNodeCordonCmd() *cobra.Command {
 func newNodeUncordonCmd() *cobra.Command {
 	// 定义 uncordon 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:   "uncordon <node-name-or-ip>",
-		Short: "通过节点名或 IP 解封节点并清除维修标签",
+		Use:   "uncordon <node-name-or-ip> [node-name-or-ip...]",
+		Short: "并行解封一个或多个节点并清除维修标签",
 		Example: strings.Join([]string{
 			"  rayctl node uncordon host-10-140-214-222",
 			"  rayctl node uncordon 10.140.214.222",
+			"  rayctl node uncordon 10.140.214.222 10.140.214.223",
 		}, "\n"),
-		// 强制要求必须提供 1 个位置参数，即节点名称
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 1. 初始化 Kubernetes 客户端
 			// kube.NewClientset 定义于 internal/kube/client.go
@@ -392,21 +441,37 @@ func newNodeUncordonCmd() *cobra.Command {
 				return err
 			}
 
-			// 2. 实例化 NodeService，对指定节点执行 Uncordon 和移除维修标签的组合逻辑
-			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
-			// nodeService.Uncordon 定义于 internal/service/node_service.go
-			result, err := nodeService.Uncordon(cmd.Context(), normalizeNodeIdentifier(args[0]))
-			if err != nil {
-				return err
-			}
-
-			// 3. 打印节点状态恢复的结果
-			// output.PrintNodeMutationResult 定义于 pkg/output/table.go
-			output.PrintNodeMutationResult(result)
-			return nil
+			return runNodeMutations(cmd, args, nodeService.Uncordon)
 		},
 	}
 
 	return cmd
+}
+
+type nodeMutationQueryResult struct {
+	identifier string
+	result     *service.NodeMutationResult
+	err        error
+}
+
+func runNodeMutations(cmd *cobra.Command, args []string, mutate func(context.Context, string) (*service.NodeMutationResult, error)) error {
+	results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) nodeMutationQueryResult {
+		result, err := mutate(ctx, normalizeNodeIdentifier(identifier))
+		return nodeMutationQueryResult{identifier: identifier, result: result, err: err}
+	})
+
+	mutations := make([]*service.NodeMutationResult, 0, len(results))
+	queryErrors := make([]error, 0)
+	for _, result := range results {
+		if result.err != nil {
+			queryErrors = append(queryErrors, fmt.Errorf("node %q: %w", result.identifier, result.err))
+			continue
+		}
+		mutations = append(mutations, result.result)
+	}
+	if len(mutations) > 0 {
+		output.PrintNodeMutationResults(mutations)
+	}
+	return errors.Join(queryErrors...)
 }

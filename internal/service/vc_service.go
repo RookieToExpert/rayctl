@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,7 @@ type VCNodeListItem struct {
 	State       string
 	Zone        string
 	MachineType string
+	Model       string
 	NodePool    string
 }
 
@@ -68,6 +70,36 @@ type VCNodeRemoveResult struct {
 	subscription string
 	region       string
 	acnUIDs      []string
+}
+
+type VCResourceUsageResult struct {
+	ClusterName string
+	ClusterUID  string
+	ProfileName string
+	Items       []VCNodeResourceUsageItem
+}
+
+type VCNodeResourceUsageItem struct {
+	UID      string
+	HostName string
+	HostIP   string
+	State    string
+	Usage    platform.VirtualClusterNodeResourceUsage
+}
+
+func (r *VCResourceUsageResult) FilterFreeAcceleratorNodes() {
+	if r == nil {
+		return
+	}
+	filtered := r.Items[:0]
+	for _, item := range r.Items {
+		available := strings.TrimSpace(item.Usage.Usage.Available.Device)
+		value, err := strconv.ParseFloat(available, 64)
+		if err == nil && value > 0 {
+			filtered = append(filtered, item)
+		}
+	}
+	r.Items = filtered
 }
 
 func NewVCService(vcClient *platform.VirtualClusterClient) *VCService {
@@ -240,6 +272,87 @@ func (s *VCService) ListNodes(ctx context.Context, clusterIdentifier string) (*V
 	}, nil
 }
 
+func (s *VCService) GetResourceUsage(ctx context.Context, clusterIdentifier string) (*VCResourceUsageResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required")
+	}
+	cluster, err := s.Get(ctx, clusterIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := s.vcClient.ListVirtualClusterNodes(
+		ctx,
+		cluster.Tenant,
+		cluster.Subscription,
+		cluster.Region,
+		cluster.Name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list nodes in vc %s: %w", cluster.Name, err)
+	}
+
+	const usageBatchSize = 100
+	uidBatches := make([][]string, 0, (len(nodes)+usageBatchSize-1)/usageBatchSize)
+	for start := 0; start < len(nodes); start += usageBatchSize {
+		end := min(start+usageBatchSize, len(nodes))
+		batch := make([]string, 0, end-start)
+		for _, node := range nodes[start:end] {
+			if uid := strings.TrimSpace(node.UID); uid != "" {
+				batch = append(batch, uid)
+			}
+		}
+		if len(batch) > 0 {
+			uidBatches = append(uidBatches, batch)
+		}
+	}
+	type usageBatchResult struct {
+		items []platform.VirtualClusterNodeResourceUsage
+		err   error
+	}
+	usageBatches := boundedMap(ctx, uidBatches, 4, func(queryCtx context.Context, nodeUIDs []string) usageBatchResult {
+		items, queryErr := s.vcClient.BatchGetVirtualClusterNodeResourceUsages(
+			queryCtx,
+			cluster.Tenant,
+			cluster.Subscription,
+			cluster.Region,
+			cluster.Name,
+			cluster.UID,
+			nodeUIDs,
+		)
+		return usageBatchResult{items: items, err: queryErr}
+	})
+	usageByUID := make(map[string]platform.VirtualClusterNodeResourceUsage, len(nodes))
+	for _, batch := range usageBatches {
+		if batch.err != nil {
+			return nil, fmt.Errorf("get node resource usage for vc %s: %w", cluster.Name, batch.err)
+		}
+		for _, usage := range batch.items {
+			usageByUID[strings.TrimSpace(usage.UID)] = usage
+		}
+	}
+
+	items := make([]VCNodeResourceUsageItem, 0, len(nodes))
+	for _, node := range nodes {
+		items = append(items, VCNodeResourceUsageItem{
+			UID:      strings.TrimSpace(node.UID),
+			HostName: strings.TrimSpace(node.Properties.HostName),
+			HostIP:   strings.TrimSpace(node.Properties.HostIP),
+			State:    strings.TrimSpace(node.State),
+			Usage:    usageByUID[strings.TrimSpace(node.UID)],
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(firstNonEmpty(items[i].HostIP, items[i].HostName, items[i].UID)) <
+			strings.ToLower(firstNonEmpty(items[j].HostIP, items[j].HostName, items[j].UID))
+	})
+	return &VCResourceUsageResult{
+		ClusterName: cluster.Name,
+		ClusterUID:  cluster.UID,
+		ProfileName: cluster.Tenant,
+		Items:       items,
+	}, nil
+}
+
 func (s *VCService) PrepareNodeRemove(ctx context.Context, clusterIdentifier string, nodeIdentifiers []string) (*VCNodeRemoveResult, error) {
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required")
@@ -354,7 +467,12 @@ func vcNodeListItemFromPlatform(node platform.VirtualClusterNode) VCNodeListItem
 		State:       strings.TrimSpace(node.State),
 		Zone:        strings.TrimSpace(node.Zone),
 		MachineType: strings.TrimSpace(node.Properties.MachineType),
-		NodePool:    strings.TrimSpace(node.Properties.NodePoolName),
+		Model: firstNonEmpty(
+			strings.TrimSpace(node.Properties.Model),
+			strings.TrimSpace(node.Properties.AcceleratorModel),
+			strings.TrimSpace(node.Properties.AcceleratorType),
+		),
+		NodePool: strings.TrimSpace(node.Properties.NodePoolName),
 	}
 }
 

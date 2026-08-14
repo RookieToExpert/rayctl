@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -25,9 +26,9 @@ func newUserGetCmd() *cobra.Command {
 	var includeJobs bool
 
 	cmd := &cobra.Command{
-		Use:   "get <username-or-userid>",
-		Short: "根据 username 或 userid 查询用户信息和所属用户组",
-		Args:  cobra.ExactArgs(1),
+		Use:   "get <username-or-userid> [username-or-userid...]",
+		Short: "并行查询一个或多个用户的信息和所属用户组",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
@@ -35,17 +36,30 @@ func newUserGetCmd() *cobra.Command {
 			}
 
 			userService := service.NewUserService(vcClient)
-			results, err := userService.Get(context.Background(), args[0], includeJobs)
-			if err != nil {
-				return err
+			type queryResult struct {
+				identifier string
+				results    []*service.UserGetResult
+				err        error
 			}
-			for i, result := range results {
-				if i > 0 {
-					fmt.Fprintln(cmd.OutOrStdout())
+			queries := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				results, err := userService.Get(ctx, identifier, includeJobs)
+				return queryResult{identifier, results, err}
+			})
+			valid := make([]*service.UserGetResult, 0)
+			queryErrors := make([]error, 0)
+			for _, query := range queries {
+				if query.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("user %q: %w", query.identifier, query.err))
+					continue
 				}
-				output.PrintUserDetail(result)
+				valid = append(valid, query.results...)
 			}
-			return nil
+			if len(args) == 1 && len(valid) == 1 {
+				output.PrintUserDetail(valid[0])
+			} else {
+				output.PrintUserSummary(valid, includeJobs)
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 

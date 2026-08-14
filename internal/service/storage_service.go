@@ -21,11 +21,22 @@ type StorageService struct {
 }
 
 type AFSCheckResult struct {
-	AFSName     string
-	Tenant      string
-	HostPVs     []string
-	HostPVCs    []string
-	VirtualPVCs []string
+	AFSName      string
+	UID          string
+	State        string
+	Capacity     string
+	StorageClass string
+	Zone         string
+	Tenant       string
+	HostPVs      []string
+	HostPVCs     []string
+	VirtualPVCs  []string
+}
+
+type AFSCheckQueryResult struct {
+	Identifier string
+	Result     *AFSCheckResult
+	Err        error
 }
 
 type PVCCheckItemResult struct {
@@ -126,36 +137,135 @@ func (s *StorageService) CreatePVC(ctx context.Context, req PVCCreateRequest) (*
 	return created, nil
 }
 
-func (s *StorageService) CheckAFS(ctx context.Context, identifier string) (*AFSCheckResult, error) {
-	if s.vcClient == nil {
-		return nil, fmt.Errorf("afs check requires platform configuration")
+func (s *StorageService) CheckAFS(ctx context.Context, identifier string, includeVirtualPVCs ...bool) (*AFSCheckResult, error) {
+	results := s.CheckAFSMany(ctx, []string{identifier}, len(includeVirtualPVCs) > 0 && includeVirtualPVCs[0], 1)
+	if len(results) == 0 {
+		return nil, fmt.Errorf("afs identifier is required")
 	}
+	return results[0].Result, results[0].Err
+}
 
-	resource, err := s.vcClient.FindStorageVolumeResource(ctx, identifier)
-	if err != nil {
-		return nil, err
+func (s *StorageService) CheckAFSMany(ctx context.Context, identifiers []string, includeVirtualPVCs bool, maxParallel int) []AFSCheckQueryResult {
+	type resourceResult struct {
+		resource *platform.StorageVolumeResource
+		err      error
 	}
+	var pvCall <-chan asyncResult[*corev1.PersistentVolumeList]
+	if includeVirtualPVCs {
+		pvCall = asyncCall(ctx, func(ctx context.Context) (*corev1.PersistentVolumeList, error) {
+			return s.clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+		})
+	}
+	resourceListCall := asyncCall(ctx, func(ctx context.Context) ([]platform.StorageVolumeResource, error) {
+		if s.vcClient == nil {
+			return nil, fmt.Errorf("afs check requires platform configuration")
+		}
+		return s.vcClient.ListCurrentStorageVolumeResources(ctx)
+	})
+	resourceListResult := <-resourceListCall
+	resourceResults := boundedMap(ctx, identifiers, maxParallel, func(queryCtx context.Context, identifier string) resourceResult {
+		if s.vcClient == nil {
+			return resourceResult{err: fmt.Errorf("afs check requires platform configuration")}
+		}
+		if resourceListResult.Err == nil {
+			resource, matched, err := matchStorageVolumeResource(identifier, resourceListResult.Value)
+			if matched || err != nil {
+				return resourceResult{resource: resource, err: err}
+			}
+		}
+		resource, err := s.vcClient.FindStorageVolumeResource(queryCtx, identifier)
+		return resourceResult{resource: resource, err: err}
+	})
+	var pvResult asyncResult[*corev1.PersistentVolumeList]
+	if includeVirtualPVCs {
+		pvResult = <-pvCall
+	}
+	results := make([]AFSCheckQueryResult, len(identifiers))
+	for index, identifier := range identifiers {
+		result := AFSCheckQueryResult{Identifier: identifier}
+		if resourceResults[index].err != nil {
+			result.Err = resourceResults[index].err
+			results[index] = result
+			continue
+		}
+		if includeVirtualPVCs && pvResult.Err != nil {
+			result.Err = fmt.Errorf("list persistentvolumes: %w", pvResult.Err)
+			results[index] = result
+			continue
+		}
+		var pvs []corev1.PersistentVolume
+		if includeVirtualPVCs {
+			pvs = pvResult.Value.Items
+		}
+		result.Result = buildAFSCheckResult(resourceResults[index].resource, pvs, includeVirtualPVCs)
+		results[index] = result
+	}
+	return results
+}
 
-	hostPVs, hostPVCs, err := s.findHostVolumesForAFS(ctx, resource.ID)
-	if err != nil {
-		return nil, err
+func matchStorageVolumeResource(identifier string, resources []platform.StorageVolumeResource) (*platform.StorageVolumeResource, bool, error) {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
+	if identifier == "" {
+		return nil, true, fmt.Errorf("afs identifier is required")
 	}
-	if len(hostPVs) == 0 {
-		return nil, fmt.Errorf("no host pv found for afs %q", resource.Name)
+	exact := make([]int, 0, 1)
+	fuzzy := make([]int, 0, 1)
+	for index := range resources {
+		fuzzyMatch := false
+		for _, field := range []string{resources[index].Name, resources[index].DisplayName, resources[index].ID, resources[index].RID} {
+			field = strings.ToLower(strings.TrimSpace(field))
+			if field == "" {
+				continue
+			}
+			if field == identifier {
+				exact = append(exact, index)
+				fuzzyMatch = false
+				break
+			}
+			if strings.Contains(field, identifier) {
+				fuzzyMatch = true
+			}
+		}
+		if fuzzyMatch {
+			fuzzy = append(fuzzy, index)
+		}
 	}
+	matches := exact
+	if len(matches) == 0 {
+		matches = fuzzy
+	}
+	switch len(matches) {
+	case 0:
+		return nil, false, nil
+	case 1:
+		resource := resources[matches[0]]
+		return &resource, true, nil
+	default:
+		return nil, true, fmt.Errorf("afs %q matched multiple resources", identifier)
+	}
+}
 
-	virtualPVCs, err := s.findVirtualPVCsForHostPVs(ctx, hostPVs)
-	if err != nil {
-		return nil, err
+func buildAFSCheckResult(resource *platform.StorageVolumeResource, pvs []corev1.PersistentVolume, includeVirtualPVCs bool) *AFSCheckResult {
+	hostPVs, hostPVCs := findHostVolumesForAFSInSnapshot(pvs, resource.ID)
+
+	virtualPVCs := []string(nil)
+	if includeVirtualPVCs && len(hostPVs) > 0 {
+		virtualPVCs = findVirtualPVCsForHostPVsInSnapshot(pvs, hostPVs, 15)
 	}
+	capacity, storageClass := parseAFSProperties(resource.Properties)
 
 	return &AFSCheckResult{
-		AFSName:     firstNonEmpty(resource.Name, resource.DisplayName, resource.ID),
-		Tenant:      strings.TrimSpace(resource.ProfileName),
-		HostPVs:     hostPVs,
-		HostPVCs:    hostPVCs,
-		VirtualPVCs: virtualPVCs,
-	}, nil
+		AFSName:      firstNonEmpty(resource.Name, resource.DisplayName, resource.ID),
+		UID:          resource.ID,
+		State:        resource.State,
+		Capacity:     capacity,
+		StorageClass: storageClass,
+		Zone:         resource.Zone,
+		Tenant:       strings.TrimSpace(resource.ProfileName),
+		HostPVs:      hostPVs,
+		HostPVCs:     hostPVCs,
+		VirtualPVCs:  virtualPVCs,
+	}
 }
 
 func (s *StorageService) CheckPVC(ctx context.Context, pvcName string) (*PVCCheckResult, error) {
@@ -358,18 +468,13 @@ func formatObjectStorageLocation(endpoint string, bucket string) string {
 	}
 }
 
-func (s *StorageService) findHostVolumesForAFS(ctx context.Context, resourceUID string) ([]string, []string, error) {
-	pvs, err := s.clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("list persistentvolumes: %w", err)
-	}
-
+func findHostVolumesForAFSInSnapshot(pvs []corev1.PersistentVolume, resourceUID string) ([]string, []string) {
 	hostPVs := make([]string, 0)
 	hostPVCs := make([]string, 0)
 	seenPV := make(map[string]struct{})
 	seenPVC := make(map[string]struct{})
 
-	for _, pv := range pvs.Items {
+	for _, pv := range pvs {
 		if pv.Spec.ClaimRef == nil {
 			continue
 		}
@@ -389,40 +494,41 @@ func (s *StorageService) findHostVolumesForAFS(ctx context.Context, resourceUID 
 
 	sort.Strings(hostPVs)
 	sort.Strings(hostPVCs)
-	return hostPVs, hostPVCs, nil
+	return hostPVs, hostPVCs
 }
 
-func (s *StorageService) findVirtualPVCsForHostPVs(ctx context.Context, hostPVs []string) ([]string, error) {
+func findVirtualPVCsForHostPVsInSnapshot(pvs []corev1.PersistentVolume, hostPVs []string, limit int) []string {
 	virtualPVCs := make([]string, 0)
-	seen := make(map[string]struct{})
-
+	seenNamespace := make(map[string]struct{})
+	hostPVSet := make(map[string]struct{}, len(hostPVs))
 	for _, hostPV := range hostPVs {
-		pvs, err := s.clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("source-pv=%s", hostPV),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list virtual pvs for host pv %q: %w", hostPV, err)
+		hostPVSet[hostPV] = struct{}{}
+	}
+	for _, pv := range pvs {
+		if _, ok := hostPVSet[strings.TrimSpace(pv.Labels["source-pv"])]; !ok {
+			continue
 		}
-		for _, pv := range pvs.Items {
-			if pv.Spec.ClaimRef == nil {
-				continue
-			}
-			claimName := strings.TrimSpace(pv.Spec.ClaimRef.Name)
-			namespace := strings.TrimSpace(pv.Spec.ClaimRef.Namespace)
-			if claimName == "" {
-				continue
-			}
-			key := namespace + "/" + claimName
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			virtualPVCs = append(virtualPVCs, claimName)
+		if pv.Spec.ClaimRef == nil {
+			continue
 		}
+		claimName := strings.TrimSpace(pv.Spec.ClaimRef.Name)
+		namespace := strings.TrimSpace(pv.Spec.ClaimRef.Namespace)
+		if claimName == "" {
+			continue
+		}
+		key := firstNonEmpty(namespace, claimName)
+		if _, ok := seenNamespace[key]; ok {
+			continue
+		}
+		seenNamespace[key] = struct{}{}
+		virtualPVCs = append(virtualPVCs, firstNonEmpty(namespace+"/"+claimName, claimName))
 	}
 
 	sort.Strings(virtualPVCs)
-	return virtualPVCs, nil
+	if limit > 0 && len(virtualPVCs) > limit {
+		virtualPVCs = virtualPVCs[:limit]
+	}
+	return virtualPVCs
 }
 
 func (s *StorageService) resolvePVCFrontendInfo(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (string, string, string) {

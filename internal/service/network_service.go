@@ -20,6 +20,22 @@ type SubnetListResult struct{ Items []SubnetListItem }
 type NATGatewayListResult struct{ Items []NATGatewayListItem }
 type AFSListResult struct{ Items []AFSListItem }
 
+type VPCQueryResult struct {
+	Identifier string
+	Item       *VPCListItem
+	Err        error
+}
+type SubnetQueryResult struct {
+	Identifier string
+	Item       *SubnetListItem
+	Err        error
+}
+type NATGatewayQueryResult struct {
+	Identifier string
+	Item       *NATGatewayListItem
+	Err        error
+}
+
 type VPCListItem struct {
 	Name, UID, State, CIDR, RDMA, Default, NATGateways, Region, CreatedAt, UpdatedAt string
 	SubnetCount                                                                      int
@@ -88,6 +104,26 @@ func (s *NetworkResourceService) GetVPC(ctx context.Context, identifier string) 
 	return &result.Items[index], nil
 }
 
+func (s *NetworkResourceService) GetVPCMany(ctx context.Context, identifiers []string) []VPCQueryResult {
+	result, err := s.ListVPCs(ctx)
+	results := make([]VPCQueryResult, len(identifiers))
+	for i, identifier := range identifiers {
+		results[i].Identifier = identifier
+		if err != nil {
+			results[i].Err = err
+			continue
+		}
+		index, findErr := findResourceIndex(identifier, "vpc", len(result.Items), func(index int) []string { return []string{result.Items[index].Name, result.Items[index].UID} })
+		if findErr != nil {
+			results[i].Err = findErr
+			continue
+		}
+		item := result.Items[index]
+		results[i].Item = &item
+	}
+	return results
+}
+
 func (s *NetworkResourceService) ListSubnets(ctx context.Context) (*SubnetListResult, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -130,6 +166,26 @@ func (s *NetworkResourceService) GetSubnet(ctx context.Context, identifier strin
 		return nil, err
 	}
 	return &result.Items[index], nil
+}
+
+func (s *NetworkResourceService) GetSubnetMany(ctx context.Context, identifiers []string) []SubnetQueryResult {
+	result, err := s.ListSubnets(ctx)
+	results := make([]SubnetQueryResult, len(identifiers))
+	for i, identifier := range identifiers {
+		results[i].Identifier = identifier
+		if err != nil {
+			results[i].Err = err
+			continue
+		}
+		index, findErr := findResourceIndex(identifier, "subnet", len(result.Items), func(index int) []string { return []string{result.Items[index].Name, result.Items[index].UID} })
+		if findErr != nil {
+			results[i].Err = findErr
+			continue
+		}
+		item := result.Items[index]
+		results[i].Item = &item
+	}
+	return results
 }
 
 func (s *NetworkResourceService) ListNATGateways(ctx context.Context) (*NATGatewayListResult, error) {
@@ -182,6 +238,26 @@ func (s *NetworkResourceService) GetNATGateway(ctx context.Context, identifier s
 		return nil, err
 	}
 	return &result.Items[index], nil
+}
+
+func (s *NetworkResourceService) GetNATGatewayMany(ctx context.Context, identifiers []string) []NATGatewayQueryResult {
+	result, err := s.ListNATGateways(ctx)
+	results := make([]NATGatewayQueryResult, len(identifiers))
+	for i, identifier := range identifiers {
+		results[i].Identifier = identifier
+		if err != nil {
+			results[i].Err = err
+			continue
+		}
+		index, findErr := findResourceIndex(identifier, "nat gateway", len(result.Items), func(index int) []string { return []string{result.Items[index].Name, result.Items[index].UID} })
+		if findErr != nil {
+			results[i].Err = findErr
+			continue
+		}
+		item := result.Items[index]
+		results[i].Item = &item
+	}
+	return results
 }
 
 func (s *NetworkResourceService) ListAFS(ctx context.Context) (*AFSListResult, error) {

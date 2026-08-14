@@ -12,8 +12,27 @@ rayctl node get ecp
 rayctl node get "accelerator=huawei-ascend"
 rayctl node cordon worker-01
 rayctl node uncordon worker-01
+rayctl node cordon 10.140.214.222 10.140.214.223
+rayctl node uncordon 10.140.214.222 10.140.214.223
 rayctl node describe worker-01
 rayctl node check worker-01
+rayctl node check 10.140.214.222 10.140.214.223
+
+# 多资源查询默认紧凑输出，最多 4 路并发并保持输入顺序
+rayctl afs get afs-a afs-b
+rayctl afs get afs-a -l
+rayctl vpc get vpc-a vpc-b
+rayctl subnet get subnet-a subnet-b
+rayctl natgw get nat-a nat-b
+rayctl vc node list vc-a vc-b
+rayctl user get user-a user-b
+rayctl auth check user user-a user-b
+# 只读查询指定环境的同租户用户/用户组权限，不修改 current_profile
+rayctl auth check user ug-owner -v pt
+rayctl auth check groups ug-a2-jcpt-yunwei -v d
+rayctl auth check groups ug-a2-jcpt-yunwei -v dcloud
+rayctl rbac get vc-a vc-b
+rayctl policy get disallow-privileged-containers vc-a vc-b
 rayctl --kubeconfig=/path/to/config node get ecp
 
 # 并行查询多个 ECP/SSP 任务，输出仍按输入顺序展示
@@ -37,6 +56,8 @@ rayctl vc get vc-a3-llmit vc-a3-deeplink vc-c550-jiaofu
 rayctl vc get vc-a3-llmit --platform-only
 rayctl vc set d
 rayctl vc node list vc-c550-ai4s-sys
+rayctl vc node usage vc-a3-deeplink
+rayctl vc node usage vc-a3-deeplink vc-a3-241ceshi
 rayctl vc node remove vc-c550-ai4s-sys 10.12.138.140 --dry-run
 rayctl vc node remove vc-c550-ai4s-sys 10.12.138.140 -y
 
@@ -48,6 +69,11 @@ rayctl ssp job get <job-name-or-uid> --workspace ws-t-llm-frontier
 # 查看 SSP AID 开发机、资源规格、挂载卷、SSH DNAT 和 Pod 状态
 rayctl ssp aid get <aid-name-or-uid>
 rayctl ssp aid get <aid-name-or-uid> --workspace ws-t-wamcritic
+
+# SSP 工作空间成员权限跟随当前 profile，并使用 auth login 缓存的 Bearer session
+rayctl auth ssp check ws-p-jcpt
+rayctl auth ssp grant ws-p-jcpt -u autoolchain -r aid-creator,ait-operator --priority HIGH --dry-run
+rayctl auth ssp grant ws-p-jcpt -g ug-a2-jcpt-yunwei -r workspace-owner --priority HIGHEST
 ```
 
 ## Project Initialization

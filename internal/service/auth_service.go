@@ -254,6 +254,10 @@ func (s *AuthService) GetResourceRoles(ctx context.Context, resourceType string)
 }
 
 func (s *AuthService) GetUser(ctx context.Context, identifier string) ([]*AuthUserResult, error) {
+	return s.GetUserForProfile(ctx, identifier, "")
+}
+
+func (s *AuthService) GetUserForProfile(ctx context.Context, identifier string, profileName string) ([]*AuthUserResult, error) {
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for auth lookup")
 	}
@@ -262,18 +266,38 @@ func (s *AuthService) GetUser(ctx context.Context, identifier string) ([]*AuthUs
 		return nil, fmt.Errorf("user identifier is required")
 	}
 
-	users, err := s.vcClient.FindUsers(ctx, identifier)
-	if err != nil {
-		return nil, err
+	type usersResult struct {
+		items []platform.IAMUser
+		err   error
 	}
-	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list binding policies: %w", err)
+	type policiesResult struct {
+		items []platform.IAMBindingPolicy
+		err   error
 	}
+	usersCh := make(chan usersResult, 1)
+	policiesCh := make(chan policiesResult, 1)
+	go func() {
+		items, err := s.vcClient.FindUsersForProfile(ctx, profileName, identifier)
+		usersCh <- usersResult{items: items, err: err}
+	}()
+	go func() {
+		items, err := s.vcClient.ListIAMBindingPoliciesForProfile(ctx, profileName)
+		policiesCh <- policiesResult{items: items, err: err}
+	}()
+	userQuery := <-usersCh
+	policyQuery := <-policiesCh
+	if userQuery.err != nil {
+		return nil, userQuery.err
+	}
+	if policyQuery.err != nil {
+		return nil, fmt.Errorf("list binding policies: %w", policyQuery.err)
+	}
+	users := userQuery.items
+	policies := policyQuery.items
 
 	results := make([]*AuthUserResult, 0, len(users))
 	for _, user := range users {
-		groups, err := s.vcClient.ListUserGroups(ctx, user.ID)
+		groups, err := s.vcClient.ListUserGroupsForProfile(ctx, profileName, user.ID)
 		if err != nil {
 			return nil, fmt.Errorf("list groups for user %q: %w", firstNonEmpty(user.Username, user.ID), err)
 		}
@@ -316,6 +340,10 @@ func (s *AuthService) GetUser(ctx context.Context, identifier string) ([]*AuthUs
 }
 
 func (s *AuthService) GetGroups(ctx context.Context, identifier string) ([]*AuthGroupResult, error) {
+	return s.GetGroupsForProfile(ctx, identifier, "")
+}
+
+func (s *AuthService) GetGroupsForProfile(ctx context.Context, identifier string, profileName string) ([]*AuthGroupResult, error) {
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for auth lookup")
 	}
@@ -324,14 +352,34 @@ func (s *AuthService) GetGroups(ctx context.Context, identifier string) ([]*Auth
 		return nil, fmt.Errorf("group identifier is required")
 	}
 
-	groups, err := s.vcClient.FindGroups(ctx, identifier)
-	if err != nil {
-		return nil, err
+	type groupsResult struct {
+		items []platform.IAMGroup
+		err   error
 	}
-	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list binding policies: %w", err)
+	type policiesResult struct {
+		items []platform.IAMBindingPolicy
+		err   error
 	}
+	groupsCh := make(chan groupsResult, 1)
+	policiesCh := make(chan policiesResult, 1)
+	go func() {
+		items, err := s.vcClient.FindGroupsForProfile(ctx, profileName, identifier)
+		groupsCh <- groupsResult{items: items, err: err}
+	}()
+	go func() {
+		items, err := s.vcClient.ListIAMBindingPoliciesForProfile(ctx, profileName)
+		policiesCh <- policiesResult{items: items, err: err}
+	}()
+	groupQuery := <-groupsCh
+	policyQuery := <-policiesCh
+	if groupQuery.err != nil {
+		return nil, groupQuery.err
+	}
+	if policyQuery.err != nil {
+		return nil, fmt.Errorf("list binding policies: %w", policyQuery.err)
+	}
+	groups := groupQuery.items
+	policies := policyQuery.items
 
 	results := make([]*AuthGroupResult, 0, len(groups))
 	for _, group := range groups {

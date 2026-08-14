@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -39,17 +40,29 @@ func newPVCCheckCmd() *cobra.Command {
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
 			storageService := service.NewStorageService(clientset, vcClient)
-			for i, identifier := range args {
-				result, err := storageService.CheckPVC(context.Background(), identifier)
-				if err != nil {
-					return fmt.Errorf("pvc %q: %w", identifier, err)
+			type queryResult struct {
+				identifier string
+				result     *service.PVCCheckResult
+				err        error
+			}
+			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := storageService.CheckPVC(ctx, identifier)
+				return queryResult{identifier: identifier, result: result, err: err}
+			})
+			queryErrors := make([]error, 0)
+			printed := false
+			for _, query := range results {
+				if query.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("pvc %q: %w", query.identifier, query.err))
+					continue
 				}
-				if i > 0 {
+				if printed {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
-				output.PrintPVCCheckDetail(result, longOutput)
+				output.PrintPVCCheckDetail(query.result, longOutput)
+				printed = true
 			}
-			return nil
+			return errors.Join(queryErrors...)
 		},
 	}
 

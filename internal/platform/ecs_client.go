@@ -140,7 +140,7 @@ func (c *VirtualClusterClient) FindCurrentProfileECSVirtualMachines(ctx context.
 	if !ok {
 		return nil, fmt.Errorf("no current platform profile available")
 	}
-	items, err := c.listECSVirtualMachinesWithProfile(ctx, profile, exactResourceNameFilter(identifier))
+	items, err := c.listECSVirtualMachinesWithProfile(ctx, profile, exactECSResourceFilter(identifier))
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func (c *VirtualClusterClient) FindCurrentProfileAISpaces(ctx context.Context, i
 	if !ok {
 		return nil, fmt.Errorf("no current platform profile available")
 	}
-	items, err := c.listAISpacesWithProfile(ctx, profile, exactResourceNameFilter(identifier))
+	items, err := c.listAISpacesWithProfile(ctx, profile, exactECSResourceFilter(identifier))
 	if err != nil {
 		return nil, err
 	}
@@ -165,8 +165,11 @@ func (c *VirtualClusterClient) FindCurrentProfileAISpaces(ctx context.Context, i
 	return items, nil
 }
 
-func exactResourceNameFilter(identifier string) string {
+func exactECSResourceFilter(identifier string) string {
 	identifier = strings.ReplaceAll(strings.TrimSpace(identifier), `\`, `\\`)
 	identifier = strings.ReplaceAll(identifier, `"`, `\"`)
+	if looksLikeClusterUUID(identifier) {
+		return fmt.Sprintf(`uid="%s"`, identifier)
+	}
 	return fmt.Sprintf(`name="%s" OR display_name="%s"`, identifier, identifier)
 }

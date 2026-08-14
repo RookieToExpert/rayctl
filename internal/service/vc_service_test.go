@@ -1,6 +1,10 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	"rayctl/internal/platform"
+)
 
 func TestResolveVCNodesForRemovalMatchesExactIdentifiersAndDeduplicates(t *testing.T) {
 	nodes := []VCNodeListItem{
@@ -20,6 +24,26 @@ func TestResolveVCNodesForRemovalRejectsPartialOrForeignNode(t *testing.T) {
 	nodes := []VCNodeListItem{{UID: "uid-1", HostIP: "10.0.0.1"}}
 	if _, err := resolveVCNodesForRemoval([]string{"10.0.0"}, nodes); err == nil {
 		t.Fatal("expected partial identifier to be rejected")
+	}
+}
+
+func TestFilterFreeAcceleratorNodes(t *testing.T) {
+	free := platform.VirtualClusterNodeResourceUsage{}
+	free.Usage.Available.Device = "8"
+	full := platform.VirtualClusterNodeResourceUsage{}
+	full.Usage.Available.Device = "0"
+	unknown := platform.VirtualClusterNodeResourceUsage{}
+	unknown.Usage.Available.Device = "-"
+	result := &VCResourceUsageResult{Items: []VCNodeResourceUsageItem{
+		{HostName: "free", Usage: free},
+		{HostName: "full", Usage: full},
+		{HostName: "unknown", Usage: unknown},
+	}}
+
+	result.FilterFreeAcceleratorNodes()
+
+	if len(result.Items) != 1 || result.Items[0].HostName != "free" {
+		t.Fatalf("filtered items = %#v", result.Items)
 	}
 }
 

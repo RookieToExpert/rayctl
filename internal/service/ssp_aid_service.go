@@ -169,8 +169,14 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 		}
 	}
 
-	dnatRules, _ := s.platform.FindSSPAIDDNATRules(ctx, aid)
-	return s.buildResult(ctx, aid, hostNamespace, pods, dnatRules, includeLogs), nil
+	dnatResult := asyncCall(ctx, func(ctx context.Context) ([]platform.SSPAIDDNATRule, error) {
+		return s.platform.FindSSPAIDDNATRules(ctx, aid)
+	})
+	result := s.buildResult(ctx, aid, hostNamespace, pods, nil, includeLogs)
+	if resolved := <-dnatResult; resolved.Err == nil {
+		appendSSPAIDDNATRules(result, resolved.Value)
+	}
+	return result, nil
 }
 
 func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription string, region string, identifier string, workspaces []sspWorkspaceRef) ([]sspAIDCandidate, error) {
@@ -194,7 +200,16 @@ func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription strin
 				return
 			}
 			defer func() { <-semaphore }()
-			aids, err := s.platform.FindSSPAIDs(ctx, subscription, region, workspace.Name, identifier)
+			workspaceSubscription := firstNonEmpty(strings.TrimSpace(workspace.Subscription), subscription)
+			var aids []platform.SSPAID
+			var err error
+			if workspace.ProfileName != "" {
+				aids, err = s.platform.FindSSPAIDsForProfile(
+					ctx, workspace.ProfileName, workspaceSubscription, region, workspace.Name, identifier,
+				)
+			} else {
+				aids, err = s.platform.FindSSPAIDs(ctx, workspaceSubscription, region, workspace.Name, identifier)
+			}
 			results <- lookupResult{workspace: workspace, aids: aids, err: err}
 		}()
 	}
@@ -203,6 +218,7 @@ func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription strin
 
 	candidates := make([]sspAIDCandidate, 0)
 	var firstErr error
+	successfulLookups := 0
 	for result := range results {
 		if result.err != nil {
 			if firstErr == nil {
@@ -210,9 +226,13 @@ func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription strin
 			}
 			continue
 		}
+		successfulLookups++
 		for _, aid := range result.aids {
 			candidates = append(candidates, sspAIDCandidate{AID: aid, Workspace: result.workspace})
 		}
+	}
+	if successfulLookups > 0 {
+		firstErr = nil
 	}
 	return candidates, firstErr
 }
@@ -298,11 +318,14 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 	terminal := isTerminalSSPAIDState(state)
 	queue := firstNonEmpty(aid.Properties.Workload.Queue.Name, lastResourceSegment(aid.Properties.Workload.Queue.ID))
 	resource := aid.Properties.Workload.BaseSpec
+	vcResult := asyncCall(ctx, func(ctx context.Context) (string, error) {
+		return s.sspBase.resolveSSPVClusterName(ctx, pods, hostNamespace, aid.ProfileName), nil
+	})
 	result := &SSPAIDGetResult{
 		Name:              aid.Name,
 		UID:               aid.UID,
 		State:             state,
-		VCluster:          s.sspBase.resolveSSPVClusterName(ctx, pods, hostNamespace),
+		VCluster:          "-",
 		Workspace:         aid.Properties.Workload.WorkspaceName,
 		Queue:             queue,
 		QueueType:         aid.Properties.Workload.Queue.Type,
@@ -335,20 +358,14 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 			Endpoint:  volume.Endpoint,
 		})
 	}
-	for _, rule := range dnatRules {
-		result.DNATRules = append(result.DNATRules, SSPAIDDNATItem{
-			External: endpointText(rule.ExternalIP, rule.ExternalPort),
-			Internal: endpointText(rule.InternalIP, rule.InternalPort),
-			Protocol: rule.Protocol,
-			State:    rule.State,
-		})
-	}
+	appendSSPAIDDNATRules(result, dnatRules)
 	result.Pods, result.Nodes = makeSSPPodItems(pods)
 	inspectPod := chooseInspectPod(append([]corev1.Pod(nil), pods...))
 	if inspectPod != nil {
 		result.InspectPod = inspectPod.Name
 	}
 	if terminal {
+		result.VCluster = (<-vcResult).Value
 		result.Stage = "terminal"
 		result.Diagnosis = []string{fmt.Sprintf("开发机已经停止，平台状态为 %s。", state)}
 		return result
@@ -356,10 +373,11 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
 	identity := &jobIdentity{Name: aid.Name, UID: aid.UID, HostNamespace: hostNamespace}
-	result.PersistentVolumeClaims = s.jobHelper.resolveVolumeClaimRefs(ctx, identity, pvcRefs)
+	result.PersistentVolumeClaims = s.sspBase.resolveSSPVolumeClaimRefs(ctx, hostNamespace, pvcRefs)
 	volumeDescriptors := s.sspBase.resolveSSPVolumeDescriptors(ctx, aidVolumeDescriptors(aid.Properties.VolumeMounts))
 	result.PersistentVolumeClaims = enrichSSPVolumeClaims(result.PersistentVolumeClaims, volumeDescriptors)
 	result.ImagePullSecrets = s.jobHelper.resolveImagePullSecretsFromKube(ctx, hostNamespace, imagePullSecrets)
+	result.VCluster = (<-vcResult).Value
 
 	assigned := 0
 	ready := 0
@@ -404,6 +422,20 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 	}
 	result.Stage, result.Diagnosis = ensurePVCGetDiagnosis(state, terminal, result.Stage, result.Diagnosis, result.PersistentVolumeClaims)
 	return result
+}
+
+func appendSSPAIDDNATRules(result *SSPAIDGetResult, rules []platform.SSPAIDDNATRule) {
+	if result == nil {
+		return
+	}
+	for _, rule := range rules {
+		result.DNATRules = append(result.DNATRules, SSPAIDDNATItem{
+			External: endpointText(rule.ExternalIP, rule.ExternalPort),
+			Internal: endpointText(rule.InternalIP, rule.InternalPort),
+			Protocol: rule.Protocol,
+			State:    rule.State,
+		})
+	}
 }
 
 func formatSSPAIDResourceSummary(resource SSPAIDResourceItem) string {

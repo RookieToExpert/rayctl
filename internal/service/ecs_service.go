@@ -499,7 +499,7 @@ func resourceMatches(keyword string, fields ...string) bool {
 		if value == "" {
 			continue
 		}
-		if value == keyword || strings.Contains(value, keyword) {
+		if value == keyword || (!looksLikeECSUUID(keyword) && strings.Contains(value, keyword)) {
 			return true
 		}
 	}
@@ -523,24 +523,68 @@ func matchVMContextsForECS(contexts []vmResourceContext, resource platform.ECSVi
 }
 
 func matchVMContextsForAIS(contexts []vmResourceContext, resource platform.AISpace) []vmResourceContext {
-	candidates := []string{
-		strings.ToLower(strings.TrimSpace(resource.Name)),
-		strings.ToLower(strings.TrimSpace(resource.UID)),
-		strings.ToLower(strings.TrimSpace(resource.DisplayName)),
-	}
+	resourceUID := strings.ToLower(strings.TrimSpace(resource.UID))
+	nameCandidates := aisContextNameCandidates(resource)
 	result := make([]vmResourceContext, 0)
 	for _, item := range contexts {
-		for _, candidate := range candidates {
-			if candidate == "" {
-				continue
-			}
-			if strings.Contains(item.RawText, candidate) {
+		itemUID := strings.ToLower(strings.TrimSpace(item.ResourceUID))
+		if resourceUID != "" && itemUID == resourceUID {
+			result = append(result, item)
+			continue
+		}
+		itemName := strings.ToLower(strings.TrimSpace(item.ResourceName))
+		if _, ok := nameCandidates[itemName]; ok && itemName != "" {
+			result = append(result, item)
+			continue
+		}
+
+		// Older VMIs may not expose the structured annotations. Retain a
+		// conservative fallback that only accepts complete JSON string values.
+		rawText := strings.ToLower(item.RawText)
+		if resourceUID != "" && strings.Contains(rawText, `"`+resourceUID+`"`) {
+			result = append(result, item)
+			continue
+		}
+		for candidate := range nameCandidates {
+			if candidate != "" && strings.Contains(rawText, `"`+candidate+`"`) {
 				result = append(result, item)
 				break
 			}
 		}
 	}
 	return deduplicateVMContexts(result)
+}
+
+func aisContextNameCandidates(resource platform.AISpace) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, raw := range []string{resource.Name, resource.DisplayName} {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" {
+			continue
+		}
+		result[name] = struct{}{}
+		result["ais-"+name] = struct{}{}
+	}
+	return result
+}
+
+func looksLikeECSUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func deduplicateVMContexts(items []vmResourceContext) []vmResourceContext {

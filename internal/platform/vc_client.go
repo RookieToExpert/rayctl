@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 func (c *VirtualClusterClient) ResolveDisplayNames(ctx context.Context, uids []string) (map[string]string, error) {
@@ -24,7 +25,7 @@ func (c *VirtualClusterClient) ResolveDisplayNamesWithProfiles(ctx context.Conte
 		return map[string]string{}, map[string]string{}, nil
 	}
 
-	clusters, err := c.listVirtualClusters(ctx)
+	clusters, err := c.listCurrentEnvironmentVirtualClusters(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -63,16 +64,31 @@ func (c *VirtualClusterClient) FindExactVirtualCluster(ctx context.Context, iden
 		return &VirtualCluster{UID: identifier, Name: "vc-" + identifier}, nil
 	}
 
-	profile, ok := c.currentClientProfile()
-	if !ok {
-		return nil, fmt.Errorf("no current platform profile available")
+	if profile, ok := c.currentClientProfile(); ok && strings.TrimSpace(profile.Subscription) != "" {
+		cluster, err := c.getVirtualClusterWithProfile(ctx, profile, identifier)
+		if err == nil {
+			cluster.ProfileName = profile.Name
+			return cluster, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
-	cluster, err := c.getVirtualClusterWithProfile(ctx, profile, identifier)
+
+	resource, err := c.FindResourceByName(ctx, identifier, "virtualClusters")
 	if err != nil {
 		return nil, err
 	}
-	cluster.ProfileName = profile.Name
-	return cluster, nil
+	return &VirtualCluster{
+		UID:         strings.TrimSpace(resource.ID),
+		ID:          strings.TrimSpace(resource.RID),
+		Name:        firstNonEmpty(strings.TrimSpace(resource.Name), identifier),
+		DisplayName: strings.TrimSpace(resource.DisplayName),
+		TenantID:    ridSegment(resource.RID, "subscriptions"),
+		Region:      firstNonEmpty(strings.TrimSpace(resource.Region), ridSegment(resource.RID, "regions")),
+		State:       strings.TrimSpace(resource.State),
+		ProfileName: strings.TrimSpace(resource.ProfileName),
+	}, nil
 }
 
 func (c *VirtualClusterClient) getVirtualClusterWithProfile(ctx context.Context, profile clientProfile, name string) (*VirtualCluster, error) {
@@ -115,19 +131,43 @@ func (c *VirtualClusterClient) ListCurrentProfileVirtualClusters(ctx context.Con
 }
 
 func (c *VirtualClusterClient) listVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
+	return c.listVirtualClustersForProfiles(ctx, c.currentEnvironmentProfiles())
+}
+
+func (c *VirtualClusterClient) listCurrentEnvironmentVirtualClusters(ctx context.Context) ([]VirtualCluster, error) {
+	return c.listVirtualClustersForProfiles(ctx, c.currentEnvironmentProfiles())
+}
+
+func (c *VirtualClusterClient) listVirtualClustersForProfiles(ctx context.Context, profiles []clientProfile) ([]VirtualCluster, error) {
+	type profileResult struct {
+		profile clientProfile
+		items   []VirtualCluster
+		err     error
+	}
+	results := make([]profileResult, len(profiles))
+	var wg sync.WaitGroup
+	for index, profile := range profiles {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			items, err := c.listVirtualClustersForProfile(ctx, profile)
+			results[index] = profileResult{profile: profile, items: items, err: err}
+		}()
+	}
+	wg.Wait()
+
 	result := make([]VirtualCluster, 0)
 	seen := make(map[string]struct{})
 	var lastErr error
 	success := false
-	for _, profile := range c.orderedProfiles() {
-		items, err := c.listVirtualClustersForProfile(ctx, profile)
-		if err != nil {
-			lastErr = err
+	for _, profileResult := range results {
+		if profileResult.err != nil {
+			lastErr = profileResult.err
 			continue
 		}
 		success = true
-		for _, item := range items {
-			item.ProfileName = profile.Name
+		for _, item := range profileResult.items {
+			item.ProfileName = profileResult.profile.Name
 			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.Name), strings.TrimSpace(item.DisplayName))
 			if key == "" {
 				continue
@@ -143,6 +183,16 @@ func (c *VirtualClusterClient) listVirtualClusters(ctx context.Context) ([]Virtu
 		return result, nil
 	}
 	return nil, lastErr
+}
+
+func ridSegment(rid string, key string) string {
+	parts := strings.Split(strings.Trim(strings.TrimSpace(rid), "/"), "/")
+	for index := 0; index+1 < len(parts); index++ {
+		if strings.EqualFold(parts[index], key) {
+			return strings.TrimSpace(parts[index+1])
+		}
+	}
+	return ""
 }
 
 func (c *VirtualClusterClient) listVirtualClustersForProfile(ctx context.Context, profile clientProfile) ([]VirtualCluster, error) {

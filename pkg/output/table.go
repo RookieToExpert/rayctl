@@ -190,11 +190,20 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 }
 
 func PrintNodeMutationResult(result *service.NodeMutationResult) {
+	PrintNodeMutationResults([]*service.NodeMutationResult{result})
+}
+
+func PrintNodeMutationResults(results []*service.NodeMutationResult) {
+	rows := make([][]string, 0, len(results))
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		rows = append(rows, []string{result.Name, result.Action, result.Schedulable, emptyDash(result.RepairLabel)})
+	}
 	printBoxTable(
 		[]string{"NODE", "ACTION", "SCHEDULABLE", "REPAIR-LABEL"},
-		[][]string{
-			{result.Name, result.Action, result.Schedulable, emptyDash(result.RepairLabel)},
-		},
+		rows,
 	)
 }
 
@@ -599,6 +608,7 @@ func PrintUserDetail(result *service.UserGetResult) {
 			{"TENANT CODE", emptyDash(result.TenantCode)},
 			{"STATUS", emptyDash(result.Status)},
 			{"SOURCE", emptyDash(result.Source)},
+			{"GROUPS", userGroupNames(result.Groups)},
 		},
 		[]int{14, 72},
 		tableOptions{
@@ -609,30 +619,9 @@ func PrintUserDetail(result *service.UserGetResult) {
 				[2]int{3, 1},
 				[2]int{4, 1},
 				[2]int{5, 1},
+				[2]int{6, 1},
 			),
 			minWidths: []int{10, 20},
-		},
-	)
-
-	fmt.Fprintln(os.Stdout)
-	groupRows := make([][]string, 0, maxInt(1, len(result.Groups)))
-	if len(result.Groups) == 0 {
-		groupRows = append(groupRows, []string{"-", "-", "-"})
-	} else {
-		for _, group := range result.Groups {
-			groupRows = append(groupRows, []string{
-				emptyDash(firstNonEmptyOutput(group.DisplayName, group.Name, group.PosixGroupName)),
-				emptyDash(group.PosixGroupName),
-				emptyDash(group.ID),
-			})
-		}
-	}
-	printBoxTableWithOptions(
-		[]string{"用户组", "POSIX", "ID"},
-		groupRows,
-		[]int{32, 28, 36},
-		tableOptions{
-			minWidths: []int{10, 10, 18},
 		},
 	)
 
@@ -662,6 +651,39 @@ func PrintUserDetail(result *service.UserGetResult) {
 			minWidths: []int{12, 20, 7, 11},
 		},
 	)
+}
+
+func userGroupNames(groups []service.AuthGroupItem) string {
+	names := make([]string, 0, len(groups))
+	for _, group := range groups {
+		names = append(names, firstNonEmptyOutput(group.DisplayName, group.Name, group.PosixGroupName, group.ID))
+	}
+	return joinOrDash(names)
+}
+
+func PrintUserSummary(results []*service.UserGetResult, includeJobs bool) {
+	rows := make([][]string, 0, len(results))
+	for _, result := range results {
+		rows = append(rows, []string{emptyDash(result.Username), emptyDash(result.ID), emptyDash(result.Name), emptyDash(result.TenantCode), userGroupNames(result.Groups)})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions([]string{"USERNAME", "ID", "NAME", "TENANT", "GROUPS"}, rows, []int{32, 36, 20, 16, 72}, tableOptions{minWidths: []int{18, 36, 10, 10, 18}})
+	if !includeJobs {
+		return
+	}
+	jobRows := make([][]string, 0)
+	for _, result := range results {
+		for _, job := range result.Jobs {
+			jobRows = append(jobRows, []string{emptyDash(result.Username), emptyDash(job.ClusterName), emptyDash(job.JobName), emptyDash(job.Status), emptyDash(job.CreatedAtShort)})
+		}
+	}
+	if len(jobRows) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions([]string{"USERNAME", "VC", "JOB", "STATUS", "CREATED"}, jobRows, []int{24, 24, 56, 10, 11}, tableOptions{minWidths: []int{12, 12, 18, 8, 11}})
 }
 
 func PrintAuthAFSResult(result *service.AuthAFSResult) {
@@ -721,6 +743,74 @@ func PrintAuthAFSResult(result *service.AuthAFSResult) {
 			minWidths:   []int{6, 10, 10, 18, 12, 12, 19},
 		},
 	)
+}
+
+func PrintAuthResourceSummary(results []*service.AuthAFSResult, includeResource bool) {
+	rows := make([][]string, 0)
+	for _, result := range results {
+		resource := firstNonEmptyOutput(result.ResourceName, result.AFSName)
+		for _, item := range result.Items {
+			member := firstNonEmptyOutput(item.MemberName, item.MemberIdentify, item.MemberValue)
+			row := []string{emptyDash(member), emptyDash(firstNonEmptyOutput(item.Roles, item.RoleNames))}
+			if includeResource {
+				row = append([]string{emptyDash(resource)}, row...)
+			}
+			rows = append(rows, row)
+		}
+	}
+	headers := []string{"MEMBER", "ROLES"}
+	widths := []int{36, 48}
+	minimums := []int{14, 16}
+	if includeResource {
+		headers = append([]string{"RESOURCE"}, headers...)
+		widths = append([]int{32}, widths...)
+		minimums = append([]int{16}, minimums...)
+	}
+	if len(rows) == 0 {
+		row := []string{"-", "-"}
+		if includeResource {
+			row = append([]string{"-"}, row...)
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
+}
+
+func PrintAuthUserSummary(results []*service.AuthUserResult) {
+	rows := make([][]string, 0)
+	for _, result := range results {
+		permissions := deduplicateAuthPermissions(result.Permissions)
+		if len(permissions) == 0 {
+			rows = append(rows, []string{emptyDash(result.Username), emptyDash(result.ID), "-", "-"})
+			continue
+		}
+		for _, item := range permissions {
+			rows = append(rows, []string{emptyDash(result.Username), emptyDash(result.ID), emptyDash(formatAuthScopeForDisplay(item.Scope)), emptyDash(item.Roles)})
+		}
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions([]string{"USERNAME", "ID", "SCOPE", "ROLES"}, rows, []int{24, 36, 44, 36}, tableOptions{minWidths: []int{12, 36, 16, 12}, rowDividers: true})
+}
+
+func PrintAuthGroupSummary(results []*service.AuthGroupResult) {
+	rows := make([][]string, 0)
+	for _, result := range results {
+		name := firstNonEmptyOutput(result.DisplayName, result.Name, result.PosixGroupName)
+		permissions := deduplicateAuthPermissions(result.Permissions)
+		if len(permissions) == 0 {
+			rows = append(rows, []string{emptyDash(name), emptyDash(result.ID), "-", "-"})
+			continue
+		}
+		for _, item := range permissions {
+			rows = append(rows, []string{emptyDash(name), emptyDash(result.ID), emptyDash(formatAuthScopeForDisplay(item.Scope)), emptyDash(item.Roles)})
+		}
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions([]string{"GROUP", "ID", "SCOPE", "ROLES"}, rows, []int{28, 36, 44, 36}, tableOptions{minWidths: []int{12, 36, 16, 12}, rowDividers: true})
 }
 
 func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
@@ -1094,6 +1184,56 @@ func PrintAuthRolesResult(result *service.AuthRolesResult) {
 	)
 }
 
+func PrintAuthSSPResult(result *service.AuthSSPResult) {
+	if result == nil {
+		return
+	}
+	rows := make([][]string, 0, len(result.Items))
+	for _, item := range result.Items {
+		rows = append(rows, []string{
+			emptyDash(item.Type),
+			emptyDash(firstNonEmptyOutput(item.Name, item.DisplayName)),
+			emptyDash(item.Priority),
+			emptyDash(item.Roles),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"TYPE", "MEMBER", "PRIORITY", "ROLES"},
+		rows,
+		[]int{8, 32, 10, 72},
+		tableOptions{minWidths: []int{6, 12, 8, 20}, rowDividers: true},
+	)
+}
+
+func PrintAuthSSPGrantResult(result *service.AuthSSPGrantResult) {
+	if result == nil {
+		return
+	}
+	rows := [][]string{
+		{"WORKSPACE", emptyDash(result.Workspace)},
+		{"PROFILE", emptyDash(result.ProfileName)},
+		{"MEMBER TYPE", emptyDash(result.MemberType)},
+		{"MEMBER", emptyDash(result.MemberName)},
+		{"MEMBER ID", emptyDash(result.MemberID)},
+		{"PRIORITY", emptyDash(result.Priority)},
+		{"ROLES", emptyDash(result.Roles)},
+		{"RESULT", emptyDash(result.Result)},
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		rows,
+		[]int{14, 96},
+		tableOptions{minWidths: []int{10, 24}},
+	)
+	if strings.TrimSpace(result.Payload) != "" {
+		fmt.Fprintln(os.Stdout)
+		printBoxTableWithOptions([]string{"PAYLOAD"}, [][]string{{result.Payload}}, []int{112}, tableOptions{minWidths: []int{40}})
+	}
+}
+
 func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
 	if result == nil {
 		return
@@ -1183,6 +1323,43 @@ func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
 			rowDividers: true,
 		},
 	)
+}
+
+func PrintRBACGetSummary(results []*service.RBACGetResult, includeVC bool, long bool) {
+	rows := make([][]string, 0)
+	for _, result := range results {
+		for _, item := range result.Items {
+			row := []string{emptyDash(item.Namespace), emptyDash(item.Role), emptyDash(item.Subjects)}
+			if includeVC {
+				row = append([]string{emptyDash(result.ClusterName)}, row...)
+			}
+			if long {
+				row = append(row, emptyDash(item.Kind), emptyDash(item.Name), emptyDash(item.CreatedAt))
+			}
+			rows = append(rows, row)
+		}
+	}
+	headers := []string{"NAMESPACE", "ROLE", "SUBJECTS"}
+	widths := []int{28, 16, 32}
+	minimums := []int{12, 10, 14}
+	if includeVC {
+		headers = append([]string{"VC"}, headers...)
+		widths = append([]int{28}, widths...)
+		minimums = append([]int{14}, minimums...)
+	}
+	if long {
+		headers = append(headers, "TYPE", "BINDING", "CREATE TIME")
+		widths = append(widths, 5, 32, 19)
+		minimums = append(minimums, 4, 14, 19)
+	}
+	if len(rows) == 0 {
+		row := make([]string, len(headers))
+		for i := range row {
+			row[i] = "-"
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums, rowDividers: true})
 }
 
 func rbacCreateDate(createdAt string) string {
@@ -1357,6 +1534,35 @@ func PrintVCNodeList(result *service.VCNodeListResult, longOutput bool) {
 	printVCNodeItems(result.Items, longOutput)
 }
 
+func PrintVCNodeListMany(results []*service.VCNodeListResult, longOutput bool) {
+	rows := make([][]string, 0)
+	for _, result := range results {
+		for _, item := range result.Items {
+			row := []string{emptyDash(result.ClusterName), emptyDash(item.HostName), emptyDash(item.HostIP), emptyDash(item.State), emptyDash(item.MachineType), emptyDash(item.Model)}
+			if longOutput {
+				row = append(row, emptyDash(item.Name), emptyDash(item.UID))
+			}
+			rows = append(rows, row)
+		}
+	}
+	headers := []string{"VC", "HOST", "IP", "STATE", "MACHINE TYPE", "MODEL"}
+	widths := []int{28, 20, 15, 8, 14, 18}
+	minimums := []int{14, 16, 15, 8, 12, 10}
+	if longOutput {
+		headers = append(headers, "ACN", "ACN UID")
+		widths = append(widths, 18, 36)
+		minimums = append(minimums, 12, 36)
+	}
+	if len(rows) == 0 {
+		row := []string{"-", "-", "-", "-", "-", "-"}
+		if longOutput {
+			row = append(row, "-", "-")
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
+}
+
 func PrintVCNodeRemoveResult(result *service.VCNodeRemoveResult, longOutput bool, showPayload bool) {
 	if result == nil {
 		return
@@ -1397,16 +1603,16 @@ func PrintVCNodeRemoveResult(result *service.VCNodeRemoveResult, longOutput bool
 func printVCNodeItems(items []service.VCNodeListItem, longOutput bool) {
 	rows := make([][]string, 0, maxInt(1, len(items)))
 	noWrapCells := make([][2]int, 0, maxInt(1, len(items))*4)
-	headers := []string{"HOST", "IP", "STATE", "MACHINE TYPE"}
-	maxWidths := []int{20, 15, 8, 12}
-	minWidths := []int{20, 15, 8, 12}
+	headers := []string{"HOST", "IP", "STATE", "MACHINE TYPE", "MODEL"}
+	maxWidths := []int{20, 15, 8, 14, 18}
+	minWidths := []int{20, 15, 8, 12, 10}
 	if longOutput {
 		headers = append(headers, "ACN", "ACN UID")
 		maxWidths = append(maxWidths, 14, 36)
 		minWidths = append(minWidths, 14, 36)
 	}
 	if len(items) == 0 {
-		row := []string{"-", "-", "-", "-"}
+		row := []string{"-", "-", "-", "-", "-"}
 		if longOutput {
 			row = append(row, "-", "-")
 		}
@@ -1418,6 +1624,7 @@ func printVCNodeItems(items []service.VCNodeListItem, longOutput bool) {
 				emptyDash(item.HostIP),
 				emptyDash(item.State),
 				emptyDash(item.MachineType),
+				emptyDash(item.Model),
 			}
 			if longOutput {
 				row = append(row, emptyDash(item.Name), emptyDash(item.UID))
@@ -1425,7 +1632,7 @@ func printVCNodeItems(items []service.VCNodeListItem, longOutput bool) {
 			rows = append(rows, row)
 			noWrapColumns := []int{0, 1}
 			if longOutput {
-				noWrapColumns = append(noWrapColumns, 4, 5)
+				noWrapColumns = append(noWrapColumns, 5, 6)
 			}
 			for _, columnIndex := range noWrapColumns {
 				noWrapCells = append(noWrapCells, [2]int{rowIndex, columnIndex})
@@ -1954,6 +2161,21 @@ func PrintPolicyGetResult(result *service.PolicyGetResult) {
 	)
 }
 
+func PrintPolicyGetSummary(results []*service.PolicyGetResult) {
+	rows := make([][]string, 0, len(results))
+	for _, result := range results {
+		match := "no"
+		if result.Matched {
+			match = "yes"
+		}
+		rows = append(rows, []string{emptyDash(result.PolicyName), emptyDash(result.TargetCluster), emptyDash(result.TargetUID), match})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions([]string{"POLICY", "VC", "VC UID", "WHITELISTED"}, rows, []int{36, 32, 36, 12}, tableOptions{minWidths: []int{20, 14, 36, 11}})
+}
+
 func policySelectorText(item service.PolicyWhitelistItem) string {
 	selectorKey := strings.TrimSpace(item.SelectorKey)
 	selectorValue := strings.TrimSpace(item.SelectorValue)
@@ -2176,11 +2398,18 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
 	rows := [][]string{
 		{"AFS", emptyDash(result.AFSName)},
-		{"HOST PVC", joinOrDash(result.HostPVCs)},
-		{"HOST PV", joinOrDash(result.HostPVs)},
+		{"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)},
+		{"CAPACITY", emptyDash(result.Capacity)},
+		{"STORAGE CLASS", emptyDash(result.StorageClass)},
+		{"ZONE", emptyDash(result.Zone)},
 	}
 	if longOutput {
-		rows = append(rows, []string{"租户", emptyDash(result.Tenant)})
+		rows = append(rows,
+			[]string{"租户", emptyDash(result.Tenant)},
+			[]string{"HOST PVC", joinOrDash(result.HostPVCs)},
+			[]string{"HOST PV", joinOrDash(result.HostPVs)},
+		)
 	}
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
@@ -2191,11 +2420,11 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
 		},
 	)
 
+	if !longOutput {
+		return
+	}
 	fmt.Fprintln(os.Stdout)
 	displayPVCs := result.VirtualPVCs
-	if len(displayPVCs) > 20 {
-		displayPVCs = displayPVCs[:20]
-	}
 	pvcRows := make([][]string, 0, maxInt(1, len(displayPVCs)))
 	if len(displayPVCs) == 0 {
 		pvcRows = append(pvcRows, []string{"-"})
@@ -2211,10 +2440,23 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
 		pvcRows,
 		[]int{24},
 	)
-	fmt.Fprintf(os.Stdout, "总共关联的 Virtual PVC 数量: %d\n", len(result.VirtualPVCs))
-	if len(result.VirtualPVCs) > len(displayPVCs) {
-		fmt.Fprintf(os.Stdout, "默认仅展示前 %d 个 Virtual PVC。\n", len(displayPVCs))
+	fmt.Fprintf(os.Stdout, "最多展示 15 个关联 Virtual PVC，每个资源 namespace 仅保留一个。\n")
+}
+
+func PrintAFSCheckSummary(results []*service.AFSCheckResult) {
+	rows := make([][]string, 0, len(results))
+	for _, result := range results {
+		rows = append(rows, []string{
+			emptyDash(result.AFSName), emptyDash(result.State), emptyDash(result.Capacity),
+			emptyDash(result.StorageClass),
+		})
 	}
+	printBoxTableWithOptions(
+		[]string{"AFS", "STATE", "CAPACITY", "STORAGE CLASS"},
+		rows,
+		[]int{32, 10, 12, 18},
+		tableOptions{minWidths: []int{16, 8, 8, 12}},
+	)
 }
 
 func PrintPVCCheckDetail(result *service.PVCCheckResult, longOutput bool) {

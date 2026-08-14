@@ -62,3 +62,28 @@ func TestFindCurrentProfileECSVirtualMachinesUsesExactFilter(t *testing.T) {
 		t.Fatalf("items = %#v", items)
 	}
 }
+
+func TestFindCurrentProfileAISpacesUsesUIDFilter(t *testing.T) {
+	const uid = "019fff80-5540-7715-b784-832622a91c72"
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if got, want := request.URL.Query().Get("filter"), `uid="`+uid+`"`; got != want {
+			return nil, fmt.Errorf("filter = %q, want %q", got, want)
+		}
+		return jsonHTTPResponse(request, `{"ai_spaces":[{"uid":"`+uid+`","name":"ais-zhu"}],"total_size":1}`), nil
+	})}
+	client := &VirtualClusterClient{
+		accessKey:      "ak",
+		secretKey:      "sk",
+		baseURL:        "https://example.test",
+		currentProfile: "test",
+		httpClient:     httpClient,
+	}
+
+	items, err := client.FindCurrentProfileAISpaces(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("FindCurrentProfileAISpaces() error = %v", err)
+	}
+	if len(items) != 1 || items[0].UID != uid {
+		t.Fatalf("items = %#v", items)
+	}
+}

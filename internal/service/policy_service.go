@@ -62,6 +62,12 @@ type PolicyGetResult struct {
 	Items          []PolicyWhitelistItem
 }
 
+type PolicyGetQueryResult struct {
+	Identifier string
+	Result     *PolicyGetResult
+	Err        error
+}
+
 type PolicyWhitelistItem struct {
 	ClusterName   string
 	ClusterUID    string
@@ -166,9 +172,6 @@ func (s *PolicyService) GetClusterPolicy(ctx context.Context, policyName string,
 	if err != nil {
 		return nil, err
 	}
-	s.resolvePolicyWhitelistNames(ctx, items)
-	sortPolicyWhitelistItems(items)
-
 	result := &PolicyGetResult{
 		PolicyName: policyName,
 		Items:      items,
@@ -176,6 +179,8 @@ func (s *PolicyService) GetClusterPolicy(ctx context.Context, policyName string,
 
 	clusterIdentifier = strings.TrimSpace(clusterIdentifier)
 	if clusterIdentifier == "" {
+		s.resolvePolicyWhitelistNames(ctx, items)
+		sortPolicyWhitelistItems(items)
 		return result, nil
 	}
 	if s.clusterService == nil {
@@ -210,6 +215,68 @@ func (s *PolicyService) GetClusterPolicy(ctx context.Context, policyName string,
 	}
 	result.Items = matches
 	return result, nil
+}
+
+func (s *PolicyService) GetClusterPolicyMany(ctx context.Context, policyName string, clusterIdentifiers []string, maxParallel int) []PolicyGetQueryResult {
+	policyName = strings.TrimSpace(policyName)
+	ruleNames, ok := supportedClusterPolicyRules[policyName]
+	if !ok {
+		err := unsupportedClusterPolicyError("get", policyName)
+		return policyQueryErrors(clusterIdentifiers, err)
+	}
+	if s.dynamicClient == nil {
+		return policyQueryErrors(clusterIdentifiers, fmt.Errorf("policy get requires kubernetes dynamic client"))
+	}
+	if s.clusterService == nil {
+		return policyQueryErrors(clusterIdentifiers, fmt.Errorf("policy get requires cluster service when filtering by vc"))
+	}
+
+	policy, err := s.dynamicClient.Resource(clusterPolicyGVR).Get(ctx, policyName, metav1.GetOptions{})
+	if err != nil {
+		return policyQueryErrors(clusterIdentifiers, fmt.Errorf("get clusterpolicy %q: %w", policyName, err))
+	}
+	items, err := extractClusterPolicyWhitelist(policy, ruleNames)
+	if err != nil {
+		return policyQueryErrors(clusterIdentifiers, err)
+	}
+
+	return boundedMap(ctx, clusterIdentifiers, maxParallel, func(queryCtx context.Context, identifier string) PolicyGetQueryResult {
+		query := PolicyGetQueryResult{Identifier: identifier}
+		clusterResult, resolveErr := s.clusterService.Get(queryCtx, identifier)
+		if resolveErr != nil {
+			query.Err = resolveErr
+			return query
+		}
+		controlPlaneNamespace := strings.TrimSpace(clusterResult.ControlPlaneNamespace)
+		result := &PolicyGetResult{
+			PolicyName:     policyName,
+			TargetCluster:  clusterResult.ClusterName,
+			TargetUID:      clusterResult.ClusterUID,
+			TargetSelector: policySelectorLabelKey + "=" + controlPlaneNamespace,
+		}
+		matches := make([]PolicyWhitelistItem, 0)
+		for _, item := range items {
+			if item.ClusterUID != clusterResult.ClusterUID {
+				continue
+			}
+			result.Matched = true
+			matches = append(matches, item)
+		}
+		if len(matches) == 0 {
+			matches = append(matches, PolicyWhitelistItem{ClusterName: clusterResult.ClusterName, ClusterUID: clusterResult.ClusterUID, SelectorKey: policySelectorLabelKey, SelectorValue: controlPlaneNamespace})
+		}
+		result.Items = matches
+		query.Result = result
+		return query
+	})
+}
+
+func policyQueryErrors(identifiers []string, err error) []PolicyGetQueryResult {
+	results := make([]PolicyGetQueryResult, len(identifiers))
+	for index, identifier := range identifiers {
+		results[index] = PolicyGetQueryResult{Identifier: identifier, Err: err}
+	}
+	return results
 }
 
 func sortPolicyWhitelistItems(items []PolicyWhitelistItem) {

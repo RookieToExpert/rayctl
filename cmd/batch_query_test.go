@@ -1,0 +1,44 @@
+package cmd
+
+import (
+	"testing"
+
+	"github.com/spf13/cobra"
+)
+
+func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		root *cobra.Command
+		path []string
+	}{
+		{name: "afs get", root: newAFSCmd(), path: []string{"get"}},
+		{name: "vpc get", root: newVPCCmd(), path: []string{"get"}},
+		{name: "subnet get", root: newSubnetCmd(), path: []string{"get"}},
+		{name: "natgw get", root: newNATGatewayCmd(), path: []string{"get"}},
+		{name: "vc node list", root: newVCCmd(), path: []string{"node", "list"}},
+		{name: "user get", root: newUserCmd(), path: []string{"get"}},
+		{name: "ssp aid get", root: newSSPCmd(), path: []string{"aid", "get"}},
+		{name: "ssp job get", root: newSSPCmd(), path: []string{"job", "get"}},
+		{name: "auth check user", root: newAuthCmd(), path: []string{"check", "user"}},
+		{name: "auth check groups", root: newAuthCmd(), path: []string{"check", "groups"}},
+		{name: "auth check afs", root: newAuthCmd(), path: []string{"check", "afs"}},
+		{name: "rbac get", root: newRBACCmd(), path: []string{"get"}},
+		{name: "node cordon", root: newNodeCmd(), path: []string{"cordon"}},
+		{name: "node uncordon", root: newNodeCmd(), path: []string{"uncordon"}},
+		{name: "pv check", root: newPVCmd(), path: []string{"check"}},
+		{name: "pvc check", root: newPVCCmd(), path: []string{"check"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command, _, err := tt.root.Find(tt.path)
+			if err != nil {
+				t.Fatalf("find command: %v", err)
+			}
+			if err := command.Args(command, []string{"first", "second"}); err != nil {
+				t.Fatalf("multiple identifiers rejected: %v", err)
+			}
+		})
+	}
+}

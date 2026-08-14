@@ -798,6 +798,7 @@ func (s *JobService) GetClusterJobs(ctx context.Context, identifier string, incl
 
 func (s *JobService) getActiveClusterJobs(ctx context.Context, targetName string, vcRef string, profileName string, statusFilter string) (*JobClusterListResult, error) {
 	var totalJobCount int
+	var totalPodCount int
 	var allPods []corev1.Pod
 	var jobsErr, podsErr error
 	var wg sync.WaitGroup
@@ -826,11 +827,13 @@ func (s *JobService) getActiveClusterJobs(ctx context.Context, targetName string
 		}
 		podsByJob[jobName] = append(podsByJob[jobName], pod)
 	}
+	totalPodCount = 0
+	for _, pods := range podsByJob {
+		totalPodCount += len(pods)
+	}
 
-	totalPodCount := 0
 	activeNames := make([]string, 0)
 	for jobName, pods := range podsByJob {
-		totalPodCount += len(pods)
 		_, _, activeCount := summarizeJobPods(pods)
 		if activeCount > 0 {
 			activeNames = append(activeNames, jobName)
@@ -838,78 +841,35 @@ func (s *JobService) getActiveClusterJobs(ctx context.Context, targetName string
 	}
 	sort.Strings(activeNames)
 
-	type activeJobResult struct {
-		item       JobClusterItem
-		activePods int
-		active     bool
-	}
-	results := make(chan activeJobResult, len(activeNames))
-	semaphore := make(chan struct{}, platformJobProbeConcurrency)
-	for _, jobName := range activeNames {
-		jobName := jobName
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-			case <-ctx.Done():
-				return
-			}
-
-			pods := podsByJob[jobName]
-			_, pendingPods, activePods := summarizeJobPods(pods)
-			status := "Running"
-			if pendingPods > 0 {
-				status = "Pending"
-			}
-			submitter := "-"
-			createdAt := time.Time{}
-			for _, pod := range pods {
-				submitter = firstNonEmpty(strings.TrimSpace(pod.Labels["lepton.sensetime.com/submitter"]), strings.TrimSpace(pod.Annotations["lepton.sensetime.com/submitter"]), submitter)
-				if createdAt.IsZero() || pod.CreationTimestamp.Time.Before(createdAt) {
-					createdAt = pod.CreationTimestamp.Time
-				}
-			}
-
-			job, getErr := s.vcClient.GetVolcanoJobForProfile(ctx, profileName, vcRef, "default", jobName)
-			if getErr == nil {
-				status = extractVolcanoJobPhase(job)
-				submitter = firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), submitter)
-				createdAt = job.GetCreationTimestamp().Time
-			}
-			if !isActiveVolcanoJobPhase(status) {
-				results <- activeJobResult{}
-				return
-			}
-			results <- activeJobResult{
-				active:     true,
-				activePods: activePods,
-				item: JobClusterItem{
-					ClusterName:    targetName,
-					JobName:        jobName,
-					Submitter:      submitter,
-					Status:         status,
-					CreatedAt:      createdAt.In(utcPlus8).Format("2006-01-02 15:04:05"),
-					CreatedAtShort: createdAt.In(utcPlus8).Format("01-02 15:04"),
-					CreatedAtTime:  createdAt,
-				},
-			}
-		}()
-	}
-	wg.Wait()
-	close(results)
-
 	items := make([]JobClusterItem, 0, len(activeNames))
 	activeJobCount := 0
 	activePodCount := 0
-	for result := range results {
-		if !result.active {
-			continue
+	for _, jobName := range activeNames {
+		pods := podsByJob[jobName]
+		_, pendingPods, activePods := summarizeJobPods(pods)
+		status := "Running"
+		if pendingPods > 0 {
+			status = "Pending"
+		}
+		submitter := "-"
+		createdAt := time.Time{}
+		for _, pod := range pods {
+			submitter = firstNonEmpty(strings.TrimSpace(pod.Labels["lepton.sensetime.com/submitter"]), strings.TrimSpace(pod.Annotations["lepton.sensetime.com/submitter"]), submitter)
+			if createdAt.IsZero() || pod.CreationTimestamp.Time.Before(createdAt) {
+				createdAt = pod.CreationTimestamp.Time
+			}
 		}
 		activeJobCount++
-		activePodCount += result.activePods
-		items = append(items, result.item)
+		activePodCount += activePods
+		items = append(items, JobClusterItem{
+			ClusterName:    targetName,
+			JobName:        jobName,
+			Submitter:      submitter,
+			Status:         status,
+			CreatedAt:      createdAt.In(utcPlus8).Format("2006-01-02 15:04:05"),
+			CreatedAtShort: createdAt.In(utcPlus8).Format("01-02 15:04"),
+			CreatedAtTime:  createdAt,
+		})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
@@ -3715,8 +3675,6 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 	if len(refs) == 0 {
 		return refs
 	}
-
-	resolved := make([]VolumeClaimRef, 0, len(refs))
 	hostNamespace := ""
 	vclusterName := ""
 	namespace := ""
@@ -3725,60 +3683,61 @@ func (s *JobService) resolveVolumeClaimRefs(ctx context.Context, identity *jobId
 		vclusterName = strings.TrimSpace(identity.VClusterName)
 		namespace = strings.TrimSpace(identity.Namespace)
 	}
+	return boundedMap(ctx, refs, 4, func(ctx context.Context, ref VolumeClaimRef) VolumeClaimRef {
+		return s.resolveVolumeClaimRef(ctx, identity, ref, hostNamespace, vclusterName, namespace)
+	})
+}
 
-	for _, ref := range refs {
-		current := ref
-		if strings.TrimSpace(current.PVName) != "" {
-			current.Status = "Bound"
-		}
-		switch {
-		case s.vcClient != nil && vclusterName != "" && namespace != "":
-			pvc, err := s.getPlatformPersistentVolumeClaim(ctx, identity, namespace, ref.ClaimName)
-			if err == nil {
-				current.Status = dashIfEmpty(string(pvc.Status.Phase))
-				current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
-				current.PVName = strings.TrimSpace(pvc.Spec.VolumeName)
-				if current.PVName != "" {
-					if pv, pvErr := s.clientset.CoreV1().PersistentVolumes().Get(ctx, current.PVName, metav1.GetOptions{}); pvErr == nil {
-						current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
-					} else if pv, pvErr := s.getPlatformPersistentVolume(ctx, identity, current.PVName); pvErr == nil {
-						current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
-					}
-					if current.BackendPV == "" {
-						current.BackendPV = strings.TrimSpace(current.PVName)
-					}
-				}
-				s.enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx, identity, namespace, pvc, &current)
-			} else {
-				current.Status = "Unknown"
-				current.Message = classifyPVCErrorMessage(err)
-				if current.Message == "PVC 在当前集群不存在" {
-					current.Status = "NotFound"
-				}
-			}
-		case hostNamespace != "":
-			pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, ref.ClaimName, metav1.GetOptions{})
-			if err == nil {
-				current.Status = dashIfEmpty(string(pvc.Status.Phase))
-				current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
-				current.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
-			} else {
-				current.Status = "Unknown"
-				current.Message = classifyPVCErrorMessage(err)
-				if current.Message == "PVC 在当前集群不存在" {
-					current.Status = "NotFound"
-				}
-			}
-		}
-		if strings.TrimSpace(current.FrontendVolume) == "" {
-			s.enrichObjectStorageVolumeClaimRef(ctx, hostNamespace, &current)
-		}
-		s.enrichHostVolumeClaimRef(ctx, &current)
-		current.DisplayPV = firstNonEmpty(current.BackendPV, current.PVName)
-		resolved = append(resolved, current)
+func (s *JobService) resolveVolumeClaimRef(ctx context.Context, identity *jobIdentity, ref VolumeClaimRef, hostNamespace string, vclusterName string, namespace string) VolumeClaimRef {
+	current := ref
+	if strings.TrimSpace(current.PVName) != "" {
+		current.Status = "Bound"
 	}
-
-	return resolved
+	switch {
+	case s.vcClient != nil && vclusterName != "" && namespace != "":
+		pvc, err := s.getPlatformPersistentVolumeClaim(ctx, identity, namespace, ref.ClaimName)
+		if err == nil {
+			current.Status = dashIfEmpty(string(pvc.Status.Phase))
+			current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
+			current.PVName = strings.TrimSpace(pvc.Spec.VolumeName)
+			if current.PVName != "" {
+				if pv, pvErr := s.clientset.CoreV1().PersistentVolumes().Get(ctx, current.PVName, metav1.GetOptions{}); pvErr == nil {
+					current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
+				} else if pv, pvErr := s.getPlatformPersistentVolume(ctx, identity, current.PVName); pvErr == nil {
+					current.BackendPV = strings.TrimSpace(pv.Labels["source-pv"])
+				}
+				if current.BackendPV == "" {
+					current.BackendPV = strings.TrimSpace(current.PVName)
+				}
+			}
+			s.enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx, identity, namespace, pvc, &current)
+		} else {
+			current.Status = "Unknown"
+			current.Message = classifyPVCErrorMessage(err)
+			if current.Message == "PVC 在当前集群不存在" {
+				current.Status = "NotFound"
+			}
+		}
+	case hostNamespace != "":
+		pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, ref.ClaimName, metav1.GetOptions{})
+		if err == nil {
+			current.Status = dashIfEmpty(string(pvc.Status.Phase))
+			current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
+			current.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
+		} else {
+			current.Status = "Unknown"
+			current.Message = classifyPVCErrorMessage(err)
+			if current.Message == "PVC 在当前集群不存在" {
+				current.Status = "NotFound"
+			}
+		}
+	}
+	if strings.TrimSpace(current.FrontendVolume) == "" {
+		s.enrichObjectStorageVolumeClaimRef(ctx, hostNamespace, &current)
+	}
+	s.enrichHostVolumeClaimRef(ctx, &current)
+	current.DisplayPV = firstNonEmpty(current.BackendPV, current.PVName)
+	return current
 }
 
 func ensurePVCGetDiagnosis(status string, terminal bool, stage string, diagnosis []string, refs []VolumeClaimRef) (string, []string) {
@@ -4085,16 +4044,13 @@ func (s *JobService) resolveImagePullSecretsFromKube(ctx context.Context, namesp
 		return secretNames
 	}
 
-	resolved := make([]string, 0, len(secretNames))
-	for _, secretName := range secretNames {
+	return boundedMap(ctx, secretNames, 4, func(ctx context.Context, secretName string) string {
 		secret, err := s.clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 		if err != nil {
-			resolved = append(resolved, secretName)
-			continue
+			return secretName
 		}
-		resolved = append(resolved, formatImagePullSecret(secretName, secret))
-	}
-	return resolved
+		return formatImagePullSecret(secretName, secret)
+	})
 }
 
 func formatImagePullSecret(secretName string, secret *corev1.Secret) string {

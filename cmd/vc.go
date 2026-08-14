@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -103,6 +105,7 @@ func newVCNodeCmd() *cobra.Command {
 		Short: "查询或修改 VC 的 ACN 节点成员关系",
 	}
 	nodeCmd.AddCommand(newVCNodeListCmd())
+	nodeCmd.AddCommand(newVCNodeUsageCmd())
 	nodeCmd.AddCommand(newVCNodeRemoveCmd())
 	return nodeCmd
 }
@@ -110,23 +113,92 @@ func newVCNodeCmd() *cobra.Command {
 func newVCNodeListCmd() *cobra.Command {
 	var longOutput bool
 	cmd := &cobra.Command{
-		Use:   "list <vc-name-or-uid>",
-		Short: "列出某个 VC 当前包含的 ACN 节点",
-		Args:  cobra.ExactArgs(1),
+		Use:   "list <vc-name-or-uid> [vc-name-or-uid...]",
+		Short: "并行列出一个或多个 VC 当前包含的 ACN 节点",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
-			result, err := service.NewVCService(vcClient).ListNodes(cmd.Context(), args[0])
-			if err != nil {
-				return err
+			vcService := service.NewVCService(vcClient)
+			type queryResult struct {
+				identifier string
+				result     *service.VCNodeListResult
+				err        error
 			}
-			output.PrintVCNodeList(result, longOutput)
-			return nil
+			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := vcService.ListNodes(ctx, identifier)
+				return queryResult{identifier: identifier, result: result, err: err}
+			})
+			valid := make([]*service.VCNodeListResult, 0, len(results))
+			queryErrors := make([]error, 0)
+			for _, result := range results {
+				if result.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("vc %q: %w", result.identifier, result.err))
+					continue
+				}
+				valid = append(valid, result.result)
+			}
+			if len(args) == 1 && len(valid) == 1 {
+				output.PrintVCNodeList(valid[0], longOutput)
+			} else {
+				output.PrintVCNodeListMany(valid, longOutput)
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 ACN 名称和 ACN UID")
+	return cmd
+}
+
+func newVCNodeUsageCmd() *cobra.Command {
+	var freeOnly bool
+	cmd := &cobra.Command{
+		Use:   "usage <vc-name-or-uid> [vc-name-or-uid...]",
+		Short: "快速查看一个或多个 VC 的逐节点资源水位",
+		Long:  "直接通过平台节点资源批量 API 查看每台机器的状态及 CPU、内存、加速卡水位。ALLOC/TOTAL 表示已分配量/总量。",
+		Example: strings.Join([]string{
+			"  rayctl vc node usage vc-a3-deeplink",
+			"  rayctl vc node usage vc-a3-deeplink --free",
+			"  rayctl vc node usage vc-a3-deeplink vc-c550-jiaofu",
+		}, "\n"),
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+			vcService := service.NewVCService(vcClient)
+			type queryResult struct {
+				identifier string
+				result     *service.VCResourceUsageResult
+				err        error
+			}
+			queries := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := vcService.GetResourceUsage(ctx, identifier)
+				return queryResult{identifier: identifier, result: result, err: err}
+			})
+
+			results := make([]*service.VCResourceUsageResult, 0, len(queries))
+			queryErrors := make([]error, 0)
+			for _, query := range queries {
+				if query.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("vc %q: %w", query.identifier, query.err))
+					continue
+				}
+				if freeOnly {
+					query.result.FilterFreeAcceleratorNodes()
+				}
+				results = append(results, query.result)
+			}
+			if len(results) > 0 {
+				output.PrintVCResourceUsage(results)
+			}
+			return errors.Join(queryErrors...)
+		},
+	}
+	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用加速卡（ACCEL FREE > 0）的节点")
 	return cmd
 }
 

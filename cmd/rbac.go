@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -209,9 +210,9 @@ func newRBACGetCmd() *cobra.Command {
 	var long bool
 
 	cmd := &cobra.Command{
-		Use:   "get <vc-name-or-uid>",
-		Short: "查看 VC 中平台管理的 RoleBinding 和 ClusterRoleBinding",
-		Args:  cobra.ExactArgs(1),
+		Use:   "get <vc-name-or-uid> [vc-name-or-uid...]",
+		Short: "并行查看一个或多个 VC 中平台管理的 RBAC Binding",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
@@ -224,12 +225,30 @@ func newRBACGetCmd() *cobra.Command {
 				return err
 			}
 			rbacService := service.NewRBACService(vcClient)
-			result, err := rbacService.Get(ctx, args[0], selector, bearerToken)
-			if err != nil {
-				return err
+			type queryResult struct {
+				identifier string
+				result     *service.RBACGetResult
+				err        error
 			}
-			output.PrintRBACGetResult(result, long)
-			return nil
+			queries := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := rbacService.Get(ctx, identifier, selector, bearerToken)
+				return queryResult{identifier, result, err}
+			})
+			valid := make([]*service.RBACGetResult, 0)
+			queryErrors := make([]error, 0)
+			for _, query := range queries {
+				if query.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("rbac %q: %w", query.identifier, query.err))
+					continue
+				}
+				valid = append(valid, query.result)
+			}
+			if long && len(args) == 1 && len(valid) == 1 {
+				output.PrintRBACGetResult(valid[0], true)
+			} else {
+				output.PrintRBACGetSummary(valid, len(args) > 1, long)
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 

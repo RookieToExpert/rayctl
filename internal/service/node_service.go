@@ -74,6 +74,12 @@ type NodeDescribe struct {
 	Timings         DescribeTimings
 }
 
+type NodeDescribeQueryResult struct {
+	Identifier string
+	Details    *NodeDescribe
+	Err        error
+}
+
 type DescribeTimings struct {
 	GetNode        time.Duration
 	ListNamespaces time.Duration
@@ -85,6 +91,17 @@ type DescribeTimings struct {
 
 func NewNodeService(clientset kubernetes.Interface) *NodeService {
 	return &NodeService{clientset: clientset}
+}
+
+func (s *NodeService) DescribeMany(ctx context.Context, nodeNames []string, maxParallel int) []NodeDescribeQueryResult {
+	return boundedMap(ctx, nodeNames, maxParallel, func(queryCtx context.Context, nodeName string) NodeDescribeQueryResult {
+		details, err := s.Describe(queryCtx, nodeName)
+		return NodeDescribeQueryResult{
+			Identifier: nodeName,
+			Details:    details,
+			Err:        err,
+		}
+	})
 }
 
 func (s *NodeService) List(ctx context.Context, target string, extraSelector string) ([]NodeListItem, string, error) {

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -35,17 +36,29 @@ func newPVCheckCmd() *cobra.Command {
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
 			storageService := service.NewStorageService(clientset, vcClient)
-			for i, identifier := range args {
-				result, err := storageService.CheckPV(context.Background(), identifier)
-				if err != nil {
-					return fmt.Errorf("pv %q: %w", identifier, err)
+			type queryResult struct {
+				identifier string
+				result     *service.PVCheckResult
+				err        error
+			}
+			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := storageService.CheckPV(ctx, identifier)
+				return queryResult{identifier: identifier, result: result, err: err}
+			})
+			queryErrors := make([]error, 0)
+			printed := false
+			for _, query := range results {
+				if query.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("pv %q: %w", query.identifier, query.err))
+					continue
 				}
-				if i > 0 {
+				if printed {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
-				output.PrintPVCheckDetail(result)
+				output.PrintPVCheckDetail(query.result)
+				printed = true
 			}
-			return nil
+			return errors.Join(queryErrors...)
 		},
 	}
 

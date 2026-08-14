@@ -128,6 +128,14 @@ type sspAIDDNATResponse struct {
 }
 
 func (c *VirtualClusterClient) FindSSPAIDs(ctx context.Context, subscription string, region string, workspace string, identifier string) ([]SSPAID, error) {
+	return c.findSSPAIDs(ctx, "", subscription, region, workspace, identifier)
+}
+
+func (c *VirtualClusterClient) FindSSPAIDsForProfile(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPAID, error) {
+	return c.findSSPAIDs(ctx, profileName, subscription, region, workspace, identifier)
+}
+
+func (c *VirtualClusterClient) findSSPAIDs(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPAID, error) {
 	subscription = strings.TrimSpace(subscription)
 	region = strings.TrimSpace(region)
 	workspace = strings.TrimSpace(workspace)
@@ -137,6 +145,13 @@ func (c *VirtualClusterClient) FindSSPAIDs(ctx context.Context, subscription str
 	}
 
 	profiles := c.profilesForRegion(region)
+	if strings.TrimSpace(profileName) != "" {
+		profile, ok := c.clientProfileByName(profileName)
+		if !ok {
+			return nil, fmt.Errorf("platform profile %q not found", profileName)
+		}
+		profiles = []clientProfile{profile}
+	}
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}

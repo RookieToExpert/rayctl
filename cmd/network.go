@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -18,9 +19,9 @@ func newVPCCmd() *cobra.Command {
 
 func newVPCGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get [vpc-name-or-uid]",
-		Short: "列出 VPC 或查询单个 VPC 详情",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "get [vpc-name-or-uid...]",
+		Short: "列出 VPC，或批量查询一个或多个 VPC",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			networkService, err := newNetworkResourceService()
 			if err != nil {
@@ -34,12 +35,22 @@ func newVPCGetCmd() *cobra.Command {
 				output.PrintVPCList(result)
 				return nil
 			}
-			result, err := networkService.GetVPC(cmd.Context(), args[0])
-			if err != nil {
-				return err
+			results := networkService.GetVPCMany(cmd.Context(), args)
+			items := make([]service.VPCListItem, 0, len(results))
+			queryErrors := make([]error, 0)
+			for _, result := range results {
+				if result.Err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("vpc %q: %w", result.Identifier, result.Err))
+					continue
+				}
+				items = append(items, *result.Item)
 			}
-			output.PrintVPCDetail(result)
-			return nil
+			if len(args) == 1 && len(items) == 1 {
+				output.PrintVPCDetail(&items[0])
+			} else {
+				output.PrintVPCList(&service.VPCListResult{Items: items})
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 }
@@ -52,9 +63,9 @@ func newSubnetCmd() *cobra.Command {
 
 func newSubnetGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get [subnet-name-or-uid]",
-		Short: "列出 Subnet 或查询单个 Subnet 详情",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "get [subnet-name-or-uid...]",
+		Short: "列出 Subnet，或批量查询一个或多个 Subnet",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			networkService, err := newNetworkResourceService()
 			if err != nil {
@@ -68,12 +79,22 @@ func newSubnetGetCmd() *cobra.Command {
 				output.PrintSubnetList(result)
 				return nil
 			}
-			result, err := networkService.GetSubnet(cmd.Context(), args[0])
-			if err != nil {
-				return err
+			results := networkService.GetSubnetMany(cmd.Context(), args)
+			items := make([]service.SubnetListItem, 0, len(results))
+			queryErrors := make([]error, 0)
+			for _, result := range results {
+				if result.Err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("subnet %q: %w", result.Identifier, result.Err))
+					continue
+				}
+				items = append(items, *result.Item)
 			}
-			output.PrintSubnetDetail(result)
-			return nil
+			if len(args) == 1 && len(items) == 1 {
+				output.PrintSubnetDetail(&items[0])
+			} else {
+				output.PrintSubnetList(&service.SubnetListResult{Items: items})
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 }
@@ -86,9 +107,9 @@ func newNATGatewayCmd() *cobra.Command {
 
 func newNATGatewayGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get [natgw-name-or-uid]",
-		Short: "列出 NAT Gateway 或查询单个 NAT Gateway 详情",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "get [natgw-name-or-uid...]",
+		Short: "列出 NAT Gateway，或批量查询一个或多个 NAT Gateway",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			networkService, err := newNetworkResourceService()
 			if err != nil {
@@ -102,12 +123,22 @@ func newNATGatewayGetCmd() *cobra.Command {
 				output.PrintNATGatewayList(result)
 				return nil
 			}
-			result, err := networkService.GetNATGateway(cmd.Context(), args[0])
-			if err != nil {
-				return err
+			results := networkService.GetNATGatewayMany(cmd.Context(), args)
+			items := make([]service.NATGatewayListItem, 0, len(results))
+			queryErrors := make([]error, 0)
+			for _, result := range results {
+				if result.Err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("natgw %q: %w", result.Identifier, result.Err))
+					continue
+				}
+				items = append(items, *result.Item)
 			}
-			output.PrintNATGatewayDetail(result)
-			return nil
+			if len(args) == 1 && len(items) == 1 {
+				output.PrintNATGatewayDetail(&items[0])
+			} else {
+				output.PrintNATGatewayList(&service.NATGatewayListResult{Items: items})
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 }

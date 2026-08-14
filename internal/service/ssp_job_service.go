@@ -44,6 +44,15 @@ type SSPJobService struct {
 	clientset kubernetes.Interface
 	platform  *platform.VirtualClusterClient
 	jobHelper *JobService
+
+	workspaceMu    sync.Mutex
+	workspaceLoads map[string]*sspWorkspaceLoad
+}
+
+type sspWorkspaceLoad struct {
+	done       chan struct{}
+	workspaces []platform.SSPWorkspace
+	err        error
 }
 
 type SSPWorkloadDetection struct {
@@ -119,6 +128,7 @@ type SSPJobPodResourceItem struct {
 type sspWorkspaceRef struct {
 	Name             string
 	Subscription     string
+	ProfileName      string
 	HostNamespace    string
 	VirtualNamespace string
 }
@@ -130,10 +140,37 @@ type sspJobCandidate struct {
 
 func NewSSPJobService(clientset kubernetes.Interface, platformClient *platform.VirtualClusterClient) *SSPJobService {
 	return &SSPJobService{
-		clientset: clientset,
-		platform:  platformClient,
-		jobHelper: NewJobService(clientset, nil, platformClient),
+		clientset:      clientset,
+		platform:       platformClient,
+		jobHelper:      NewJobService(clientset, nil, platformClient),
+		workspaceLoads: make(map[string]*sspWorkspaceLoad),
 	}
+}
+
+// listPlatformWorkspaces shares one platform snapshot across concurrent
+// queries in the same CLI invocation.
+func (s *SSPJobService) listPlatformWorkspaces(ctx context.Context, region string) ([]platform.SSPWorkspace, error) {
+	region = firstNonEmpty(strings.TrimSpace(region), sspDefaultRegion)
+	s.workspaceMu.Lock()
+	if s.workspaceLoads == nil {
+		s.workspaceLoads = make(map[string]*sspWorkspaceLoad)
+	}
+	if load, ok := s.workspaceLoads[region]; ok {
+		s.workspaceMu.Unlock()
+		select {
+		case <-load.done:
+			return load.workspaces, load.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	load := &sspWorkspaceLoad{done: make(chan struct{})}
+	s.workspaceLoads[region] = load
+	s.workspaceMu.Unlock()
+
+	load.workspaces, load.err = s.platform.ListSSPWorkspaces(ctx, region)
+	close(load.done)
+	return load.workspaces, load.err
 }
 
 func (s *SSPJobService) DetectWorkload(ctx context.Context, identifier string) (*SSPWorkloadDetection, error) {
@@ -369,11 +406,15 @@ func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requeste
 func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context, requested string, pods []corev1.Pod, region string) ([]sspWorkspaceRef, error) {
 	region = firstNonEmpty(strings.TrimSpace(region), sspDefaultRegion)
 	if requested != "" {
-		workspaces, err := s.platform.ListSSPWorkspaces(ctx, region)
+		workspaces, err := s.listPlatformWorkspaces(ctx, region)
 		if err == nil {
 			for _, workspace := range workspaces {
 				if strings.EqualFold(strings.TrimSpace(workspace.Name), requested) {
-					return []sspWorkspaceRef{{Name: workspace.Name, Subscription: workspace.Subscription}}, nil
+					return []sspWorkspaceRef{{
+						Name:         workspace.Name,
+						Subscription: workspace.Subscription,
+						ProfileName:  workspace.ProfileName,
+					}}, nil
 				}
 			}
 		}
@@ -381,6 +422,7 @@ func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context,
 	}
 
 	byName := make(map[string]sspWorkspaceRef)
+	podWorkspaceNames := make(map[string]struct{})
 	for _, pod := range pods {
 		name := strings.TrimSpace(pod.Labels[sspWorkspaceNameLabel])
 		if name == "" {
@@ -398,9 +440,7 @@ func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context,
 			HostNamespace:    pod.Namespace,
 			VirtualNamespace: strings.TrimSpace(pod.Annotations[sspVirtualNamespaceAnno]),
 		}
-	}
-	if len(byName) > 0 {
-		return sortedSSPWorkspaceRefs(byName), nil
+		podWorkspaceNames[name] = struct{}{}
 	}
 	if len(byName) == 0 {
 		namespaces, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
@@ -419,15 +459,34 @@ func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context,
 			byName[name] = sspWorkspaceRef{Name: name}
 		}
 	}
-	platformWorkspaces, platformErr := s.platform.ListSSPWorkspaces(ctx, region)
+	platformWorkspaces, platformErr := s.listPlatformWorkspaces(ctx, region)
 	for _, workspace := range platformWorkspaces {
 		name := strings.TrimSpace(workspace.Name)
 		if name == "" {
 			continue
 		}
-		if _, exists := byName[name]; !exists {
-			byName[name] = sspWorkspaceRef{Name: name, Subscription: strings.TrimSpace(workspace.Subscription)}
+		if existing, exists := byName[name]; exists {
+			if existing.Subscription == "" {
+				existing.Subscription = strings.TrimSpace(workspace.Subscription)
+			}
+			if existing.ProfileName == "" {
+				existing.ProfileName = strings.TrimSpace(workspace.ProfileName)
+			}
+			byName[name] = existing
+		} else {
+			byName[name] = sspWorkspaceRef{
+				Name:         name,
+				Subscription: strings.TrimSpace(workspace.Subscription),
+				ProfileName:  strings.TrimSpace(workspace.ProfileName),
+			}
 		}
+	}
+	if len(podWorkspaceNames) > 0 {
+		podWorkspaces := make(map[string]sspWorkspaceRef, len(podWorkspaceNames))
+		for name := range podWorkspaceNames {
+			podWorkspaces[name] = byName[name]
+		}
+		return sortedSSPWorkspaceRefs(podWorkspaces), nil
 	}
 	if len(byName) == 0 {
 		if platformErr != nil {
@@ -502,7 +561,15 @@ func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription strin
 			}
 			defer func() { <-semaphore }()
 			workspaceSubscription := firstNonEmpty(strings.TrimSpace(workspace.Subscription), subscription)
-			jobs, err := s.platform.FindSSPTrainingJobs(ctx, workspaceSubscription, sspDefaultRegion, workspace.Name, identifier)
+			var jobs []platform.SSPTrainingJob
+			var err error
+			if workspace.ProfileName != "" {
+				jobs, err = s.platform.FindSSPTrainingJobsForProfile(
+					ctx, workspace.ProfileName, workspaceSubscription, sspDefaultRegion, workspace.Name, identifier,
+				)
+			} else {
+				jobs, err = s.platform.FindSSPTrainingJobs(ctx, workspaceSubscription, sspDefaultRegion, workspace.Name, identifier)
+			}
 			results <- lookupResult{workspace: workspace, jobs: jobs, err: err}
 		}()
 	}
@@ -511,6 +578,7 @@ func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription strin
 
 	candidates := make([]sspJobCandidate, 0)
 	var firstErr error
+	successfulLookups := 0
 	for result := range results {
 		if result.err != nil {
 			if firstErr == nil {
@@ -518,9 +586,13 @@ func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription strin
 			}
 			continue
 		}
+		successfulLookups++
 		for _, job := range result.jobs {
 			candidates = append(candidates, sspJobCandidate{Job: job, Workspace: result.workspace})
 		}
+	}
+	if successfulLookups > 0 {
+		firstErr = nil
 	}
 	return candidates, firstErr
 }
@@ -572,11 +644,14 @@ func (s *SSPJobService) findHostNamespace(ctx context.Context, workspace string,
 func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainingJob, hostNamespace string, pods []corev1.Pod, includeLogs bool) *SSPJobGetResult {
 	status := normalizeSSPJobState(job.Status.State)
 	terminal := isTerminalSSPJobState(status)
+	vcResult := asyncCall(ctx, func(ctx context.Context) (string, error) {
+		return s.resolveSSPVClusterName(ctx, pods, hostNamespace, job.ProfileName), nil
+	})
 	result := &SSPJobGetResult{
 		Name:          job.Name,
 		UID:           job.UID,
 		Status:        status,
-		VCluster:      s.resolveSSPVClusterName(ctx, pods, hostNamespace),
+		VCluster:      "-",
 		Workspace:     job.WorkspaceName,
 		Queue:         job.Spec.Queue.Name,
 		QueueType:     job.Spec.Queue.Type,
@@ -598,6 +673,7 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 		result.InspectPod = inspectPod.Name
 	}
 	if terminal {
+		result.VCluster = (<-vcResult).Value
 		result.Stage = "terminal"
 		result.Diagnosis = []string{fmt.Sprintf("任务已经结束，平台状态为 %s。", status)}
 		return result
@@ -605,10 +681,11 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
 	identity := &jobIdentity{Name: job.Name, Namespace: job.Namespace, UID: job.UID, HostNamespace: hostNamespace}
-	result.PersistentVolumeClaims = s.jobHelper.resolveVolumeClaimRefs(ctx, identity, pvcRefs)
+	result.PersistentVolumeClaims = s.resolveSSPVolumeClaimRefs(ctx, hostNamespace, pvcRefs)
 	volumeDescriptors := s.resolveSSPVolumeDescriptors(ctx, trainingJobVolumeDescriptors(job.Spec.VolumeMounts))
 	result.PersistentVolumeClaims = enrichSSPVolumeClaims(result.PersistentVolumeClaims, volumeDescriptors)
 	result.ImagePullSecrets = s.jobHelper.resolveImagePullSecretsFromKube(ctx, hostNamespace, imagePullSecrets)
+	result.VCluster = (<-vcResult).Value
 
 	assigned := 0
 	ready := 0
@@ -809,7 +886,30 @@ func formatSSPVolumeLocation(volume sspVolumeDescriptor) string {
 	return dashIfEmpty(firstNonEmpty(volume.Name, volume.Endpoint))
 }
 
-func (s *SSPJobService) resolveSSPVClusterName(ctx context.Context, pods []corev1.Pod, hostNamespace string) string {
+func (s *SSPJobService) resolveSSPVolumeClaimRefs(ctx context.Context, hostNamespace string, refs []VolumeClaimRef) []VolumeClaimRef {
+	hostNamespace = strings.TrimSpace(hostNamespace)
+	if hostNamespace == "" || len(refs) == 0 {
+		return refs
+	}
+	return boundedMap(ctx, refs, 4, func(ctx context.Context, ref VolumeClaimRef) VolumeClaimRef {
+		pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(hostNamespace).Get(ctx, ref.ClaimName, metav1.GetOptions{})
+		if err != nil {
+			ref.Status = "Unknown"
+			ref.Message = classifyPVCErrorMessage(err)
+			if ref.Message == "PVC 在当前集群不存在" {
+				ref.Status = "NotFound"
+			}
+			return ref
+		}
+		ref.Status = dashIfEmpty(string(pvc.Status.Phase))
+		ref.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
+		ref.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
+		ref.DisplayPV = ref.BackendPV
+		return ref
+	})
+}
+
+func (s *SSPJobService) resolveSSPVClusterName(ctx context.Context, pods []corev1.Pod, hostNamespace string, profileName string) string {
 	vcReference := ""
 	clusterName := ""
 	for _, pod := range pods {
@@ -834,7 +934,14 @@ func (s *SSPJobService) resolveSSPVClusterName(ctx context.Context, pods []corev
 	}
 	uid := strings.TrimPrefix(strings.TrimSpace(vcReference), "vc-")
 	if looksLikeUUID(uid) && s.platform != nil {
-		if resource, err := s.platform.FindResourceByUID(ctx, uid, "virtualClusters"); err == nil {
+		var resource *platform.StorageVolumeResource
+		var err error
+		if strings.TrimSpace(profileName) != "" {
+			resource, err = s.platform.FindResourceByUIDForProfile(ctx, profileName, uid, "virtualClusters")
+		} else {
+			resource, err = s.platform.FindResourceByUID(ctx, uid, "virtualClusters")
+		}
+		if err == nil {
 			if name := firstNonEmpty(strings.TrimSpace(resource.Name), strings.TrimSpace(resource.DisplayName)); name != "" {
 				return name
 			}

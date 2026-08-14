@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -36,9 +37,9 @@ func newSSPAIDGetCmd() *cobra.Command {
 	var region string
 	var longOutput bool
 	cmd := &cobra.Command{
-		Use:   "get <aid-name-or-uid>",
-		Short: "查询 SSP AID 开发机并诊断 Pod 状态",
-		Args:  cobra.ExactArgs(1),
+		Use:   "get <aid-name-or-uid> [aid-name-or-uid...]",
+		Short: "并行查询一个或多个 SSP AID 开发机并诊断 Pod 状态",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientset, err := kube.NewClientset(kubeconfig)
 			if err != nil {
@@ -48,12 +49,33 @@ func newSSPAIDGetCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
 			}
-			result, err := service.NewSSPAIDService(clientset, platformClient).GetAIDInRegion(cmd.Context(), args[0], workspace, region, longOutput)
-			if err != nil {
-				return err
+			aidService := service.NewSSPAIDService(clientset, platformClient)
+			type queryResult struct {
+				identifier string
+				result     *service.SSPAIDGetResult
+				err        error
 			}
-			output.PrintSSPAIDDetail(result, longOutput)
-			return nil
+			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := aidService.GetAIDInRegion(ctx, identifier, workspace, region, longOutput)
+				return queryResult{identifier, result, err}
+			})
+			queryErrors := make([]error, 0)
+			printed := false
+			for index, result := range results {
+				if result.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("aid %q: %w", result.identifier, result.err))
+					continue
+				}
+				if printed {
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
+				if len(args) > 1 {
+					fmt.Fprintf(cmd.OutOrStdout(), "===== AID [%d/%d]: %s =====\n\n", index+1, len(args), result.identifier)
+				}
+				output.PrintSSPAIDDetail(result.result, longOutput)
+				printed = true
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免已停止开发机跨 workspace 查询")
@@ -75,9 +97,9 @@ func newSSPJobGetCmd() *cobra.Command {
 	var workspace string
 	var longOutput bool
 	cmd := &cobra.Command{
-		Use:   "get <job-name-or-uid>",
-		Short: "查询 SSP TrainingJob 并诊断 Pending 原因",
-		Args:  cobra.ExactArgs(1),
+		Use:   "get <job-name-or-uid> [job-name-or-uid...]",
+		Short: "并行查询一个或多个 SSP TrainingJob 并诊断 Pending 原因",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientset, err := kube.NewClientset(kubeconfig)
 			if err != nil {
@@ -88,12 +110,33 @@ func newSSPJobGetCmd() *cobra.Command {
 				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
 			}
 
-			result, err := service.NewSSPJobService(clientset, platformClient).GetJob(context.Background(), args[0], workspace, longOutput)
-			if err != nil {
-				return err
+			jobService := service.NewSSPJobService(clientset, platformClient)
+			type queryResult struct {
+				identifier string
+				result     *service.SSPJobGetResult
+				err        error
 			}
-			output.PrintSSPJobDetail(result, longOutput)
-			return nil
+			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := jobService.GetJob(ctx, identifier, workspace, longOutput)
+				return queryResult{identifier, result, err}
+			})
+			queryErrors := make([]error, 0)
+			printed := false
+			for index, result := range results {
+				if result.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("ssp job %q: %w", result.identifier, result.err))
+					continue
+				}
+				if printed {
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
+				if len(args) > 1 {
+					fmt.Fprintf(cmd.OutOrStdout(), "===== SSP JOB [%d/%d]: %s =====\n\n", index+1, len(args), result.identifier)
+				}
+				output.PrintSSPJobDetail(result.result, longOutput)
+				printed = true
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免历史任务跨 workspace 查询")

@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -25,7 +27,7 @@ func newPolicyCmd() *cobra.Command {
 
 func newPolicyGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get [policy-name] [vc-name-or-uid]",
+		Use:   "get [policy-name] [vc-name-or-uid...]",
 		Short: "查看集群策略白名单",
 		Long: "查看 HC 上受支持的 Pod 安全 ClusterPolicy 白名单。\n" +
 			"不传参数时列出 rayctl 当前覆盖的全部 policy；\n" +
@@ -37,7 +39,7 @@ func newPolicyGetCmd() *cobra.Command {
 			"  rayctl policy get disallow-privileged-containers",
 			"  rayctl policy get disallow-privileged-containers vc-c550-h3c-test",
 		}, "\n"),
-		Args: cobra.RangeArgs(0, 2),
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				output.PrintSupportedClusterPolicies(service.SupportedClusterPolicies())
@@ -58,17 +60,26 @@ func newPolicyGetCmd() *cobra.Command {
 			clusterService := service.NewClusterService(clientset, vcClient)
 			policyService := service.NewPolicyService(dynamicClient, clusterService)
 
-			target := ""
-			if len(args) > 1 {
-				target = args[1]
+			if len(args) == 1 {
+				result, err := policyService.GetClusterPolicy(cmd.Context(), args[0], "")
+				if err != nil {
+					return err
+				}
+				output.PrintPolicyGetResult(result)
+				return nil
 			}
-			result, err := policyService.GetClusterPolicy(context.Background(), args[0], target)
-			if err != nil {
-				return err
+			queries := policyService.GetClusterPolicyMany(cmd.Context(), args[0], args[1:], 4)
+			valid := make([]*service.PolicyGetResult, 0)
+			queryErrors := make([]error, 0)
+			for _, query := range queries {
+				if query.Err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("policy %q vc %q: %w", args[0], query.Identifier, query.Err))
+					continue
+				}
+				valid = append(valid, query.Result)
 			}
-
-			output.PrintPolicyGetResult(result)
-			return nil
+			output.PrintPolicyGetSummary(valid)
+			return errors.Join(queryErrors...)
 		},
 	}
 }

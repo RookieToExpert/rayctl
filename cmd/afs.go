@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -24,16 +24,17 @@ func newAFSCmd() *cobra.Command {
 }
 
 func newAFSGetCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "get [afs-name-or-uid]",
-		Short: "列出当前 profile 的 AFS 或查询单个 AFS 详情",
-		Args:  cobra.MaximumNArgs(1),
+	var longOutput bool
+	cmd := &cobra.Command{
+		Use:   "get [afs-name-or-uid...]",
+		Short: "列出 AFS，或并行查询一个或多个 AFS 与 host PV/PVC 映射",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			networkService, err := newNetworkResourceService()
-			if err != nil {
-				return err
-			}
 			if len(args) == 0 {
+				networkService, err := newNetworkResourceService()
+				if err != nil {
+					return err
+				}
 				result, err := networkService.ListAFS(cmd.Context())
 				if err != nil {
 					return err
@@ -41,44 +42,49 @@ func newAFSGetCmd() *cobra.Command {
 				output.PrintAFSList(result)
 				return nil
 			}
-			result, err := networkService.GetAFS(cmd.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			output.PrintAFSDetail(result)
-			return nil
+			return runAFSQueries(cmd, args, longOutput)
 		},
 	}
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "查询并显示 host PV/PVC、租户及最多 15 个关联 Virtual PVC")
+	return cmd
+}
+
+func runAFSQueries(cmd *cobra.Command, args []string, longOutput bool) error {
+	clientset, err := kube.NewClientset(kubeconfig)
+	if err != nil {
+		return err
+	}
+	vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+	results := service.NewStorageService(clientset, vcClient).CheckAFSMany(cmd.Context(), args, longOutput, 4)
+	valid := make([]*service.AFSCheckResult, 0, len(results))
+	queryErrors := make([]error, 0)
+	for _, result := range results {
+		if result.Err != nil {
+			queryErrors = append(queryErrors, fmt.Errorf("afs %q: %w", result.Identifier, result.Err))
+			continue
+		}
+		valid = append(valid, result.Result)
+	}
+	if len(args) == 1 && len(valid) == 1 {
+		output.PrintAFSCheckDetail(valid[0], longOutput)
+	} else if len(valid) > 0 {
+		output.PrintAFSCheckSummary(valid)
+	}
+	return errors.Join(queryErrors...)
 }
 
 func newAFSCheckCmd() *cobra.Command {
 	var longOutput bool
 	cmd := &cobra.Command{
-		Use:   "check <afs-name-or-uid> [afs-name-or-uid...]",
-		Short: "根据 AFS 前端名称或 UID 查询 host pv/pvc 和关联的 virtual pvc",
-		Args:  cobra.MinimumNArgs(1),
+		Use:        "check <afs-name-or-uid> [afs-name-or-uid...]",
+		Short:      "兼容入口：查询 AFS 与 host PV/PVC 映射",
+		Deprecated: "请使用 rayctl afs get <afs-name-or-uid...>",
+		Args:       cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			clientset, err := kube.NewClientset(kubeconfig)
-			if err != nil {
-				return err
-			}
-
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
-			storageService := service.NewStorageService(clientset, vcClient)
-			for i, identifier := range args {
-				result, err := storageService.CheckAFS(context.Background(), identifier)
-				if err != nil {
-					return fmt.Errorf("afs %q: %w", identifier, err)
-				}
-				if i > 0 {
-					fmt.Fprintln(cmd.OutOrStdout())
-				}
-				output.PrintAFSCheckDetail(result, longOutput)
-			}
-			return nil
+			return runAFSQueries(cmd, args, longOutput)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail rows such as tenant")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "查询并显示 host PV/PVC、租户及最多 15 个关联 Virtual PVC")
 	return cmd
 }

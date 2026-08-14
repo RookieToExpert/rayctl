@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -67,5 +69,34 @@ func TestCheckPVShowsObjectStorageEndpointAndBucket(t *testing.T) {
 func TestFormatObjectStorageLocationFallsBackToBucket(t *testing.T) {
 	if got := formatObjectStorageLocation("", "discovery-prod"); got != "bucket=discovery-prod" {
 		t.Fatalf("formatObjectStorageLocation() = %q", got)
+	}
+}
+
+func TestFindVirtualPVCsUsesOnePVCPerNamespaceAndLimit(t *testing.T) {
+	hostPV := "pvc-host"
+	pvs := make([]corev1.PersistentVolume, 0, 20)
+	for index := 0; index < 18; index++ {
+		namespace := fmt.Sprintf("vcluster-%02d", index)
+		pvs = append(pvs, corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("virtual-%02d", index), Labels: map[string]string{"source-pv": hostPV}},
+			Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: namespace, Name: "pvc-main"}},
+		})
+	}
+	pvs = append(pvs, corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "duplicate", Labels: map[string]string{"source-pv": hostPV}},
+		Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "vcluster-00", Name: "pvc-second"}},
+	})
+
+	result := findVirtualPVCsForHostPVsInSnapshot(pvs, []string{hostPV}, 15)
+	if len(result) != 15 {
+		t.Fatalf("virtual pvc count = %d, want 15", len(result))
+	}
+	seenNamespace := make(map[string]struct{})
+	for _, value := range result {
+		namespace := strings.SplitN(value, "/", 2)[0]
+		if _, exists := seenNamespace[namespace]; exists {
+			t.Fatalf("namespace %q appears more than once", namespace)
+		}
+		seenNamespace[namespace] = struct{}{}
 	}
 }

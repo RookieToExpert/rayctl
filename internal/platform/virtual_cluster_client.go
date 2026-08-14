@@ -319,6 +319,9 @@ type AIComputeNode struct {
 	State        string `json:"state"`
 	Properties   struct {
 		MachineType        string `json:"machine_type"`
+		Model              string `json:"model"`
+		AcceleratorModel   string `json:"accelerator_model"`
+		AcceleratorType    string `json:"accelerator_type"`
 		VirtualClusterName string `json:"virtual_cluster_name"`
 		NodePoolName       string `json:"node_pool_name"`
 		HostIP             string `json:"host_ip"`
@@ -337,6 +340,28 @@ type virtualClusterNodeListResponse struct {
 	BareMetalNodes []AIComputeNode `json:"bare_metal_nodes"`
 	TotalSize      int             `json:"total_size"`
 	NextPageToken  string          `json:"next_page_token"`
+}
+
+type VirtualClusterResourceAmount struct {
+	CPU          string `json:"cpu"`
+	Memory       string `json:"memory"`
+	Device       string `json:"device"`
+	LocalStorage string `json:"local_storage"`
+}
+
+type VirtualClusterNodeResourceUsage struct {
+	UID         string `json:"uid"`
+	MachineName string `json:"machine_name"`
+	Usage       struct {
+		Total     VirtualClusterResourceAmount `json:"total"`
+		Allocated VirtualClusterResourceAmount `json:"allocated"`
+		Available VirtualClusterResourceAmount `json:"available"`
+		Releasing VirtualClusterResourceAmount `json:"releasing"`
+	} `json:"usage"`
+}
+
+type virtualClusterNodeResourceUsageResponse struct {
+	NodeUsages []VirtualClusterNodeResourceUsage `json:"node_usages"`
 }
 
 type virtualClusterNodeRemoveResponse struct {
@@ -727,6 +752,90 @@ func (c *VirtualClusterClient) CurrentProfileName() string {
 		return ""
 	}
 	return strings.TrimSpace(c.currentProfile)
+}
+
+// ResolveProfileName maps a user-facing environment name to a configured
+// profile without changing current_profile. This keeps one-off cross-region
+// queries isolated from the rest of the CLI process.
+func (c *VirtualClusterClient) ResolveProfileName(environment string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("platform client is unavailable")
+	}
+	environment = normalizeProfileEnvironment(environment)
+	if environment == "" {
+		if profile, ok := c.currentClientProfile(); ok {
+			return profile.Name, nil
+		}
+		return "", fmt.Errorf("current platform profile is unavailable")
+	}
+
+	current, _ := c.currentClientProfile()
+	candidates := make([]clientProfile, 0)
+	for _, profile := range c.orderedProfiles() {
+		if profileEnvironment(profile) == environment {
+			candidates = append(candidates, profile)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no platform profile configured for environment %q", environment)
+	}
+	if profileEnvironment(current) == environment {
+		return current.Name, nil
+	}
+
+	currentFamily := profileTenantFamily(current.Name)
+	for _, profile := range candidates {
+		if profileTenantFamily(profile.Name) == currentFamily {
+			return profile.Name, nil
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0].Name, nil
+	}
+
+	names := make([]string, 0, len(candidates))
+	for _, profile := range candidates {
+		names = append(names, profile.Name)
+	}
+	sort.Strings(names)
+	return "", fmt.Errorf("environment %q matches multiple profiles (%s); please select the matching tenant as current_profile", environment, strings.Join(names, ", "))
+}
+
+func normalizeProfileEnvironment(environment string) string {
+	switch strings.ToLower(strings.TrimSpace(environment)) {
+	case "", "current", "default":
+		return ""
+	case "d":
+		return "d"
+	case "p", "pt":
+		return "pt"
+	case "dcloud", "cloud":
+		return "dcloud"
+	default:
+		return strings.ToLower(strings.TrimSpace(environment))
+	}
+}
+
+func profileEnvironment(profile clientProfile) string {
+	hosts := strings.ToLower(strings.Join([]string{profile.BaseURL, profile.KubernetesBaseURL, profile.IAMBaseURL}, " "))
+	if strings.Contains(hosts, "-cloud.d.pjlab.org.cn") || strings.Contains(hosts, "cloud.d.pjlab.org.cn") {
+		return "dcloud"
+	}
+	if strings.EqualFold(strings.TrimSpace(profile.Region), "cn-pj-03") ||
+		(strings.Contains(hosts, ".pjlab.org.cn") && !strings.Contains(hosts, ".d.pjlab.org.cn")) {
+		return "pt"
+	}
+	return "d"
+}
+
+func profileTenantFamily(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, suffix := range []string{"-dcloud", "_dcloud", "-cloud", "_cloud", "-pt", "_pt", "-p", "_p", "-d", "_d"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
+	}
+	return name
 }
 
 func (c *VirtualClusterClient) CurrentRegion() string {
@@ -1184,6 +1293,34 @@ func (c *VirtualClusterClient) orderedProfiles() []clientProfile {
 	return profiles
 }
 
+// currentEnvironmentProfiles keeps aggregate queries inside the active
+// platform endpoint and region. Profiles for other environments remain
+// available to exact-name lookups, but must not delay every list operation.
+func (c *VirtualClusterClient) currentEnvironmentProfiles() []clientProfile {
+	profiles := c.orderedProfiles()
+	current, ok := c.currentClientProfile()
+	if !ok || len(profiles) <= 1 {
+		return profiles
+	}
+
+	currentBaseURL := strings.TrimRight(strings.TrimSpace(current.BaseURL), "/")
+	currentRegion := strings.TrimSpace(current.Region)
+	result := make([]clientProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		if !strings.EqualFold(strings.TrimRight(strings.TrimSpace(profile.BaseURL), "/"), currentBaseURL) {
+			continue
+		}
+		if currentRegion != "" && !strings.EqualFold(strings.TrimSpace(profile.Region), currentRegion) {
+			continue
+		}
+		result = append(result, profile)
+	}
+	if len(result) == 0 {
+		return []clientProfile{current}
+	}
+	return result
+}
+
 func (c *VirtualClusterClient) currentClientProfile() (clientProfile, bool) {
 	if len(c.profiles) == 0 {
 		return clientProfile{
@@ -1355,9 +1492,13 @@ func (c *VirtualClusterClient) findExactUsersForProfile(ctx context.Context, pro
 }
 
 func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string) ([]IAMUser, error) {
-	profile, ok := c.currentClientProfile()
+	return c.FindUsersForProfile(ctx, "", identifier)
+}
+
+func (c *VirtualClusterClient) FindUsersForProfile(ctx context.Context, profileName string, identifier string) ([]IAMUser, error) {
+	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
-		return nil, fmt.Errorf("no current platform profile available")
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
 	}
 
 	identifier = strings.TrimSpace(identifier)
@@ -1421,9 +1562,13 @@ func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string)
 }
 
 func (c *VirtualClusterClient) ListUserGroups(ctx context.Context, userID string) ([]IAMGroup, error) {
-	profile, ok := c.currentClientProfile()
+	return c.ListUserGroupsForProfile(ctx, "", userID)
+}
+
+func (c *VirtualClusterClient) ListUserGroupsForProfile(ctx context.Context, profileName string, userID string) ([]IAMGroup, error) {
+	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
-		return nil, fmt.Errorf("no current platform profile available")
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
 	}
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
@@ -1488,9 +1633,13 @@ func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile
 }
 
 func (c *VirtualClusterClient) FindGroups(ctx context.Context, identifier string) ([]IAMGroup, error) {
-	profile, ok := c.currentClientProfile()
+	return c.FindGroupsForProfile(ctx, "", identifier)
+}
+
+func (c *VirtualClusterClient) FindGroupsForProfile(ctx context.Context, profileName string, identifier string) ([]IAMGroup, error) {
+	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
-		return nil, fmt.Errorf("no current platform profile available")
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
 	}
 
 	identifier = strings.TrimSpace(identifier)
@@ -2170,6 +2319,52 @@ func (c *VirtualClusterClient) ListVirtualClusterNodes(
 	return result, nil
 }
 
+func (c *VirtualClusterClient) BatchGetVirtualClusterNodeResourceUsages(
+	ctx context.Context,
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+	virtualClusterUID string,
+	nodeUIDs []string,
+) ([]VirtualClusterNodeResourceUsage, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	subscriptionID = firstNonEmpty(strings.TrimSpace(subscriptionID), strings.TrimSpace(profile.Subscription))
+	region = firstNonEmpty(strings.TrimSpace(region), strings.TrimSpace(profile.Region))
+	if subscriptionID == "" {
+		return nil, fmt.Errorf("subscription id is required for virtual cluster resource usage")
+	}
+
+	u, _ := url.Parse(profile.BaseURL)
+	u.Path = fmt.Sprintf(
+		"/compute/ecp/v1/subscriptions/%s/resourceGroups/%s/regions/%s/virtualClusters/%s/nodePools/-/nodes/-/resourceUsages:batchGet",
+		subscriptionID,
+		profile.ResourceGroup,
+		region,
+		strings.TrimSpace(virtualClusterName),
+	)
+	query := u.Query()
+	for _, nodeUID := range nodeUIDs {
+		if nodeUID = strings.TrimSpace(nodeUID); nodeUID != "" {
+			query.Add("node_uids", nodeUID)
+		}
+	}
+	if len(query["node_uids"]) == 0 {
+		return nil, nil
+	}
+	query.Set("request_id", strings.TrimPrefix(strings.TrimSpace(virtualClusterUID), "vc-"))
+	u.RawQuery = query.Encode()
+
+	var result virtualClusterNodeResourceUsageResponse
+	if err := c.getJSONWithProfile(ctx, profile, u.String(), &result); err != nil {
+		return nil, err
+	}
+	return result.NodeUsages, nil
+}
+
 func (c *VirtualClusterClient) RemoveAIComputeNodesFromVirtualCluster(
 	ctx context.Context,
 	profileName string,
@@ -2792,6 +2987,11 @@ func (c *VirtualClusterClient) FindStorageVolumeResource(ctx context.Context, id
 		return nil, fmt.Errorf("storage volume identifier is required")
 	}
 
+	if strings.HasPrefix(strings.ToLower(identifier), "afs-") {
+		// AFS names are canonical resource identifiers. Do not retry the same
+		// platform search through UID candidates and then by name again.
+		return c.findStorageVolumeResourceByFieldFragment(ctx, "name", identifier)
+	}
 	if resource, err := c.FindStorageVolumeResourceByUID(ctx, identifier); err == nil && resource != nil {
 		return resource, nil
 	}
@@ -2812,41 +3012,33 @@ func (c *VirtualClusterClient) FindResourceByName(ctx context.Context, name stri
 		}
 	}
 
+	type profileResult struct {
+		resource *StorageVolumeResource
+		err      error
+	}
+	queryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	profiles := c.orderedProfiles()
+	resultCh := make(chan profileResult, len(profiles))
+	for _, profile := range profiles {
+		profile := profile
+		go func() {
+			profileCtx, profileCancel := context.WithTimeout(queryCtx, 2*time.Second)
+			defer profileCancel()
+			resource, err := c.findResourceByNameWithProfile(profileCtx, profile, name, kindSet)
+			resultCh <- profileResult{resource: resource, err: err}
+		}()
+	}
+
 	var lastErr error
-	for _, profile := range c.orderedProfiles() {
-		pageToken := "1"
-		for {
-			u, _ := url.Parse(profile.BaseURL)
-			u.Path = "/rmh/v1/resources:page"
-			query := u.Query()
-			query.Set("filter", fmt.Sprintf(`name="%s"`, name))
-			query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
-			query.Set("page_token", pageToken)
-			u.RawQuery = query.Encode()
-
-			var payload storageVolumePageResponse
-			if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
-				lastErr = err
-				break
-			}
-
-			for i := range payload.Resources {
-				resource := &payload.Resources[i]
-				resource.ProfileName = profile.Name
-				if !strings.EqualFold(strings.TrimSpace(resource.Name), name) {
-					continue
-				}
-				if len(kindSet) > 0 && !resourceRIDHasAnyKind(resource.RID, kindSet) {
-					continue
-				}
-				return resource, nil
-			}
-
-			nextPageToken := strings.TrimSpace(payload.NextPageToken)
-			if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
-				break
-			}
-			pageToken = nextPageToken
+	for range profiles {
+		result := <-resultCh
+		if result.resource != nil {
+			cancel()
+			return result.resource, nil
+		}
+		if result.err != nil {
+			lastErr = result.err
 		}
 	}
 	if lastErr != nil {
@@ -2858,7 +3050,56 @@ func (c *VirtualClusterClient) FindResourceByName(ctx context.Context, name stri
 	return nil, fmt.Errorf("resource %q not found", name)
 }
 
+func (c *VirtualClusterClient) findResourceByNameWithProfile(ctx context.Context, profile clientProfile, name string, kindSet map[string]struct{}) (*StorageVolumeResource, error) {
+	pageToken := "1"
+	for {
+		u, _ := url.Parse(profile.BaseURL)
+		u.Path = "/rmh/v1/resources:page"
+		query := u.Query()
+		query.Set("filter", fmt.Sprintf(`name="%s"`, name))
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("page_token", pageToken)
+		u.RawQuery = query.Encode()
+
+		var payload storageVolumePageResponse
+		if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
+			return nil, err
+		}
+
+		for i := range payload.Resources {
+			resource := &payload.Resources[i]
+			resource.ProfileName = profile.Name
+			if !strings.EqualFold(strings.TrimSpace(resource.Name), name) {
+				continue
+			}
+			if len(kindSet) > 0 && !resourceRIDHasAnyKind(resource.RID, kindSet) {
+				continue
+			}
+			return resource, nil
+		}
+
+		nextPageToken := strings.TrimSpace(payload.NextPageToken)
+		if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
+			break
+		}
+		pageToken = nextPageToken
+	}
+	return nil, nil
+}
+
 func (c *VirtualClusterClient) FindResourceByUID(ctx context.Context, uid string, resourceKinds ...string) (*StorageVolumeResource, error) {
+	return c.findResourceByUIDWithProfiles(ctx, c.orderedProfiles(), uid, resourceKinds...)
+}
+
+func (c *VirtualClusterClient) FindResourceByUIDForProfile(ctx context.Context, profileName string, uid string, resourceKinds ...string) (*StorageVolumeResource, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.findResourceByUIDWithProfiles(ctx, []clientProfile{profile}, uid, resourceKinds...)
+}
+
+func (c *VirtualClusterClient) findResourceByUIDWithProfiles(ctx context.Context, profiles []clientProfile, uid string, resourceKinds ...string) (*StorageVolumeResource, error) {
 	uid = strings.TrimSpace(uid)
 	if uid == "" {
 		return nil, fmt.Errorf("resource uid is required")
@@ -2873,7 +3114,7 @@ func (c *VirtualClusterClient) FindResourceByUID(ctx context.Context, uid string
 	}
 
 	var lastErr error
-	for _, profile := range c.orderedProfiles() {
+	for _, profile := range profiles {
 		pageToken := "1"
 		for {
 			u, _ := url.Parse(profile.BaseURL)
@@ -2937,51 +3178,80 @@ func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragment(ctx cont
 		return nil, fmt.Errorf("storage volume fragment is required")
 	}
 
+	type profileResult struct {
+		resource *StorageVolumeResource
+		err      error
+	}
+	queryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	profiles := c.orderedProfiles()
+	resultCh := make(chan profileResult, len(profiles))
+	for _, profile := range profiles {
+		profile := profile
+		go func() {
+			profileCtx, profileCancel := context.WithTimeout(queryCtx, 2*time.Second)
+			defer profileCancel()
+			resource, err := c.findStorageVolumeResourceByFieldFragmentWithProfile(profileCtx, profile, field, fragment)
+			resultCh <- profileResult{resource: resource, err: err}
+		}()
+	}
+
 	var lastErr error
-	for _, profile := range c.orderedProfiles() {
-		pageToken := "1"
-		for {
-			u, _ := url.Parse(profile.BaseURL)
-			u.Path = "/rmh/v1/resources:page"
-			query := u.Query()
-
-			filter := fmt.Sprintf(`(resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume") AND %s="*%s*"`, field, fragment)
-			query.Set("filter", filter)
-			query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
-			query.Set("page_token", pageToken)
-			u.RawQuery = query.Encode()
-
-			var payload storageVolumePageResponse
-			if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
-				lastErr = err
-				break
-			}
-
-			for i := range payload.Resources {
-				resource := &payload.Resources[i]
-				resource.ProfileName = profile.Name
-				if field == "name" {
-					if strings.EqualFold(strings.TrimSpace(resource.Name), fragment) || strings.Contains(strings.TrimSpace(resource.Name), fragment) {
-						return resource, nil
-					}
-					continue
-				}
-				if strings.EqualFold(strings.TrimSpace(resource.ID), fragment) || strings.Contains(strings.TrimSpace(resource.ID), fragment) {
-					return resource, nil
-				}
-			}
-
-			nextPageToken := strings.TrimSpace(payload.NextPageToken)
-			if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
-				break
-			}
-			pageToken = nextPageToken
+	for range profiles {
+		result := <-resultCh
+		if result.resource != nil {
+			cancel()
+			return result.resource, nil
+		}
+		if result.err != nil {
+			lastErr = result.err
 		}
 	}
 	if lastErr != nil {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("storage volume resource with fragment %q not found", fragment)
+}
+
+func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragmentWithProfile(ctx context.Context, profile clientProfile, field string, fragment string) (*StorageVolumeResource, error) {
+	pageToken := "1"
+	for {
+		u, _ := url.Parse(profile.BaseURL)
+		u.Path = "/rmh/v1/resources:page"
+		query := u.Query()
+
+		filter := fmt.Sprintf(`(resource_type="storage.afs.v1.volume" OR resource_type="storage.afs.v2.volume") AND %s="*%s*"`, field, fragment)
+		query.Set("filter", filter)
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("page_token", pageToken)
+		u.RawQuery = query.Encode()
+
+		var payload storageVolumePageResponse
+		if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
+			return nil, err
+		}
+
+		for i := range payload.Resources {
+			resource := &payload.Resources[i]
+			resource.ProfileName = profile.Name
+			if field == "name" {
+				if strings.EqualFold(strings.TrimSpace(resource.Name), fragment) || strings.Contains(strings.TrimSpace(resource.Name), fragment) {
+					return resource, nil
+				}
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(resource.ID), fragment) || strings.Contains(strings.TrimSpace(resource.ID), fragment) {
+				return resource, nil
+			}
+		}
+
+		nextPageToken := strings.TrimSpace(payload.NextPageToken)
+		if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
+			break
+		}
+		pageToken = nextPageToken
+	}
+	return nil, nil
 }
 
 func uidSearchCandidates(uid string) []string {

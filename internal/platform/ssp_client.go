@@ -209,6 +209,14 @@ func (c *VirtualClusterClient) ConfiguredSubscriptionForRegion(region string) st
 }
 
 func (c *VirtualClusterClient) FindSSPTrainingJobs(ctx context.Context, subscription string, region string, workspace string, identifier string) ([]SSPTrainingJob, error) {
+	return c.findSSPTrainingJobs(ctx, "", subscription, region, workspace, identifier)
+}
+
+func (c *VirtualClusterClient) FindSSPTrainingJobsForProfile(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPTrainingJob, error) {
+	return c.findSSPTrainingJobs(ctx, profileName, subscription, region, workspace, identifier)
+}
+
+func (c *VirtualClusterClient) findSSPTrainingJobs(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPTrainingJob, error) {
 	subscription = strings.TrimSpace(subscription)
 	region = strings.TrimSpace(region)
 	workspace = strings.TrimSpace(workspace)
@@ -227,6 +235,13 @@ func (c *VirtualClusterClient) FindSSPTrainingJobs(ctx context.Context, subscrip
 	}
 
 	profiles := c.profilesForRegion(region)
+	if strings.TrimSpace(profileName) != "" {
+		profile, ok := c.clientProfileByName(profileName)
+		if !ok {
+			return nil, fmt.Errorf("platform profile %q not found", profileName)
+		}
+		profiles = []clientProfile{profile}
+	}
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
