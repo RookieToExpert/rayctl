@@ -45,3 +45,14 @@ func TestAuthSSPCommandsAndEnvironmentFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthLoginSupportsEnvironmentSelection(t *testing.T) {
+	command, _, err := newAuthCmd().Find([]string{"login"})
+	if err != nil {
+		t.Fatalf("find auth login: %v", err)
+	}
+	flag := command.Flags().Lookup("environment")
+	if flag == nil || flag.Shorthand != "v" {
+		t.Fatal("auth login --environment/-v flag missing")
+	}
+}

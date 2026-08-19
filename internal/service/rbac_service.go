@@ -35,6 +35,14 @@ type RBACGetResult struct {
 	Items         []RBACBindingItem
 }
 
+type RBACGetRequest struct {
+	ClusterIdentifier string
+	Environment       string
+	LabelSelector     string
+	BearerToken       string
+	ProfileTokens     map[string]string
+}
+
 type RBACBindingItem struct {
 	Kind      string
 	Namespace string
@@ -542,24 +550,43 @@ func marshalRBACPayload(value any) string {
 }
 
 func (s *RBACService) Get(ctx context.Context, clusterIdentifier string, labelSelector string, bearerToken string) (*RBACGetResult, error) {
+	return s.GetWithOptions(ctx, RBACGetRequest{
+		ClusterIdentifier: clusterIdentifier,
+		LabelSelector:     labelSelector,
+		BearerToken:       bearerToken,
+	})
+}
+
+func (s *RBACService) GetWithOptions(ctx context.Context, req RBACGetRequest) (*RBACGetResult, error) {
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for rbac lookup")
 	}
-	clusterIdentifier = strings.TrimSpace(clusterIdentifier)
+	clusterIdentifier := strings.TrimSpace(req.ClusterIdentifier)
 	if clusterIdentifier == "" {
 		return nil, fmt.Errorf("cluster identifier is required")
 	}
-	labelSelector = strings.TrimSpace(labelSelector)
+	labelSelector := strings.TrimSpace(req.LabelSelector)
 	if labelSelector == "" {
 		labelSelector = defaultRBACLabelSelector
 	}
-	if strings.TrimSpace(bearerToken) == "" {
-		return nil, fmt.Errorf("rbac get requires console bearer token, please set RAYCTL_BEARER_TOKEN or BEARER_TOKEN")
-	}
 
-	clusterName, clusterUID, profileName, err := s.resolveCluster(ctx, clusterIdentifier)
+	clusterName, clusterUID, profileName, err := s.resolveClusterForEnvironment(ctx, clusterIdentifier, req.Environment)
 	if err != nil {
 		return nil, err
+	}
+	bearerToken := strings.TrimSpace(req.ProfileTokens[profileName])
+	if bearerToken == "" {
+		bearerToken = strings.TrimSpace(req.BearerToken)
+	}
+	if bearerToken == "" {
+		environment := s.vcClient.ProfileEnvironment(profileName)
+		return nil, fmt.Errorf(
+			"virtual cluster %q resolved to profile %q (%s), but no valid console id_token exists for that profile; run rayctl auth login -v %s, or provide RAYCTL_BEARER_TOKEN",
+			clusterName,
+			profileName,
+			firstNonEmpty(environment, "unknown"),
+			firstNonEmpty(environment, profileName),
+		)
 	}
 	clusterRef := "vc-" + clusterUID
 
@@ -617,7 +644,11 @@ func (s *RBACService) Get(ctx context.Context, clusterIdentifier string, labelSe
 }
 
 func (s *RBACService) resolveCluster(ctx context.Context, identifier string) (string, string, string, error) {
-	clusters, err := s.vcClient.ListVirtualClusters(ctx)
+	return s.resolveClusterForEnvironment(ctx, identifier, "")
+}
+
+func (s *RBACService) resolveClusterForEnvironment(ctx context.Context, identifier string, environment string) (string, string, string, error) {
+	clusters, err := s.vcClient.ListVirtualClustersForEnvironment(ctx, environment)
 	if err != nil {
 		return "", "", "", fmt.Errorf("list virtual clusters: %w", err)
 	}
@@ -660,26 +691,37 @@ func (s *RBACService) resolveCluster(ctx context.Context, identifier string) (st
 	case len(exact) == 1:
 		return firstNonEmpty(exact[0].Name, exact[0].DisplayName, "vc-"+exact[0].UID), exact[0].UID, exact[0].ProfileName, nil
 	case len(exact) > 1:
-		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s", identifier, rbacClusterCandidates(exact))
+		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s; use -v d, -v pt, or -v dcloud to select an environment", identifier, s.rbacClusterCandidates(exact))
 	case len(fuzzy) == 1:
 		return firstNonEmpty(fuzzy[0].Name, fuzzy[0].DisplayName, "vc-"+fuzzy[0].UID), fuzzy[0].UID, fuzzy[0].ProfileName, nil
 	case len(fuzzy) > 1:
-		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s", identifier, rbacClusterCandidates(fuzzy))
+		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s; use -v d, -v pt, or -v dcloud to select an environment", identifier, s.rbacClusterCandidates(fuzzy))
 	default:
-		if strings.HasPrefix(identifier, "vc-") {
-			uid := strings.TrimPrefix(identifier, "vc-")
-			if uid != "" {
-				return identifier, uid, "", nil
-			}
+		if name, uid, ok := rawRBACClusterReference(identifier); ok {
+			return name, uid, "", nil
 		}
 		return "", "", "", fmt.Errorf("virtual cluster %q not found", identifier)
 	}
 }
 
-func rbacClusterCandidates(items []platform.VirtualCluster) string {
+func rawRBACClusterReference(identifier string) (string, string, bool) {
+	identifier = strings.TrimSpace(identifier)
+	uid := strings.TrimPrefix(identifier, "vc-")
+	if looksLikeUUID(uid) {
+		return "vc-" + uid, uid, true
+	}
+	if looksLikeUUID(identifier) {
+		return "vc-" + identifier, identifier, true
+	}
+	return "", "", false
+}
+
+func (s *RBACService) rbacClusterCandidates(items []platform.VirtualCluster) string {
 	parts := make([]string, 0, len(items))
 	for _, item := range items {
-		parts = append(parts, firstNonEmpty(item.Name, item.DisplayName, "vc-"+item.UID))
+		name := firstNonEmpty(item.Name, item.DisplayName, "vc-"+item.UID)
+		environment := s.vcClient.ProfileEnvironment(item.ProfileName)
+		parts = append(parts, fmt.Sprintf("%s [%s/%s]", name, firstNonEmpty(environment, "unknown"), item.ProfileName))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ", ")

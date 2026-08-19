@@ -24,6 +24,9 @@ const (
 	genericRoleLabelPrefix        = "node-role.sensecore.cn/"
 	nodeVClusterNamespaceLabelKey = "cluster.x-k8s.io/vcluster-namespace"
 	nsVClusterNamespaceLabelKey   = "vcluster.loft.sh/vcluster-namespace"
+	nsVirtualNameLabelKey         = "vcluster.loft.sh/custom-namespace-name"
+	nsVirtualNameAnnotationKey    = "vcluster.loft.sh/object-name"
+	nodeQueueUIDLabelKey          = "resource.compute.sensecore.cn/queue-uid"
 	metaxGPUResourceName          = "metax-tech.com/gpu"
 	huaweiGPUResourceName         = "huawei.com/Ascend910"
 	metaxGPUTopologyAnnotationKey = "metax-tech.com/gpu.topology.zones"
@@ -192,7 +195,7 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 		if err != nil {
 			return nil, err
 		}
-	default:
+	case nodeHasUserWorkloadScope(node):
 		// Fallback for VC kubeconfig: host-cluster namespace label mapping is not
 		// available there, so we directly inspect pods visible to the current
 		// kubeconfig on the target node.
@@ -338,6 +341,13 @@ func (s *NodeService) listTargetNamespacesForNode(ctx context.Context, node *cor
 
 	items := make([]string, 0, len(namespaces.Items))
 	for _, namespace := range namespaces.Items {
+		virtualName := firstNonEmpty(
+			namespace.Labels[nsVirtualNameLabelKey],
+			namespace.Annotations[nsVirtualNameAnnotationKey],
+		)
+		if isSystemWorkloadNamespace(virtualName) {
+			continue
+		}
 		items = append(items, namespace.Name)
 	}
 
@@ -356,7 +366,7 @@ func (s *NodeService) listVisiblePodsOnNode(ctx context.Context, nodeName string
 
 	filtered := make([]corev1.Pod, 0, len(pods.Items))
 	for _, pod := range pods.Items {
-		if pod.Status.Phase != corev1.PodRunning {
+		if !isUserWorkloadPod(pod) {
 			continue
 		}
 		filtered = append(filtered, pod)
@@ -402,7 +412,7 @@ func (s *NodeService) listPodsOnNodeInNamespaces(ctx context.Context, nodeName s
 
 			filtered := make([]corev1.Pod, 0, len(pods.Items))
 			for _, pod := range pods.Items {
-				if pod.Status.Phase != corev1.PodRunning {
+				if !isUserWorkloadPod(pod) {
 					continue
 				}
 				filtered = append(filtered, pod)
@@ -431,6 +441,42 @@ func (s *NodeService) listPodsOnNodeInNamespaces(ctx context.Context, nodeName s
 	})
 
 	return result, nil
+}
+
+func nodeHasUserWorkloadScope(node *corev1.Node) bool {
+	if node == nil {
+		return false
+	}
+	return nodeResolveClusterUID(node.Labels) != "" || strings.TrimSpace(node.Labels[nodeQueueUIDLabelKey]) != ""
+}
+
+func isUserWorkloadPod(pod corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, owner := range pod.OwnerReferences {
+		switch strings.ToLower(strings.TrimSpace(owner.Kind)) {
+		case "daemonset", "node":
+			return false
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(pod.Spec.PriorityClassName)), "system-") {
+		return false
+	}
+	if isSystemWorkloadNamespace(pod.Namespace) {
+		return false
+	}
+	return true
+}
+
+func isSystemWorkloadNamespace(namespace string) bool {
+	switch strings.ToLower(strings.TrimSpace(namespace)) {
+	case "kube-system", "kube-public", "kube-node-lease", "infra", "prod-boson",
+		"volcano-system", "lws-system", "mindx-dl", "studio-ams-system", "karmada-cluster":
+		return true
+	default:
+		return false
+	}
 }
 
 func summarizePodRequests(pods []corev1.Pod) (resource.Quantity, resource.Quantity, int64, []string) {

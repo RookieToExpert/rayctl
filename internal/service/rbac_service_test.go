@@ -128,3 +128,17 @@ func TestFindClusterRoleBindingByNameRequiresExactMatch(t *testing.T) {
 		t.Fatalf("findClusterRoleBindingByName() = %#v, %v", binding, ok)
 	}
 }
+
+func TestRawRBACClusterReferenceRejectsHumanVCName(t *testing.T) {
+	if _, _, ok := rawRBACClusterReference("vc-llm-audit-ng"); ok {
+		t.Fatal("human-readable VC name must not be treated as a raw VC UID")
+	}
+
+	name, uid, ok := rawRBACClusterReference("vc-019ab3e1-2b4f-7699-bfe7-244713e8433e")
+	if !ok {
+		t.Fatal("VC UID reference was not accepted")
+	}
+	if name != "vc-019ab3e1-2b4f-7699-bfe7-244713e8433e" || uid != "019ab3e1-2b4f-7699-bfe7-244713e8433e" {
+		t.Fatalf("unexpected raw VC reference: name=%q uid=%q", name, uid)
+	}
+}

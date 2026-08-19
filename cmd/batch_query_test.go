@@ -42,3 +42,17 @@ func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
 		})
 	}
 }
+
+func TestRBACGetSupportsEnvironmentSelection(t *testing.T) {
+	command, _, err := newRBACCmd().Find([]string{"get"})
+	if err != nil {
+		t.Fatalf("find rbac get: %v", err)
+	}
+	flag := command.Flags().Lookup("environment")
+	if flag == nil {
+		t.Fatal("rbac get --environment/-v flag missing")
+	}
+	if flag.Shorthand != "v" {
+		t.Fatalf("rbac get environment shorthand = %q, want v", flag.Shorthand)
+	}
+}

@@ -12,6 +12,7 @@ import (
 
 	"rayctl/internal/platform"
 	"rayctl/internal/service"
+	authsession "rayctl/internal/session"
 	"rayctl/pkg/output"
 )
 
@@ -208,6 +209,7 @@ func newRBACRemoveCmd() *cobra.Command {
 func newRBACGetCmd() *cobra.Command {
 	var selector string
 	var long bool
+	var environment string
 
 	cmd := &cobra.Command{
 		Use:   "get <vc-name-or-uid> [vc-name-or-uid...]",
@@ -220,7 +222,7 @@ func newRBACGetCmd() *cobra.Command {
 			}
 
 			ctx := context.Background()
-			bearerToken, err := bearerTokenForCommand(ctx, cmd, vcClient, "")
+			profileTokens, bearerToken, err := rbacGetBearerTokens(ctx, cmd, vcClient)
 			if err != nil {
 				return err
 			}
@@ -231,7 +233,13 @@ func newRBACGetCmd() *cobra.Command {
 				err        error
 			}
 			queries := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
-				result, err := rbacService.Get(ctx, identifier, selector, bearerToken)
+				result, err := rbacService.GetWithOptions(ctx, service.RBACGetRequest{
+					ClusterIdentifier: identifier,
+					Environment:       environment,
+					LabelSelector:     selector,
+					BearerToken:       bearerToken,
+					ProfileTokens:     profileTokens,
+				})
 				return queryResult{identifier, result, err}
 			})
 			valid := make([]*service.RBACGetResult, 0)
@@ -243,10 +251,12 @@ func newRBACGetCmd() *cobra.Command {
 				}
 				valid = append(valid, query.result)
 			}
-			if long && len(args) == 1 && len(valid) == 1 {
-				output.PrintRBACGetResult(valid[0], true)
-			} else {
-				output.PrintRBACGetSummary(valid, len(args) > 1, long)
+			if len(valid) > 0 {
+				if long && len(args) == 1 && len(valid) == 1 {
+					output.PrintRBACGetResult(valid[0], true)
+				} else {
+					output.PrintRBACGetSummary(valid, len(args) > 1, long)
+				}
 			}
 			return errors.Join(queryErrors...)
 		},
@@ -254,7 +264,34 @@ func newRBACGetCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&selector, "selector", "s", "", "RoleBinding/ClusterRoleBinding labelSelector，默认 resource.compute.sensecore.cn/control")
 	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 Binding 名和精确到秒的创建时间")
+	cmd.Flags().StringVarP(&environment, "environment", "v", "", "限定平台环境: d、pt/p、dcloud；默认自动查询所有已配置环境")
 	return cmd
+}
+
+func rbacGetBearerTokens(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient) (map[string]string, string, error) {
+	if token := strings.TrimSpace(rbacBearerToken()); token != "" {
+		return nil, token, nil
+	}
+
+	store, err := authsession.Load("")
+	if err != nil {
+		return nil, "", err
+	}
+	profileTokens := make(map[string]string)
+	for profileName, item := range store.Profiles {
+		if token, ok := authsession.ValidIDToken(item); ok {
+			profileTokens[profileName] = token
+		}
+	}
+	if len(profileTokens) > 0 {
+		return profileTokens, "", nil
+	}
+
+	token, err := bearerTokenForCommand(ctx, cmd, vcClient, "")
+	if err != nil {
+		return nil, "", err
+	}
+	return map[string]string{sessionProfileName(vcClient): token}, "", nil
 }
 
 func rbacBearerToken() string {

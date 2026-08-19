@@ -801,6 +801,46 @@ func (c *VirtualClusterClient) ResolveProfileName(environment string) (string, e
 	return "", fmt.Errorf("environment %q matches multiple profiles (%s); please select the matching tenant as current_profile", environment, strings.Join(names, ", "))
 }
 
+// SelectProfileForProcess switches only this in-memory client. It does not
+// rewrite platform.json and is useful for one-off commands such as auth login
+// that need to cache credentials for a non-current environment.
+func (c *VirtualClusterClient) SelectProfileForProcess(environment string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("platform client is unavailable")
+	}
+	profileName, err := c.ResolveProfileName(environment)
+	if err != nil {
+		return "", err
+	}
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return "", fmt.Errorf("platform profile %q not found", profileName)
+	}
+	c.currentProfile = profile.Name
+	c.accessKey = profile.AccessKey
+	c.secretKey = profile.SecretKey
+	c.baseURL = profile.BaseURL
+	c.kubernetesBaseURL = profile.KubernetesBaseURL
+	c.iamBaseURL = profile.IAMBaseURL
+	c.subscription = profile.Subscription
+	c.resourceGroup = profile.ResourceGroup
+	c.region = profile.Region
+	return profile.Name, nil
+}
+
+// ProfileEnvironment returns the user-facing environment for a configured
+// profile. It is intended for diagnostics and ambiguity messages.
+func (c *VirtualClusterClient) ProfileEnvironment(profileName string) string {
+	if c == nil {
+		return ""
+	}
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return ""
+	}
+	return profileEnvironment(profile)
+}
+
 func normalizeProfileEnvironment(environment string) string {
 	switch strings.ToLower(strings.TrimSpace(environment)) {
 	case "", "current", "default":

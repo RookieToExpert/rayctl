@@ -48,6 +48,26 @@ func (c *VirtualClusterClient) ListVirtualClusters(ctx context.Context) ([]Virtu
 	return c.listVirtualClusters(ctx)
 }
 
+// ListVirtualClustersForEnvironment lists VCs across every configured profile
+// by default. An explicit environment narrows the lookup to the matching
+// tenant profile so callers can disambiguate duplicate VC names safely.
+func (c *VirtualClusterClient) ListVirtualClustersForEnvironment(ctx context.Context, environment string) ([]VirtualCluster, error) {
+	environment = strings.TrimSpace(environment)
+	if environment == "" {
+		return c.listVirtualClustersForProfiles(ctx, c.orderedProfiles())
+	}
+
+	profileName, err := c.ResolveProfileName(environment)
+	if err != nil {
+		return nil, err
+	}
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listVirtualClustersForProfiles(ctx, []clientProfile{profile})
+}
+
 // FindExactVirtualCluster resolves a VC name in the current profile through
 // the single-resource API. Callers can explicitly fall back to profile lists
 // when they intentionally support fuzzy or cross-profile identifiers.
