@@ -79,6 +79,25 @@ func TestNormalizeSSPJobState(t *testing.T) {
 	}
 }
 
+func TestResolveJobRegionDefaultsToD(t *testing.T) {
+	service := NewSSPJobService(fake.NewSimpleClientset(), nil)
+	if got := service.resolveJobRegion(t.Context(), nil); got != "cn-pj-01" {
+		t.Fatalf("resolveJobRegion() = %q, want cn-pj-01", got)
+	}
+}
+
+func TestResolveJobRegionUsesDetectedPodNode(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:   "host-pt",
+		Labels: map[string]string{sspNodeZoneLabel: "cn-pj-03a"},
+	}}
+	pods := []corev1.Pod{{Spec: corev1.PodSpec{NodeName: node.Name}}}
+	service := NewSSPJobService(fake.NewSimpleClientset(node), nil)
+	if got := service.resolveJobRegion(t.Context(), pods); got != "cn-pj-03" {
+		t.Fatalf("resolveJobRegion() = %q, want cn-pj-03", got)
+	}
+}
+
 func TestFilterSSPPodsForJobPrefersUID(t *testing.T) {
 	pods := []corev1.Pod{
 		{ObjectMeta: metav1.ObjectMeta{Name: "wanted", Labels: map[string]string{sspWorkloadUIDLabel: "uid-1"}}},
@@ -110,6 +129,33 @@ func TestMakeSSPPodResourceItemsMatchesTask(t *testing.T) {
 	}
 	if len(nodes) != 1 || nodes[0] != "host-1" {
 		t.Fatalf("unexpected nodes: %#v", nodes)
+	}
+}
+
+func TestMakeSSPPodResourceItemsFallsBackToPodMachineType(t *testing.T) {
+	pods := []corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-worker-0"},
+		Spec: corev1.PodSpec{
+			NodeName:     "host-1",
+			NodeSelector: map[string]string{sspMachineTypeLabel: "h2ls.ru.k10"},
+		},
+	}}
+
+	items, _ := makeSSPPodResourceItems(pods, nil)
+	if len(items) != 1 || items[0].MachineType != "h2ls.ru.k10" {
+		t.Fatalf("unexpected pod resources: %#v", items)
+	}
+}
+
+func TestEnrichSSPPodMachineTypesFallsBackToAssignedNode(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:   "host-1",
+		Labels: map[string]string{sspMachineTypeLabel: "h2ls.ru.k10"},
+	}}
+	service := NewSSPJobService(fake.NewSimpleClientset(node), nil)
+	items := service.enrichSSPPodMachineTypes(t.Context(), []SSPJobPodResourceItem{{Pod: "demo-0", Node: "host-1"}})
+	if len(items) != 1 || items[0].MachineType != "h2ls.ru.k10" {
+		t.Fatalf("unexpected enriched resources: %#v", items)
 	}
 }
 

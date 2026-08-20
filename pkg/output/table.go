@@ -46,6 +46,14 @@ func noWrapCellsForSingleColumn(rowCount int, col int) [][2]int {
 	return result
 }
 
+func noWrapCellsForColumns(rowCount int, columns ...int) [][2]int {
+	cells := make([][2]int, 0, rowCount*len(columns))
+	for _, column := range columns {
+		cells = append(cells, noWrapCellsForSingleColumn(rowCount, column)...)
+	}
+	return cells
+}
+
 func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total int, start int, end int, limit int, showProdRole bool, longOutput bool) {
 	if resolvedSelector == "" {
 		fmt.Fprintln(os.Stdout, "Selector: <all nodes>")
@@ -342,9 +350,11 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 		{"SUBMITTER", emptyDash(result.Submitter)},
 		{"FRAMEWORK", emptyDash(result.Framework)},
 		{"PRIORITY", emptyDash(result.Priority)},
-		{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
 		{"CREATED", emptyDash(result.CreatedAt)},
 		{"STARTED", emptyDash(result.StartedAt)},
+	}
+	if longOutput {
+		summaryRows = append(summaryRows, []string{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)})
 	}
 	if result.Terminal {
 		summaryRows = append(summaryRows, []string{"ENDED", emptyDash(result.EndedAt)})
@@ -374,7 +384,7 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 		tableOptions{noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(12, 1)...)},
 	)
 
-	if len(result.PodResources) > 0 {
+	if longOutput && len(result.PodResources) > 0 {
 		fmt.Fprintln(os.Stdout)
 		rows := make([][]string, 0, len(result.PodResources))
 		for _, pod := range result.PodResources {
@@ -396,7 +406,7 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 		)
 	}
 
-	if len(result.PersistentVolumeClaims) > 0 {
+	if longOutput && len(result.PersistentVolumeClaims) > 0 {
 		fmt.Fprintln(os.Stdout)
 		rows := make([][]string, 0, len(result.PersistentVolumeClaims))
 		for _, pvc := range result.PersistentVolumeClaims {
@@ -423,7 +433,7 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 	}
 }
 
-func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool) {
+func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool, debugTiming bool) {
 	if result == nil {
 		return
 	}
@@ -495,7 +505,7 @@ func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool) {
 		)
 	}
 
-	if len(result.PersistentVolumeClaims) > 0 {
+	if longOutput && len(result.PersistentVolumeClaims) > 0 {
 		fmt.Fprintln(os.Stdout)
 		pvcRows := make([][]string, 0, len(result.PersistentVolumeClaims))
 		for _, pvc := range result.PersistentVolumeClaims {
@@ -515,6 +525,24 @@ func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool) {
 			logRows = append(logRows, []string{line})
 		}
 		printBoxTableWithMaxWidths([]string{"LATEST LOGS"}, logRows, []int{110})
+	}
+	if debugTiming {
+		fmt.Fprintln(os.Stdout)
+		printBoxTableWithMaxWidths(
+			[]string{"STEP", "DURATION"},
+			[][]string{
+				{"locate pods", result.Timings.LocatePods.String()},
+				{"resolve region", result.Timings.ResolveRegion.String()},
+				{"workspace", result.Timings.Workspace.String()},
+				{"subscription", result.Timings.Subscription.String()},
+				{"platform aid", result.Timings.PlatformAID.String()},
+				{"refine pods", result.Timings.RefinePods.String()},
+				{"build detail", result.Timings.BuildDetail.String()},
+				{"dnat", result.Timings.DNAT.String()},
+				{"total", result.Timings.Total.String()},
+			},
+			[]int{18, 18},
+		)
 	}
 }
 
@@ -1531,36 +1559,77 @@ func PrintVCNodeList(result *service.VCNodeListResult, longOutput bool) {
 		tableOptions{minWidths: []int{10, 24}},
 	)
 	fmt.Fprintln(os.Stdout)
-	printVCNodeItems(result.Items, longOutput)
+	printVCNodeListItems(result.Items, longOutput)
 }
 
 func PrintVCNodeListMany(results []*service.VCNodeListResult, longOutput bool) {
 	rows := make([][]string, 0)
 	for _, result := range results {
 		for _, item := range result.Items {
-			row := []string{emptyDash(result.ClusterName), emptyDash(item.HostName), emptyDash(item.HostIP), emptyDash(item.State), emptyDash(item.MachineType), emptyDash(item.Model)}
 			if longOutput {
-				row = append(row, emptyDash(item.Name), emptyDash(item.UID))
+				rows = append(rows, []string{emptyDash(result.ClusterName), emptyDash(item.HostName), emptyDash(item.Model), emptyDash(item.Name), emptyDash(item.UID)})
+			} else {
+				rows = append(rows, []string{emptyDash(result.ClusterName), emptyDash(item.HostName), emptyDash(item.HostIP), emptyDash(item.State), emptyDash(item.MachineType)})
 			}
-			rows = append(rows, row)
 		}
 	}
-	headers := []string{"VC", "HOST", "IP", "STATE", "MACHINE TYPE", "MODEL"}
-	widths := []int{28, 20, 15, 8, 14, 18}
-	minimums := []int{14, 16, 15, 8, 12, 10}
+	headers := []string{"VC", "HOST", "IP", "STATE", "MACHINE TYPE"}
+	widths := []int{28, 20, 15, 10, 18}
+	minimums := []int{14, 16, 15, 8, 12}
 	if longOutput {
-		headers = append(headers, "ACN", "ACN UID")
-		widths = append(widths, 18, 36)
-		minimums = append(minimums, 12, 36)
+		headers = []string{"VC", "HOST", "MODEL", "ACN", "ACN UID"}
+		widths = []int{28, 22, 24, 48, 36}
+		minimums = []int{16, 20, 14, 28, 36}
 	}
 	if len(rows) == 0 {
-		row := []string{"-", "-", "-", "-", "-", "-"}
-		if longOutput {
-			row = append(row, "-", "-")
+		row := make([]string, len(headers))
+		for index := range row {
+			row[index] = "-"
 		}
 		rows = append(rows, row)
 	}
-	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
+	noWrapColumns := []int{len(headers) - 1}
+	if longOutput {
+		noWrapColumns = []int{1, 3, 4}
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{
+		noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), noWrapColumns...)...),
+		minWidths:   minimums,
+	})
+}
+
+func printVCNodeListItems(items []service.VCNodeListItem, longOutput bool) {
+	headers := []string{"HOST", "IP", "STATE", "MACHINE TYPE"}
+	widths := []int{22, 16, 10, 20}
+	minimums := []int{20, 15, 8, 12}
+	if longOutput {
+		headers = []string{"HOST", "MODEL", "ACN", "ACN UID"}
+		widths = []int{22, 24, 52, 36}
+		minimums = []int{20, 14, 32, 36}
+	}
+	rows := make([][]string, 0, maxInt(1, len(items)))
+	for _, item := range items {
+		if longOutput {
+			rows = append(rows, []string{emptyDash(item.HostName), emptyDash(item.Model), emptyDash(item.Name), emptyDash(item.UID)})
+		} else {
+			rows = append(rows, []string{emptyDash(item.HostName), emptyDash(item.HostIP), emptyDash(item.State), emptyDash(item.MachineType)})
+		}
+	}
+	if len(rows) == 0 {
+		row := make([]string, len(headers))
+		for index := range row {
+			row[index] = "-"
+		}
+		rows = append(rows, row)
+	}
+	noWrapColumns := []int{len(headers) - 1}
+	if longOutput {
+		noWrapColumns = []int{0, 2, 3}
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{
+		noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), noWrapColumns...)...),
+		minWidths:   minimums,
+	})
 }
 
 func PrintVCNodeRemoveResult(result *service.VCNodeRemoveResult, longOutput bool, showPayload bool) {

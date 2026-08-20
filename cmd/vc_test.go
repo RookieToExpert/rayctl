@@ -25,17 +25,27 @@ func TestVCCommandContainsMergedClusterCommands(t *testing.T) {
 	}
 }
 
-func TestLegacyClusterCommandIsHidden(t *testing.T) {
+func TestSSPClusterCommandIsVisible(t *testing.T) {
 	command := newClusterCmd()
-	if !command.Hidden {
-		t.Fatal("legacy cluster command should be hidden")
+	if command.Hidden {
+		t.Fatal("SSP cluster command should be visible")
 	}
-	if command.Deprecated == "" {
-		t.Fatal("legacy cluster command should point users to vc")
+	if command.Deprecated != "" {
+		t.Fatal("SSP cluster command should not be deprecated")
 	}
 	for _, name := range []string{"get", "set"} {
 		if child, _, err := command.Find([]string{name}); err != nil || child == command {
-			t.Fatalf("legacy cluster subcommand %q is missing: %v", name, err)
+			t.Fatalf("cluster subcommand %q is missing: %v", name, err)
 		}
+	}
+	getCommand, _, err := command.Find([]string{"get"})
+	if err != nil {
+		t.Fatalf("find cluster get: %v", err)
+	}
+	if getCommand.Flags().Lookup("region") == nil {
+		t.Fatal("cluster get --region flag is missing")
+	}
+	if err := getCommand.Args(getCommand, []string{"cluster-a3", "cluster-muxi"}); err != nil {
+		t.Fatalf("cluster get should accept multiple identifiers: %v", err)
 	}
 }

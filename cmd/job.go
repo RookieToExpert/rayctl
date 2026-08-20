@@ -23,38 +23,43 @@ import (
 )
 
 const defaultJobGetTimeout = 10 * time.Second
-const jobTypeDetectionTimeout = time.Second
 
 func newJobCmd() *cobra.Command {
 	jobCmd := &cobra.Command{
 		Use:   "job",
-		Short: "查询 Volcano Job",
+		Short: "查询 SSP TrainingJob",
 	}
 
-	jobCmd.AddCommand(newJobGetCmd())
-	jobCmd.AddCommand(newJobCreateCmd())
+	getCmd := newSSPJobGetCmd()
+	legacyCluster := newJobGetClusterCmd()
+	legacyCluster.Deprecated = "请使用 rayctl ecp job get cluster"
+	getCmd.AddCommand(legacyCluster)
+	jobCmd.AddCommand(getCmd)
+
+	legacyCreate := newJobCreateCmd()
+	legacyCreate.Deprecated = "这是 ECP VCJob 创建入口，请使用 rayctl ecp job create"
+	jobCmd.AddCommand(legacyCreate)
 	return jobCmd
 }
 
-func newJobGetCmd() *cobra.Command {
+func newECPJobGetCmd() *cobra.Command {
 	var debugTiming bool
 	var longOutput bool
-	var workspace string
 	var queryTimeout time.Duration
 
 	getCmd := &cobra.Command{
 		Use:   "get <job-name-or-pod-name-or-uid> [job-name-or-pod-name-or-uid...]",
-		Short: "并行查询一个或多个任务，或按 VC 分区列出任务",
-		Long: "根据任务名、Pod 名或 UID 并行查询一个或多个 ECP/SSP 任务详情。\n" +
+		Short: "并行查询一个或多个旧 ECP VCJob，或按 VC 分区列出任务",
+		Long: "根据任务名、Pod 名或 UID 并行查询一个或多个旧 ECP VCJob 详情。\n" +
 			"也可以使用 cluster 子命令查看指定 VC 分区或当前租户全部 VC 的任务列表；默认只显示 Running 和 Pending 任务。",
 		Example: strings.Join([]string{
-			"  rayctl job get example-job",
-			"  rayctl job get job-a job-b job-c",
-			"  rayctl job get cluster vc-a3-intern-delivery",
-			"  rayctl job get cluster vc-a3-intern-delivery pending",
-			"  rayctl job get cluster vc-a3-intern-delivery --all-status",
-			"  rayctl job get cluster -a",
-			"  rayctl job get cluster -a pending",
+			"  rayctl ecp job get example-job",
+			"  rayctl ecp job get job-a job-b job-c",
+			"  rayctl ecp job get cluster vc-a3-intern-delivery",
+			"  rayctl ecp job get cluster vc-a3-intern-delivery pending",
+			"  rayctl ecp job get cluster vc-a3-intern-delivery --all-status",
+			"  rayctl ecp job get cluster -a",
+			"  rayctl ecp job get cluster -a pending",
 		}, "\n"),
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(getCmd *cobra.Command, args []string) error {
@@ -65,14 +70,9 @@ func newJobGetCmd() *cobra.Command {
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
 			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
-			var sspJobService *service.SSPJobService
-			if vcClient != nil {
-				sspJobService = service.NewSSPJobService(clientset, vcClient)
-			}
-			return runParallelJobGet(
-				getCmd.Context(), args, jobService, sspJobService, vcClient,
+			return runParallelECPJobGet(
+				getCmd.Context(), args, jobService, vcClient,
 				jobGetOptions{
-					workspace:   workspace,
 					longOutput:  longOutput,
 					debugTiming: debugTiming,
 					timeout:     queryTimeout,
@@ -83,15 +83,9 @@ func newJobGetCmd() *cobra.Command {
 
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
 	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 master Pod 的最新日志")
-	getCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 SSP workspace 名称，可避免历史任务跨 workspace 查询")
 	getCmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
 	getCmd.AddCommand(newJobGetClusterCmd())
 	return getCmd
-}
-
-func isSSPKubeconfigMismatch(err error) bool {
-	var mismatch *service.SSPKubeconfigMismatchError
-	return errors.As(err, &mismatch)
 }
 
 func formatJobGetError(ctx context.Context, identifier string, timeout time.Duration, err error) error {
@@ -99,15 +93,6 @@ func formatJobGetError(ctx context.Context, identifier string, timeout time.Dura
 		return fmt.Errorf("job %q 查询超过 %s，已自动停止；可能是平台 API、HC API 或 Pending 诊断请求响应较慢，请检查 kubeconfig 与 platform profile，也可通过 --timeout 临时增加查询时间", identifier, timeout)
 	}
 	return fmt.Errorf("job %q: %w", identifier, err)
-}
-
-func jobResultsContainSSPTrainingJob(results []*service.JobGetResult) bool {
-	for _, result := range results {
-		if result != nil && strings.EqualFold(strings.TrimSpace(result.WorkloadType), service.SSPWorkloadTypeTrainingJob) {
-			return true
-		}
-	}
-	return false
 }
 
 func normalizeJobGetIdentifier(value string) string {

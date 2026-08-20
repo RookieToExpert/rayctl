@@ -61,6 +61,45 @@ func TestNormalizeSSPAIDNestedDNATRule(t *testing.T) {
 	}
 }
 
+func TestFindSSPAIDDNATRulesLoadsDetailsWhenDirectRuleIsPartial(t *testing.T) {
+	client := testSSPAIDClient(func(request *http.Request) string {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/natGws"):
+			return `{"nat_gws":[{"id":"nat-rid","name":"nat-one","zone":"cn-pj-01a"}]}`
+		case strings.HasSuffix(request.URL.Path, "/dnatRules"):
+			return `{"dnat_rules":[{"properties":{"external_ip":"10.140.158.149","external_port":"11960","internal_ip":"10.119.138.158","internal_port":"22","protocol":"TCP"}}]}`
+		default:
+			t.Fatalf("unexpected request: %s", request.URL.String())
+			return `{}`
+		}
+	})
+	profile := client.profiles["pt"]
+	profile.BaseURL = "https://management.d.pjlab.org.cn"
+	profile.Region = "cn-pj-01"
+	client.profiles["pt"] = profile
+	aid := SSPAID{TenantID: "tenant-1", Zone: "cn-pj-01a"}
+	aid.Properties.HostIP = "10.119.138.158"
+	aid.Properties.DNATRules = []SSPAIDDNATRule{{ExternalIP: "10.140.158.149", ExternalPort: "11960", Protocol: "TCP"}}
+	aid.Properties.Workload.NetworkInterfaces = append(aid.Properties.Workload.NetworkInterfaces, struct {
+		Properties struct {
+			VPCInfo struct {
+				UID         string `json:"uid"`
+				Name        string `json:"name"`
+				DisplayName string `json:"display_name"`
+			} `json:"vpc_info"`
+		} `json:"properties"`
+	}{})
+	aid.Properties.Workload.NetworkInterfaces[0].Properties.VPCInfo.UID = "vpc-uid"
+
+	rules, err := client.FindSSPAIDDNATRules(t.Context(), aid)
+	if err != nil {
+		t.Fatalf("FindSSPAIDDNATRules returned error: %v", err)
+	}
+	if len(rules) != 1 || rules[0].InternalIP != "10.119.138.158" || rules[0].InternalPort != "22" {
+		t.Fatalf("unexpected DNAT rules: %#v", rules)
+	}
+}
+
 func testSSPAIDClient(response func(*http.Request) string) *VirtualClusterClient {
 	return &VirtualClusterClient{
 		currentProfile: "pt",

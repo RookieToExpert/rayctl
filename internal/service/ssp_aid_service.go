@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,6 +59,19 @@ type SSPAIDGetResult struct {
 	InspectPod             string
 	CheckEvidence          []CheckEvidenceItem
 	RecentLogLines         []string
+	Timings                SSPAIDGetTimings
+}
+
+type SSPAIDGetTimings struct {
+	LocatePods    time.Duration
+	ResolveRegion time.Duration
+	Workspace     time.Duration
+	Subscription  time.Duration
+	PlatformAID   time.Duration
+	RefinePods    time.Duration
+	BuildDetail   time.Duration
+	DNAT          time.Duration
+	Total         time.Duration
 }
 
 type SSPAIDResourceItem struct {
@@ -103,6 +117,8 @@ func (s *SSPAIDService) GetAID(ctx context.Context, identifier string, workspace
 }
 
 func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, workspace string, requestedRegion string, includeLogs bool) (*SSPAIDGetResult, error) {
+	startedAt := time.Now()
+	timings := SSPAIDGetTimings{}
 	if s.clientset == nil {
 		return nil, fmt.Errorf("kubernetes client is required")
 	}
@@ -118,16 +134,24 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 		identifier = strings.ToLower(identifier)
 	}
 
+	stageStartedAt := time.Now()
 	seedPods, err := s.findAIDPods(ctx, identifier, "")
+	timings.LocatePods = time.Since(stageStartedAt)
 	if err != nil {
 		return nil, fmt.Errorf("locate AID pods in HC: %w", err)
 	}
+	stageStartedAt = time.Now()
 	region := s.resolveAIDRegion(ctx, requestedRegion, seedPods)
+	timings.ResolveRegion = time.Since(stageStartedAt)
+	stageStartedAt = time.Now()
 	workspaces, err := s.sspBase.resolveWorkspaceCandidatesForRegion(ctx, workspace, seedPods, region)
+	timings.Workspace = time.Since(stageStartedAt)
 	if err != nil {
 		return nil, err
 	}
+	stageStartedAt = time.Now()
 	subscription, err := s.sspBase.resolveSubscriptionForRegion(ctx, seedPods, region)
+	timings.Subscription = time.Since(stageStartedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +160,9 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	if looksLikeUUID(identifier) && len(seedPods) > 0 {
 		lookupIdentifier = firstNonEmpty(seedPods[0].Labels[sspWorkloadNameLabel], identifier)
 	}
+	stageStartedAt = time.Now()
 	candidates, lookupErr := s.findPlatformAIDs(ctx, subscription, region, lookupIdentifier, workspaces)
+	timings.PlatformAID = time.Since(stageStartedAt)
 	if len(candidates) == 0 {
 		if lookupErr != nil {
 			return nil, fmt.Errorf("query SSP AID API: %w", lookupErr)
@@ -157,6 +183,7 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 
 	candidate := candidates[0]
 	aid := candidate.AID
+	stageStartedAt = time.Now()
 	pods := filterAIDPods(seedPods, aid)
 	hostNamespace := ""
 	if len(pods) > 0 {
@@ -168,14 +195,26 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 			return nil, fmt.Errorf("list AID pods: %w", err)
 		}
 	}
+	timings.RefinePods = time.Since(stageStartedAt)
 
-	dnatResult := asyncCall(ctx, func(ctx context.Context) ([]platform.SSPAIDDNATRule, error) {
-		return s.platform.FindSSPAIDDNATRules(ctx, aid)
-	})
-	result := s.buildResult(ctx, aid, hostNamespace, pods, nil, includeLogs)
-	if resolved := <-dnatResult; resolved.Err == nil {
-		appendSSPAIDDNATRules(result, resolved.Value)
+	type timedDNATResult struct {
+		Rules    []platform.SSPAIDDNATRule
+		Duration time.Duration
 	}
+	dnatResult := asyncCall(ctx, func(ctx context.Context) (timedDNATResult, error) {
+		dnatStartedAt := time.Now()
+		rules, err := s.platform.FindSSPAIDDNATRules(ctx, aid)
+		return timedDNATResult{Rules: rules, Duration: time.Since(dnatStartedAt)}, err
+	})
+	stageStartedAt = time.Now()
+	result := s.buildResult(ctx, aid, hostNamespace, pods, nil, includeLogs)
+	timings.BuildDetail = time.Since(stageStartedAt)
+	if resolved := <-dnatResult; resolved.Err == nil {
+		appendSSPAIDDNATRules(result, resolved.Value.Rules)
+		timings.DNAT = resolved.Value.Duration
+	}
+	timings.Total = time.Since(startedAt)
+	result.Timings = timings
 	return result, nil
 }
 
@@ -294,7 +333,9 @@ func (s *SSPAIDService) findAIDPods(ctx context.Context, identifier string, name
 		selector[sspWorkloadNameLabel] = identifier
 	}
 	list, err := s.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labels.Set(selector).AsSelector().String(),
+		LabelSelector:   labels.Set(selector).AsSelector().String(),
+		ResourceVersion: "0",
+		Limit:           20,
 	})
 	if err != nil {
 		return nil, err

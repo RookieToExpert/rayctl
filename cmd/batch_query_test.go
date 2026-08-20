@@ -18,6 +18,9 @@ func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
 		{name: "natgw get", root: newNATGatewayCmd(), path: []string{"get"}},
 		{name: "vc node list", root: newVCCmd(), path: []string{"node", "list"}},
 		{name: "user get", root: newUserCmd(), path: []string{"get"}},
+		{name: "aid get", root: newAIDCmd(), path: []string{"get"}},
+		{name: "job get", root: newJobCmd(), path: []string{"get"}},
+		{name: "ecp job get", root: newECPCmd(), path: []string{"job", "get"}},
 		{name: "ssp aid get", root: newSSPCmd(), path: []string{"aid", "get"}},
 		{name: "ssp job get", root: newSSPCmd(), path: []string{"job", "get"}},
 		{name: "auth check user", root: newAuthCmd(), path: []string{"check", "user"}},
@@ -40,6 +43,32 @@ func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
 				t.Fatalf("multiple identifiers rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestSSPPrimaryAndLegacyCommandStructure(t *testing.T) {
+	jobGet, _, err := newJobCmd().Find([]string{"get"})
+	if err != nil {
+		t.Fatalf("find primary job get: %v", err)
+	}
+	if jobGet.Flags().Lookup("workspace") == nil {
+		t.Fatal("primary job get does not expose SSP workspace flag")
+	}
+
+	ecpGet, _, err := newECPCmd().Find([]string{"job", "get"})
+	if err != nil {
+		t.Fatalf("find ecp job get: %v", err)
+	}
+	if ecpGet.Flags().Lookup("debug-timing") == nil {
+		t.Fatal("ecp job get does not expose ECP timing flag")
+	}
+
+	airGateway, _, err := newAIRCmd().Find([]string{"gw"})
+	if err != nil {
+		t.Fatalf("find air gateway alias: %v", err)
+	}
+	if airGateway.Name() != "gateway" {
+		t.Fatalf("air gw resolved to %q, want gateway", airGateway.Name())
 	}
 }
 

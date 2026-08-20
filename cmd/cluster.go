@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -8,14 +10,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"rayctl/internal/platform"
+	"rayctl/internal/service"
+	"rayctl/pkg/output"
 )
 
 func newClusterCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:        "cluster",
-		Short:      "兼容旧版 VC 与环境切换命令",
-		Hidden:     true,
-		Deprecated: "请改用 rayctl vc",
+		Use:   "cluster",
+		Short: "查询 SSP Cluster 或切换平台环境",
 	}
 	cmd.AddCommand(newClusterGetCmd())
 	cmd.AddCommand(newClusterSetCmd())
@@ -23,20 +25,55 @@ func newClusterCmd() *cobra.Command {
 }
 
 func newClusterGetCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "get <vc-name-or-uid>",
-		Short: "查看 vcluster 在 HC 中的控制面和资源 namespace 映射",
-		Long: "查看 vcluster 在 HC 中的 namespace 映射关系。\n" +
-			"会展示控制面 namespace，以及当前 vcluster 下每个逻辑 namespace 对应的 host 资源 namespace。",
+	var region string
+	cmd := &cobra.Command{
+		Use:   "get [cluster-name-or-uid...]",
+		Short: "列出 SSP Cluster，或查询一个或多个 Cluster 详情",
+		Long:  "不带参数时列出 SSP Cluster；指定名称或 UID 时展示绑定 VC、资源水位及关联 Queue。",
 		Example: strings.Join([]string{
-			"  rayctl cluster get vc-a3-llmit",
-			"  rayctl cluster get vc-019d28e0-9610-74ef-a722-9242dede9e37",
+			"  rayctl cluster get",
+			"  rayctl cluster get cluster-a3",
+			"  rayctl cluster get cluster-a3 cluster-muxi",
+			"  rayctl cluster get --region cn-pj-03",
 		}, "\n"),
-		Args: cobra.ExactArgs(1),
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runVCGet(cmd, args[0], false)
+			platformClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			}
+			resourceService := service.NewSSPResourceService(nil, platformClient)
+			if len(args) == 0 {
+				result, err := resourceService.ListClusters(cmd.Context(), region)
+				if err != nil {
+					return err
+				}
+				output.PrintSSPClusterList(result)
+				return nil
+			}
+
+			type queryResult struct {
+				identifier string
+				result     *service.SSPClusterItem
+				err        error
+			}
+			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, err := resourceService.GetCluster(ctx, identifier, region)
+				return queryResult{identifier: identifier, result: result, err: err}
+			})
+			queryErrors := make([]error, 0)
+			for _, result := range results {
+				if result.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("cluster %q: %w", result.identifier, result.err))
+					continue
+				}
+				output.PrintSSPClusterDetail(result.result)
+			}
+			return errors.Join(queryErrors...)
 		},
 	}
+	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03")
+	return cmd
 }
 
 func newClusterSetCmd() *cobra.Command {

@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	sspDefaultRegion           = "cn-pj-03"
+	sspDefaultRegion           = "cn-pj-01"
 	sspWorkloadTypeLabel       = "resource.compute.sensecore.cn/workload-type"
 	sspWorkloadNameLabel       = "resource.compute.sensecore.cn/workload-name"
 	sspWorkloadUIDLabel        = "resource.compute.sensecore.cn/workload-uid"
@@ -30,6 +30,7 @@ const (
 	sspVirtualNamespaceAnno    = "vcluster.loft.sh/object-name"
 	sspVClusterNameAnno        = "vcluster.loft.sh/vcluster-name"
 	sspClusterNameLabel        = "resource.compute.sensecore.cn/cluster-name"
+	sspMachineTypeLabel        = "resource.compute.sensecore.cn/machine-type"
 	sspTrainingJobWorkloadType = "training-job"
 	sspAIDWorkloadTypeValue    = "aid"
 )
@@ -67,7 +68,7 @@ type SSPKubeconfigMismatchError struct {
 
 func (e *SSPKubeconfigMismatchError) Error() string {
 	return fmt.Sprintf(
-		"SSP TrainingJob %q 位于 workspace %q，但当前 HC kubeconfig 看不到对应 namespace；请切换到 PT HC kubeconfig",
+		"SSP TrainingJob %q 位于 workspace %q，但当前 HC kubeconfig 看不到对应 namespace；请检查是否使用了任务所在环境的 HC kubeconfig（D/PT）",
 		e.Job,
 		e.Workspace,
 	)
@@ -349,17 +350,18 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 	if seedPods == nil {
 		seedPods = []corev1.Pod{}
 	}
+	region := s.resolveJobRegion(ctx, seedPods)
 
-	workspaces, err := s.resolveWorkspaceCandidates(ctx, workspace, seedPods)
+	workspaces, err := s.resolveWorkspaceCandidatesForRegion(ctx, workspace, seedPods, region)
 	if err != nil {
 		return nil, err
 	}
-	subscription, err := s.resolveSubscription(ctx, seedPods)
+	subscription, err := s.resolveSubscriptionForRegion(ctx, seedPods, region)
 	if err != nil {
 		return nil, err
 	}
 
-	candidates, lookupErr := s.findPlatformJobs(ctx, subscription, identifier, workspaces)
+	candidates, lookupErr := s.findPlatformJobs(ctx, subscription, region, identifier, workspaces)
 	if len(candidates) == 0 {
 		if lookupErr != nil {
 			return nil, fmt.Errorf("query SSP TrainingJob API: %w", lookupErr)
@@ -367,7 +369,7 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 		if workspace != "" {
 			return nil, fmt.Errorf("SSP training job %q not found in workspace %q", identifier, workspace)
 		}
-		return nil, fmt.Errorf("SSP training job %q not found in PT workspaces", identifier)
+		return nil, fmt.Errorf("SSP training job %q not found in %s workspaces", identifier, region)
 	}
 	if len(candidates) > 1 {
 		values := make([]string, 0, len(candidates))
@@ -400,7 +402,34 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 }
 
 func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requested string, pods []corev1.Pod) ([]sspWorkspaceRef, error) {
-	return s.resolveWorkspaceCandidatesForRegion(ctx, requested, pods, sspDefaultRegion)
+	return s.resolveWorkspaceCandidatesForRegion(ctx, requested, pods, s.resolveJobRegion(ctx, pods))
+}
+
+func (s *SSPJobService) resolveJobRegion(ctx context.Context, pods []corev1.Pod) string {
+	seenNodes := make(map[string]struct{})
+	for _, pod := range pods {
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" {
+			continue
+		}
+		if _, exists := seenNodes[nodeName]; exists {
+			continue
+		}
+		seenNodes[nodeName] = struct{}{}
+		node, err := s.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		if region := regionFromSSPZone(node.Labels[sspNodeZoneLabel]); region != "" {
+			return region
+		}
+	}
+	if s.platform != nil {
+		if region := strings.TrimSpace(s.platform.CurrentRegion()); region != "" {
+			return region
+		}
+	}
+	return sspDefaultRegion
 }
 
 func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context, requested string, pods []corev1.Pod, region string) ([]sspWorkspaceRef, error) {
@@ -508,7 +537,7 @@ func sortedSSPWorkspaceRefs(byName map[string]sspWorkspaceRef) []sspWorkspaceRef
 }
 
 func (s *SSPJobService) resolveSubscription(ctx context.Context, pods []corev1.Pod) (string, error) {
-	return s.resolveSubscriptionForRegion(ctx, pods, sspDefaultRegion)
+	return s.resolveSubscriptionForRegion(ctx, pods, s.resolveJobRegion(ctx, pods))
 }
 
 func (s *SSPJobService) resolveSubscriptionForRegion(ctx context.Context, pods []corev1.Pod, region string) (string, error) {
@@ -539,13 +568,14 @@ func (s *SSPJobService) resolveSubscriptionForRegion(ctx context.Context, pods [
 	return "", fmt.Errorf("cannot determine subscription id; set subscription_id on the %s profile in ~/.rayctl/platform.json", region)
 }
 
-func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription string, identifier string, workspaces []sspWorkspaceRef) ([]sspJobCandidate, error) {
+func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription string, region string, identifier string, workspaces []sspWorkspaceRef) ([]sspJobCandidate, error) {
 	type lookupResult struct {
 		workspace sspWorkspaceRef
 		jobs      []platform.SSPTrainingJob
 		err       error
 	}
 	results := make(chan lookupResult, len(workspaces))
+	region = firstNonEmpty(strings.TrimSpace(region), sspDefaultRegion)
 	semaphore := make(chan struct{}, 6)
 	var wg sync.WaitGroup
 	for _, workspace := range workspaces {
@@ -565,10 +595,10 @@ func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription strin
 			var err error
 			if workspace.ProfileName != "" {
 				jobs, err = s.platform.FindSSPTrainingJobsForProfile(
-					ctx, workspace.ProfileName, workspaceSubscription, sspDefaultRegion, workspace.Name, identifier,
+					ctx, workspace.ProfileName, workspaceSubscription, region, workspace.Name, identifier,
 				)
 			} else {
-				jobs, err = s.platform.FindSSPTrainingJobs(ctx, workspaceSubscription, sspDefaultRegion, workspace.Name, identifier)
+				jobs, err = s.platform.FindSSPTrainingJobs(ctx, workspaceSubscription, region, workspace.Name, identifier)
 			}
 			results <- lookupResult{workspace: workspace, jobs: jobs, err: err}
 		}()
@@ -667,6 +697,7 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 		InspectPod:    "-",
 	}
 	result.PodResources, result.Nodes = makeSSPPodResourceItems(pods, job.Spec.VCJob.Tasks)
+	result.PodResources = s.enrichSSPPodMachineTypes(ctx, result.PodResources)
 	inspectPod := chooseInspectPod(append([]corev1.Pod(nil), pods...))
 	logPod := chooseMasterLogPod(pods)
 	if inspectPod != nil {
@@ -700,7 +731,7 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 	switch {
 	case len(pods) == 0:
 		result.Stage = "scheduling"
-		result.Diagnosis = []string{"任务处于 Pending，但 PT HC 尚未观察到 Pod，当前更可能仍在队列、控制器或 Gang 调度阶段。"}
+		result.Diagnosis = []string{"任务处于 Pending，但当前 HC 尚未观察到 Pod，当前更可能仍在队列、控制器或 Gang 调度阶段。"}
 		result.Instruction = "确认队列是否可用，并检查 TrainingJob 平台状态；Pod 创建后可再次执行本命令查看具体调度原因。"
 		result.CheckEvidence = platformConditionEvidence(job.Status.Conditions)
 	case assigned == 0:
@@ -761,6 +792,10 @@ func makeSSPPodItems(pods []corev1.Pod) ([]JobPodItem, []string) {
 
 func makeSSPPodResourceItems(pods []corev1.Pod, tasks []platform.SSPTrainingJobTask) ([]SSPJobPodResourceItem, []string) {
 	podItems, nodes := makeSSPPodItems(pods)
+	podMachineTypes := make(map[string]string, len(pods))
+	for _, pod := range pods {
+		podMachineTypes[pod.Name] = strings.TrimSpace(pod.Spec.NodeSelector[sspMachineTypeLabel])
+	}
 	tasksByName := make(map[string]platform.SSPTrainingJobTask, len(tasks)*2)
 	for _, task := range tasks {
 		for _, value := range []string{task.Name, task.Role} {
@@ -789,9 +824,50 @@ func makeSSPPodResourceItems(pods []corev1.Pod, tasks []platform.SSPTrainingJobT
 			item.Model = task.ResourceSpec.AccelerateDeviceModel
 			item.Accelerator = formatSSPResource(task.ResourceSpec.AccelerateDeviceCount, "")
 		}
+		item.MachineType = firstNonEmpty(item.MachineType, podMachineTypes[pod.Name])
 		items = append(items, item)
 	}
 	return items, nodes
+}
+
+func (s *SSPJobService) enrichSSPPodMachineTypes(ctx context.Context, items []SSPJobPodResourceItem) []SSPJobPodResourceItem {
+	result := append([]SSPJobPodResourceItem(nil), items...)
+	if s.clientset == nil {
+		return result
+	}
+	nodeSet := make(map[string]struct{})
+	for _, item := range result {
+		if strings.TrimSpace(item.MachineType) != "" {
+			continue
+		}
+		if node := strings.TrimSpace(item.Node); node != "" && node != "-" {
+			nodeSet[node] = struct{}{}
+		}
+	}
+	if len(nodeSet) == 0 {
+		return result
+	}
+	nodes := make([]string, 0, len(nodeSet))
+	for node := range nodeSet {
+		nodes = append(nodes, node)
+	}
+	machineTypes := boundedMap(ctx, nodes, 4, func(ctx context.Context, nodeName string) string {
+		node, err := s.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(node.Labels[sspMachineTypeLabel])
+	})
+	byNode := make(map[string]string, len(nodes))
+	for index, node := range nodes {
+		byNode[node] = machineTypes[index]
+	}
+	for index := range result {
+		if strings.TrimSpace(result[index].MachineType) == "" {
+			result[index].MachineType = byNode[strings.TrimSpace(result[index].Node)]
+		}
+	}
+	return result
 }
 
 type sspVolumeDescriptor struct {

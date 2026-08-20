@@ -84,23 +84,30 @@ type VirtualCluster struct {
 }
 
 type StorageVolumeResource struct {
-	ID                       string `json:"id"`
-	RID                      string `json:"rid"`
-	Name                     string `json:"name"`
-	DisplayName              string `json:"display_name"`
-	Type                     string `json:"type"`
-	ResourceType             string `json:"resource_type"`
-	State                    string `json:"state"`
-	Zone                     string `json:"zone"`
-	Region                   string `json:"region"`
-	Properties               string `json:"properties"`
-	CreatorID                string `json:"creator_id"`
-	OwnerID                  string `json:"owner_id"`
-	CreateTime               string `json:"create_time"`
-	UpdateTime               string `json:"update_time"`
-	ResourceGroupName        string `json:"resource_group_name"`
-	ResourceGroupDisplayName string `json:"resource_group_display_name"`
-	ProfileName              string `json:"-"`
+	ID                       string                    `json:"id"`
+	RID                      string                    `json:"rid"`
+	Name                     string                    `json:"name"`
+	DisplayName              string                    `json:"display_name"`
+	Type                     string                    `json:"type"`
+	ResourceType             string                    `json:"resource_type"`
+	State                    string                    `json:"state"`
+	Zone                     string                    `json:"zone"`
+	Region                   string                    `json:"region"`
+	Properties               string                    `json:"properties"`
+	CreatorID                string                    `json:"creator_id"`
+	OwnerID                  string                    `json:"owner_id"`
+	CreateTime               string                    `json:"create_time"`
+	UpdateTime               string                    `json:"update_time"`
+	ResourceGroupName        string                    `json:"resource_group_name"`
+	ResourceGroupDisplayName string                    `json:"resource_group_display_name"`
+	RelatedResources         []StorageResourceRelation `json:"related_resources"`
+	ProfileName              string                    `json:"-"`
+}
+
+type StorageResourceRelation struct {
+	RelationType string                `json:"relation_type"`
+	RelationRole string                `json:"relation_role"`
+	Resource     StorageVolumeResource `json:"resource"`
 }
 
 type ECSVirtualMachine struct {

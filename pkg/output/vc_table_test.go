@@ -54,6 +54,60 @@ func TestPrintVCOverviewKeepsResourceNamespaceTable(t *testing.T) {
 	}
 }
 
+func TestPrintVCNodeListDefaultColumns(t *testing.T) {
+	result := &service.VCNodeListResult{
+		ClusterName: "vc-test",
+		Items: []service.VCNodeListItem{{
+			HostName:    "host-10-0-0-1",
+			HostIP:      "10.0.0.1",
+			State:       "ACTIVE",
+			MachineType: "h2ls.ru.k10",
+			Model:       "module-910c-8",
+			Name:        "acn-test",
+			UID:         "acn-uid-test",
+		}},
+	}
+
+	text := captureTableOutput(t, func() { PrintVCNodeList(result, false) })
+	for _, expected := range []string{"HOST", "IP", "STATE", "MACHINE TYPE", "host-10-0-0-1"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("default output does not contain %q:\n%s", expected, text)
+		}
+	}
+	for _, omitted := range []string{"MODEL", "ACN UID", "module-910c-8", "acn-uid-test"} {
+		if strings.Contains(text, omitted) {
+			t.Fatalf("default output unexpectedly contains %q:\n%s", omitted, text)
+		}
+	}
+}
+
+func TestPrintVCNodeListLongOnlyShowsModelAndACN(t *testing.T) {
+	result := &service.VCNodeListResult{
+		ClusterName: "vc-test",
+		Items: []service.VCNodeListItem{{
+			HostName:    "host-10-0-0-1",
+			HostIP:      "10.0.0.1",
+			State:       "ACTIVE",
+			MachineType: "h2ls.ru.k10",
+			Model:       "module-910c-8",
+			Name:        "acn-with-a-complete-name",
+			UID:         "acn-uid-test",
+		}},
+	}
+
+	text := captureTableOutput(t, func() { PrintVCNodeList(result, true) })
+	for _, expected := range []string{"HOST", "MODEL", "ACN", "ACN UID", "host-10-0-0-1", "module-910c-8", "acn-with-a-complete-name", "acn-uid-test"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("long output does not contain %q:\n%s", expected, text)
+		}
+	}
+	for _, omitted := range []string{"IP", "STATE", "MACHINE TYPE", "10.0.0.1", "h2ls.ru.k10"} {
+		if strings.Contains(text, omitted) {
+			t.Fatalf("long output unexpectedly contains %q:\n%s", omitted, text)
+		}
+	}
+}
+
 func captureTableOutput(t *testing.T, render func()) string {
 	t.Helper()
 	reader, writer, err := os.Pipe()

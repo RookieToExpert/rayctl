@@ -9,11 +9,15 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+
 	"rayctl/internal/platform"
 )
 
 type VCService struct {
-	vcClient *platform.VirtualClusterClient
+	vcClient  *platform.VirtualClusterClient
+	clientset kubernetes.Interface
 }
 
 type VCListResult struct {
@@ -104,6 +108,10 @@ func (r *VCResourceUsageResult) FilterFreeAcceleratorNodes() {
 
 func NewVCService(vcClient *platform.VirtualClusterClient) *VCService {
 	return &VCService{vcClient: vcClient}
+}
+
+func NewVCServiceWithKubeClient(vcClient *platform.VirtualClusterClient, clientset kubernetes.Interface) *VCService {
+	return &VCService{vcClient: vcClient, clientset: clientset}
 }
 
 func (s *VCService) List(ctx context.Context) (*VCListResult, error) {
@@ -259,6 +267,7 @@ func (s *VCService) ListNodes(ctx context.Context, clusterIdentifier string) (*V
 	for _, node := range nodes {
 		items = append(items, vcNodeListItemFromPlatform(node))
 	}
+	s.enrichVCNodeModels(ctx, items)
 	sort.Slice(items, func(i, j int) bool {
 		left := firstNonEmpty(items[i].HostIP, items[i].HostName, items[i].Name, items[i].UID)
 		right := firstNonEmpty(items[j].HostIP, items[j].HostName, items[j].Name, items[j].UID)
@@ -270,6 +279,34 @@ func (s *VCService) ListNodes(ctx context.Context, clusterIdentifier string) (*V
 		ProfileName: cluster.Tenant,
 		Items:       items,
 	}, nil
+}
+
+func (s *VCService) enrichVCNodeModels(ctx context.Context, items []VCNodeListItem) {
+	if s == nil || s.clientset == nil || len(items) == 0 {
+		return
+	}
+	nodes, err := s.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{ResourceVersion: "0"})
+	if err != nil {
+		return
+	}
+	modelByHost := make(map[string]string, len(nodes.Items))
+	for _, node := range nodes.Items {
+		model := firstNonEmpty(
+			strings.TrimSpace(node.Labels["accelerator-type"]),
+			strings.TrimSpace(node.Labels["node.kubernetes.io/npu.chip.name"]),
+			strings.TrimSpace(node.Labels["accelerator"]),
+			strings.TrimSpace(node.Labels["resource.compute.sensecore.cn/accelerator-model"]),
+		)
+		if model != "" {
+			modelByHost[strings.ToLower(strings.TrimSpace(node.Name))] = model
+		}
+	}
+	for index := range items {
+		if strings.TrimSpace(items[index].Model) != "" {
+			continue
+		}
+		items[index].Model = modelByHost[strings.ToLower(strings.TrimSpace(items[index].HostName))]
+	}
 }
 
 func (s *VCService) GetResourceUsage(ctx context.Context, clusterIdentifier string) (*VCResourceUsageResult, error) {

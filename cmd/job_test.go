@@ -6,8 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"rayctl/internal/service"
 )
 
 func TestNormalizeJobGetIdentifier(t *testing.T) {
@@ -21,15 +19,6 @@ func TestNormalizeJobGetIdentifier(t *testing.T) {
 		if got := normalizeJobGetIdentifier(input); got != want {
 			t.Fatalf("normalizeJobGetIdentifier(%q) = %q, want %q", input, got, want)
 		}
-	}
-}
-
-func TestJobResultsContainSSPTrainingJob(t *testing.T) {
-	if !jobResultsContainSSPTrainingJob([]*service.JobGetResult{{WorkloadType: service.SSPWorkloadTypeTrainingJob}}) {
-		t.Fatal("SSP TrainingJob result was not detected")
-	}
-	if jobResultsContainSSPTrainingJob([]*service.JobGetResult{{WorkloadType: ""}}) {
-		t.Fatal("ordinary ECP result was classified as SSP TrainingJob")
 	}
 }
 
@@ -49,17 +38,17 @@ func TestFormatJobGetTimeoutError(t *testing.T) {
 	}
 }
 
-func TestJobGetHelpIncludesClusterUsage(t *testing.T) {
-	cmd := newJobGetCmd()
+func TestECPJobGetHelpIncludesClusterUsage(t *testing.T) {
+	cmd := newECPJobGetCmd()
 	help := strings.Join([]string{cmd.Short, cmd.Long, cmd.Example}, "\n")
 	for _, fragment := range []string{
 		"按 VC 分区",
-		"job get cluster vc-a3-intern-delivery",
-		"job get cluster -a pending",
+		"ecp job get cluster vc-a3-intern-delivery",
+		"ecp job get cluster -a pending",
 		"--all-status",
 	} {
 		if !strings.Contains(help, fragment) {
-			t.Fatalf("job get help does not contain %q:\n%s", fragment, help)
+			t.Fatalf("ecp job get help does not contain %q:\n%s", fragment, help)
 		}
 	}
 

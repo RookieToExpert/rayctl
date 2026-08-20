@@ -208,7 +208,8 @@ func (c *VirtualClusterClient) findSSPAIDs(ctx context.Context, profileName stri
 func (c *VirtualClusterClient) FindSSPAIDDNATRules(ctx context.Context, aid SSPAID) ([]SSPAIDDNATRule, error) {
 	directRules := normalizeSSPAIDDNATRules(aid.Properties.DNATRules)
 	for _, rule := range directRules {
-		if strings.TrimSpace(rule.ExternalIP) != "" && strings.TrimSpace(rule.ExternalPort) != "" {
+		if strings.TrimSpace(rule.ExternalIP) != "" && strings.TrimSpace(rule.ExternalPort) != "" &&
+			strings.TrimSpace(rule.InternalIP) != "" && strings.TrimSpace(rule.InternalPort) != "" {
 			return directRules, nil
 		}
 	}
@@ -220,7 +221,7 @@ func (c *VirtualClusterClient) FindSSPAIDDNATRules(ctx context.Context, aid SSPA
 		}
 	}
 	if vpcUID == "" || strings.TrimSpace(aid.Properties.HostIP) == "" {
-		return nil, nil
+		return directRules, nil
 	}
 
 	profiles := c.profilesForRegion(sspAIDRegion(aid))
@@ -244,20 +245,35 @@ func (c *VirtualClusterClient) FindSSPAIDDNATRules(ctx context.Context, aid SSPA
 	managementURL.RawQuery = query.Encode()
 	var gateways sspAIDNATGatewayResponse
 	if err := c.getJSONWithProfile(ctx, profile, managementURL.String(), &gateways); err != nil {
+		if len(directRules) > 0 {
+			return directRules, nil
+		}
 		return nil, err
 	}
 
 	result := make([]SSPAIDDNATRule, 0)
+	var lastErr error
 	for _, gateway := range gateways.NATGateways {
 		endpoint, err := sspAIDDNATURL(profile, aid, gateway)
 		if err != nil {
-			return nil, err
+			lastErr = err
+			continue
 		}
 		var payload sspAIDDNATResponse
 		if err := c.getJSONWithProfile(ctx, profile, endpoint, &payload); err != nil {
-			return nil, err
+			lastErr = err
+			continue
 		}
 		result = append(result, normalizeSSPAIDDNATRules(payload.DNATRules)...)
+	}
+	if len(result) > 0 {
+		return result, nil
+	}
+	if len(directRules) > 0 {
+		return directRules, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	return result, nil
 }

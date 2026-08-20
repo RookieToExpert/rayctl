@@ -1,10 +1,35 @@
 package service
 
 import (
+	"context"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"rayctl/internal/platform"
 )
+
+func TestEnrichVCNodeModelsUsesHCNodeLabels(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "host-10-140-217-110",
+			Labels: map[string]string{
+				"accelerator":                      "huawei-Ascend910",
+				"accelerator-type":                 "module-910c-8",
+				"node.kubernetes.io/npu.chip.name": "Ascend910",
+			},
+		},
+	})
+	items := []VCNodeListItem{{HostName: "host-10-140-217-110"}}
+
+	(&VCService{clientset: clientset}).enrichVCNodeModels(context.Background(), items)
+
+	if items[0].Model != "module-910c-8" {
+		t.Fatalf("Model = %q, want module-910c-8", items[0].Model)
+	}
+}
 
 func TestResolveVCNodesForRemovalMatchesExactIdentifiersAndDeduplicates(t *testing.T) {
 	nodes := []VCNodeListItem{
