@@ -40,7 +40,6 @@ func newAIDCmd() *cobra.Command {
 
 func newSSPAIDGetCmd() *cobra.Command {
 	var workspace string
-	var region string
 	var longOutput bool
 	var debugTiming bool
 	cmd := &cobra.Command{
@@ -48,6 +47,10 @@ func newSSPAIDGetCmd() *cobra.Command {
 		Short: "并行查询一个或多个 SSP AID 开发机并诊断 Pod 状态",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegionForLookup()
+			if err != nil {
+				return err
+			}
 			clientset, err := kube.NewClientset(kubeconfig)
 			if err != nil {
 				return err
@@ -86,7 +89,6 @@ func newSSPAIDGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免已停止开发机跨 workspace 查询")
-	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03；默认自动识别")
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示首个 Pod 的最新日志")
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "打印 AID 查询各阶段耗时")
 	return cmd
@@ -110,6 +112,10 @@ func newSSPJobGetCmd() *cobra.Command {
 		Short: "并行查询一个或多个 SSP TrainingJob 并诊断 Pending 原因",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegionForLookup()
+			if err != nil {
+				return err
+			}
 			clientset, err := kube.NewClientset(kubeconfig)
 			if err != nil {
 				return err
@@ -138,11 +144,11 @@ func newSSPJobGetCmd() *cobra.Command {
 				var err error
 				switch {
 				case detectErr == nil && detection != nil && detection.Type == service.SSPWorkloadTypeTrainingJob:
-					result, err = jobService.GetJobWithDetection(queryCtx, queryIdentifier, workspace, longOutput, detection)
+					result, err = jobService.GetJobWithDetectionInRegion(queryCtx, queryIdentifier, workspace, region, longOutput, detection)
 				case detectErr == nil && detection != nil && detection.Type == service.SSPWorkloadTypeAID:
 					err = fmt.Errorf("%q 是 SSP AID 开发机，请使用 rayctl aid get %s", identifier, queryIdentifier)
 				default:
-					result, err = jobService.GetJob(queryCtx, queryIdentifier, workspace, longOutput)
+					result, err = jobService.GetJobInRegion(queryCtx, queryIdentifier, workspace, region, longOutput)
 				}
 				if err != nil {
 					err = formatJobGetError(queryCtx, identifier, queryTimeout, err)

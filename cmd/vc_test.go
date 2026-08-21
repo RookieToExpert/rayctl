@@ -42,8 +42,8 @@ func TestSSPClusterCommandIsVisible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("find cluster get: %v", err)
 	}
-	if getCommand.Flags().Lookup("region") == nil {
-		t.Fatal("cluster get --region flag is missing")
+	if getCommand.Flags().Lookup("region") != nil {
+		t.Fatal("cluster get should use global -e instead of --region")
 	}
 	if err := getCommand.Args(getCommand, []string{"cluster-a3", "cluster-muxi"}); err != nil {
 		t.Fatalf("cluster get should accept multiple identifiers: %v", err)

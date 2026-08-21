@@ -39,7 +39,6 @@ func newQueueWorkloadCmd() *cobra.Command {
 }
 
 func newQueueWorkloadGetCmd() *cobra.Command {
-	var region string
 	var workloadType string
 	var state string
 	var priority string
@@ -48,6 +47,10 @@ func newQueueWorkloadGetCmd() *cobra.Command {
 		Short: "并行列出一个或多个 SSP 队列中的工作负载",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegionForLookup()
+			if err != nil {
+				return err
+			}
 			resourceService, err := newSSPResourceQueryService()
 			if err != nil {
 				return err
@@ -80,7 +83,6 @@ func newQueueWorkloadGetCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&workloadType, "type", "t", "", "工作负载类型: job/aid/air/gw，或平台原始类型")
 	cmd.Flags().StringVar(&state, "state", "", "按状态筛选，例如 Running、Pending")
 	cmd.Flags().StringVar(&priority, "priority", "", "按优先级筛选，例如 NORMAL")
-	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03")
 	return cmd
 }
 
@@ -98,12 +100,15 @@ func normalizeQueueWorkloadType(value string) string {
 }
 
 func newQueueGetCmd() *cobra.Command {
-	var region string
 	cmd := &cobra.Command{
 		Use:   "get [queue-name-or-uid...]",
 		Short: "列出 SSP 队列，或查询一个或多个队列详情",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegion()
+			if err != nil {
+				return err
+			}
 			resourceService, err := newSSPResourceQueryService()
 			if err != nil {
 				return err
@@ -115,6 +120,10 @@ func newQueueGetCmd() *cobra.Command {
 				}
 				output.PrintSSPQueueList(result)
 				return nil
+			}
+			region, err = selectedSSPRegionForLookup()
+			if err != nil {
+				return err
 			}
 			type queryResult struct {
 				identifier string
@@ -136,7 +145,6 @@ func newQueueGetCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03")
 	return cmd
 }
 
@@ -148,13 +156,16 @@ func newQueueNodeCmd() *cobra.Command {
 }
 
 func newQueueNodeListCmd() *cobra.Command {
-	var region string
 	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "list <queue-name-or-uid> [queue-name-or-uid...]",
 		Short: "并行列出一个或多个 SSP 队列绑定的节点",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegionForLookup()
+			if err != nil {
+				return err
+			}
 			resourceService, err := newSSPResourceQueryService()
 			if err != nil {
 				return err
@@ -180,12 +191,10 @@ func newQueueNodeListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 ACN UID、machine type 和 model")
-	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03")
 	return cmd
 }
 
 func newQueueNodeUsageCmd() *cobra.Command {
-	var region string
 	var freeOnly bool
 	cmd := &cobra.Command{
 		Use:   "usage <queue-name-or-uid> [queue-name-or-uid...]",
@@ -193,6 +202,10 @@ func newQueueNodeUsageCmd() *cobra.Command {
 		Long:  "ALLOC/TOTAL 表示用户工作负载已申请资源/节点可分配资源。",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegionForLookup()
+			if err != nil {
+				return err
+			}
 			resourceService, err := newSSPResourceQueryService()
 			if err != nil {
 				return err
@@ -223,7 +236,6 @@ func newQueueNodeUsageCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用加速卡的节点")
-	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03")
 	return cmd
 }
 

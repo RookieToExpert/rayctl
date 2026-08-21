@@ -22,12 +22,15 @@ func newWorkspaceCmd() *cobra.Command {
 }
 
 func newWorkspaceGetCmd() *cobra.Command {
-	var region string
 	cmd := &cobra.Command{
 		Use:   "get [workspace-name-or-uid...]",
 		Short: "列出 SSP workspace，或查询一个或多个 workspace 详情",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegion()
+			if err != nil {
+				return err
+			}
 			resourceService, err := newSSPResourceQueryService()
 			if err != nil {
 				return err
@@ -39,6 +42,10 @@ func newWorkspaceGetCmd() *cobra.Command {
 				}
 				output.PrintSSPWorkspaceList(result)
 				return nil
+			}
+			region, err = selectedSSPRegionForLookup()
+			if err != nil {
+				return err
 			}
 			type queryResult struct {
 				identifier string
@@ -60,6 +67,5 @@ func newWorkspaceGetCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03")
 	return cmd
 }

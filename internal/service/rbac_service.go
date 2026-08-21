@@ -581,7 +581,7 @@ func (s *RBACService) GetWithOptions(ctx context.Context, req RBACGetRequest) (*
 	if bearerToken == "" {
 		environment := s.vcClient.ProfileEnvironment(profileName)
 		return nil, fmt.Errorf(
-			"virtual cluster %q resolved to profile %q (%s), but no valid console id_token exists for that profile; run rayctl auth login -v %s, or provide RAYCTL_BEARER_TOKEN",
+			"virtual cluster %q resolved to profile %q (%s), but no valid console id_token exists for that profile; run rayctl auth login -e %s, or provide RAYCTL_BEARER_TOKEN",
 			clusterName,
 			profileName,
 			firstNonEmpty(environment, "unknown"),
@@ -691,11 +691,11 @@ func (s *RBACService) resolveClusterForEnvironment(ctx context.Context, identifi
 	case len(exact) == 1:
 		return firstNonEmpty(exact[0].Name, exact[0].DisplayName, "vc-"+exact[0].UID), exact[0].UID, exact[0].ProfileName, nil
 	case len(exact) > 1:
-		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s; use -v d, -v pt, or -v dcloud to select an environment", identifier, s.rbacClusterCandidates(exact))
+		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s; use -e d, -e pt, or -e dcloud to select an environment", identifier, s.rbacClusterCandidates(exact))
 	case len(fuzzy) == 1:
 		return firstNonEmpty(fuzzy[0].Name, fuzzy[0].DisplayName, "vc-"+fuzzy[0].UID), fuzzy[0].UID, fuzzy[0].ProfileName, nil
 	case len(fuzzy) > 1:
-		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s; use -v d, -v pt, or -v dcloud to select an environment", identifier, s.rbacClusterCandidates(fuzzy))
+		return "", "", "", fmt.Errorf("cluster %q matched multiple virtual clusters: %s; use -e d, -e pt, or -e dcloud to select an environment", identifier, s.rbacClusterCandidates(fuzzy))
 	default:
 		if name, uid, ok := rawRBACClusterReference(identifier); ok {
 			return name, uid, "", nil

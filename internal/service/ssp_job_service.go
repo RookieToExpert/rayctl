@@ -137,6 +137,7 @@ type sspWorkspaceRef struct {
 type sspJobCandidate struct {
 	Job       platform.SSPTrainingJob
 	Workspace sspWorkspaceRef
+	Region    string
 }
 
 func NewSSPJobService(clientset kubernetes.Interface, platformClient *platform.VirtualClusterClient) *SSPJobService {
@@ -319,17 +320,25 @@ func filterPodsByName(pods []corev1.Pod, name string) []corev1.Pod {
 }
 
 func (s *SSPJobService) GetJob(ctx context.Context, identifier string, workspace string, includeLogs bool) (*SSPJobGetResult, error) {
-	return s.getJob(ctx, identifier, workspace, includeLogs, nil)
+	return s.GetJobInRegion(ctx, identifier, workspace, "", includeLogs)
+}
+
+func (s *SSPJobService) GetJobInRegion(ctx context.Context, identifier string, workspace string, region string, includeLogs bool) (*SSPJobGetResult, error) {
+	return s.getJob(ctx, identifier, workspace, region, includeLogs, nil)
 }
 
 func (s *SSPJobService) GetJobWithDetection(ctx context.Context, identifier string, workspace string, includeLogs bool, detection *SSPWorkloadDetection) (*SSPJobGetResult, error) {
-	if detection == nil || detection.Type != SSPWorkloadTypeTrainingJob {
-		return s.GetJob(ctx, identifier, workspace, includeLogs)
-	}
-	return s.getJob(ctx, identifier, workspace, includeLogs, detection.pods)
+	return s.GetJobWithDetectionInRegion(ctx, identifier, workspace, "", includeLogs, detection)
 }
 
-func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace string, includeLogs bool, detectedPods []corev1.Pod) (*SSPJobGetResult, error) {
+func (s *SSPJobService) GetJobWithDetectionInRegion(ctx context.Context, identifier string, workspace string, region string, includeLogs bool, detection *SSPWorkloadDetection) (*SSPJobGetResult, error) {
+	if detection == nil || detection.Type != SSPWorkloadTypeTrainingJob {
+		return s.GetJobInRegion(ctx, identifier, workspace, region, includeLogs)
+	}
+	return s.getJob(ctx, identifier, workspace, region, includeLogs, detection.pods)
+}
+
+func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace string, requestedRegion string, includeLogs bool, detectedPods []corev1.Pod) (*SSPJobGetResult, error) {
 	if s.clientset == nil {
 		return nil, fmt.Errorf("kubernetes client is required")
 	}
@@ -350,18 +359,8 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 	if seedPods == nil {
 		seedPods = []corev1.Pod{}
 	}
-	region := s.resolveJobRegion(ctx, seedPods)
-
-	workspaces, err := s.resolveWorkspaceCandidatesForRegion(ctx, workspace, seedPods, region)
-	if err != nil {
-		return nil, err
-	}
-	subscription, err := s.resolveSubscriptionForRegion(ctx, seedPods, region)
-	if err != nil {
-		return nil, err
-	}
-
-	candidates, lookupErr := s.findPlatformJobs(ctx, subscription, region, identifier, workspaces)
+	regions := s.resolveJobLookupRegions(ctx, requestedRegion, seedPods)
+	candidates, lookupErr := s.findPlatformJobsAcrossRegions(ctx, identifier, workspace, seedPods, regions)
 	if len(candidates) == 0 {
 		if lookupErr != nil {
 			return nil, fmt.Errorf("query SSP TrainingJob API: %w", lookupErr)
@@ -369,15 +368,15 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 		if workspace != "" {
 			return nil, fmt.Errorf("SSP training job %q not found in workspace %q", identifier, workspace)
 		}
-		return nil, fmt.Errorf("SSP training job %q not found in %s workspaces", identifier, region)
+		return nil, fmt.Errorf("SSP training job %q not found in regions %s", identifier, strings.Join(regions, ", "))
 	}
 	if len(candidates) > 1 {
 		values := make([]string, 0, len(candidates))
 		for _, candidate := range candidates {
-			values = append(values, fmt.Sprintf("%s/%s (%s)", candidate.Job.WorkspaceName, candidate.Job.Name, candidate.Job.UID))
+			values = append(values, fmt.Sprintf("%s/%s/%s (%s)", candidate.Region, candidate.Job.WorkspaceName, candidate.Job.Name, candidate.Job.UID))
 		}
 		sort.Strings(values)
-		return nil, fmt.Errorf("SSP training job %q matches multiple workspaces: %s; use --workspace", identifier, strings.Join(values, ", "))
+		return nil, fmt.Errorf("SSP training job %q matches multiple environments or workspaces: %s; use -e or --workspace", identifier, strings.Join(values, ", "))
 	}
 
 	candidate := candidates[0]
@@ -406,6 +405,18 @@ func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requeste
 }
 
 func (s *SSPJobService) resolveJobRegion(ctx context.Context, pods []corev1.Pod) string {
+	if region := s.resolveJobRegionFromPods(ctx, pods); region != "" {
+		return region
+	}
+	if s.platform != nil {
+		if region := strings.TrimSpace(s.platform.CurrentRegion()); region != "" {
+			return region
+		}
+	}
+	return sspDefaultRegion
+}
+
+func (s *SSPJobService) resolveJobRegionFromPods(ctx context.Context, pods []corev1.Pod) string {
 	seenNodes := make(map[string]struct{})
 	for _, pod := range pods {
 		nodeName := strings.TrimSpace(pod.Spec.NodeName)
@@ -424,12 +435,52 @@ func (s *SSPJobService) resolveJobRegion(ctx context.Context, pods []corev1.Pod)
 			return region
 		}
 	}
+	return ""
+}
+
+func (s *SSPJobService) resolveJobLookupRegions(ctx context.Context, requested string, pods []corev1.Pod) []string {
+	detected := s.resolveJobRegionFromPods(ctx, pods)
+	configured := []string(nil)
+	current := ""
 	if s.platform != nil {
-		if region := strings.TrimSpace(s.platform.CurrentRegion()); region != "" {
-			return region
-		}
+		configured = s.platform.ConfiguredSSPRegions()
+		current = s.platform.CurrentRegion()
 	}
-	return sspDefaultRegion
+	return selectSSPJobLookupRegions(requested, detected, configured, current)
+}
+
+func selectSSPJobLookupRegions(requested string, detected string, configured []string, current string) []string {
+	if region := strings.TrimSpace(requested); region != "" {
+		return []string{region}
+	}
+	if region := strings.TrimSpace(detected); region != "" {
+		return []string{region}
+	}
+
+	result := make([]string, 0, len(configured))
+	seen := make(map[string]struct{})
+	appendRegion := func(region string) {
+		region = strings.TrimSpace(region)
+		key := strings.ToLower(region)
+		if region == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, region)
+	}
+	for _, region := range configured {
+		appendRegion(region)
+	}
+	if len(result) == 0 {
+		appendRegion(current)
+	}
+	if len(result) == 0 {
+		appendRegion(sspDefaultRegion)
+	}
+	return result
 }
 
 func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context, requested string, pods []corev1.Pod, region string) ([]sspWorkspaceRef, error) {
@@ -618,8 +669,56 @@ func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription strin
 		}
 		successfulLookups++
 		for _, job := range result.jobs {
-			candidates = append(candidates, sspJobCandidate{Job: job, Workspace: result.workspace})
+			candidates = append(candidates, sspJobCandidate{Job: job, Workspace: result.workspace, Region: region})
 		}
+	}
+	if successfulLookups > 0 {
+		firstErr = nil
+	}
+	return candidates, firstErr
+}
+
+func (s *SSPJobService) findPlatformJobsAcrossRegions(ctx context.Context, identifier string, requestedWorkspace string, pods []corev1.Pod, regions []string) ([]sspJobCandidate, error) {
+	type lookupResult struct {
+		candidates []sspJobCandidate
+		err        error
+	}
+	results := make(chan lookupResult, len(regions))
+	var wg sync.WaitGroup
+	for _, region := range regions {
+		region := region
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			workspaces, err := s.resolveWorkspaceCandidatesForRegion(ctx, requestedWorkspace, pods, region)
+			if err != nil {
+				results <- lookupResult{err: err}
+				return
+			}
+			subscription, err := s.resolveSubscriptionForRegion(ctx, pods, region)
+			if err != nil {
+				results <- lookupResult{err: err}
+				return
+			}
+			candidates, err := s.findPlatformJobs(ctx, subscription, region, identifier, workspaces)
+			results <- lookupResult{candidates: candidates, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	candidates := make([]sspJobCandidate, 0)
+	var firstErr error
+	successfulLookups := 0
+	for result := range results {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			continue
+		}
+		successfulLookups++
+		candidates = append(candidates, result.candidates...)
 	}
 	if successfulLookups > 0 {
 		firstErr = nil

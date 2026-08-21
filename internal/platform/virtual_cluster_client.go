@@ -32,6 +32,7 @@ const (
 	defaultAPIBaseURL             = "https://management.d.pjlab.org.cn"
 	defaultKubernetesBaseURL      = "https://compute.d.pjlab.org.cn"
 	defaultIAMBaseURL             = "https://iam.d.pjlab.org.cn"
+	defaultPTIAMBaseURL           = "https://iam-api.pjlab.org.cn"
 	defaultMonitorBaseURL         = "https://monitor.d.pjlab.org.cn"
 	defaultCloudAPIBaseURL        = "https://management-cloud.d.pjlab.org.cn"
 	defaultCloudKubernetesBaseURL = "https://compute-cloud.d.pjlab.org.cn"
@@ -644,8 +645,9 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 	if region == "" {
 		region = defaultRegion
 	}
+	iamBaseURL = normalizeIAMBaseURLForRegion(iamBaseURL, region)
 
-	return &VirtualClusterClient{
+	client := &VirtualClusterClient{
 		accessKey:         accessKey,
 		secretKey:         secretKey,
 		baseURL:           baseURL,
@@ -672,7 +674,8 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 			},
 		},
 		httpClient: &http.Client{Timeout: 10 * time.Second},
-	}, true
+	}
+	return applyProcessEnvironmentSelection(client)
 }
 
 func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, bool) {
@@ -704,7 +707,7 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		if !ok {
 			return nil, false
 		}
-		return &VirtualClusterClient{
+		client := &VirtualClusterClient{
 			accessKey:         current.AccessKey,
 			secretKey:         current.SecretKey,
 			baseURL:           current.BaseURL,
@@ -716,7 +719,8 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 			currentProfile:    currentProfile,
 			profiles:          profiles,
 			httpClient:        &http.Client{Timeout: 10 * time.Second},
-		}, true
+		}
+		return applyProcessEnvironmentSelection(client)
 	}
 
 	var cfg config
@@ -728,7 +732,7 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		return nil, false
 	}
 
-	return &VirtualClusterClient{
+	client := &VirtualClusterClient{
 		accessKey:         profile.AccessKey,
 		secretKey:         profile.SecretKey,
 		baseURL:           profile.BaseURL,
@@ -740,7 +744,22 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		currentProfile:    profile.Name,
 		profiles:          map[string]clientProfile{profile.Name: profile},
 		httpClient:        &http.Client{Timeout: 10 * time.Second},
-	}, true
+	}
+	return applyProcessEnvironmentSelection(client)
+}
+
+func applyProcessEnvironmentSelection(client *VirtualClusterClient) (*VirtualClusterClient, bool) {
+	if client == nil {
+		return nil, false
+	}
+	environment := strings.ToLower(strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_ENVIRONMENT")))
+	if environment == "" || environment == "auto" || environment == "all" {
+		return client, true
+	}
+	if _, err := client.SelectProfileForProcess(environment); err != nil {
+		return nil, false
+	}
+	return client, true
 }
 
 func DefaultConfigPath() string {
@@ -820,6 +839,30 @@ func (c *VirtualClusterClient) SelectProfileForProcess(environment string) (stri
 		return "", err
 	}
 	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return "", fmt.Errorf("platform profile %q not found", profileName)
+	}
+	c.currentProfile = profile.Name
+	c.accessKey = profile.AccessKey
+	c.secretKey = profile.SecretKey
+	c.baseURL = profile.BaseURL
+	c.kubernetesBaseURL = profile.KubernetesBaseURL
+	c.iamBaseURL = profile.IAMBaseURL
+	c.subscription = profile.Subscription
+	c.resourceGroup = profile.ResourceGroup
+	c.region = profile.Region
+	return profile.Name, nil
+}
+
+// SelectProfileNameForProcess switches to an exact configured profile name.
+// Resource discovery returns ProfileName, so write operations must keep all
+// subsequent IAM lookups and requests in that same environment.
+func (c *VirtualClusterClient) SelectProfileNameForProcess(profileName string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("platform client is unavailable")
+	}
+	profileName = strings.TrimSpace(profileName)
+	profile, ok := c.profiles[profileName]
 	if !ok {
 		return "", fmt.Errorf("platform profile %q not found", profileName)
 	}
@@ -1133,6 +1176,25 @@ func defaultIAMBaseURLForCluster(cluster string) string {
 	}
 }
 
+func normalizeIAMBaseURLForRegion(iamBaseURL string, region string) string {
+	iamBaseURL = strings.TrimRight(strings.TrimSpace(iamBaseURL), "/")
+	if !strings.EqualFold(strings.TrimSpace(region), "cn-pj-03") {
+		return iamBaseURL
+	}
+	if iamBaseURL == "" {
+		return defaultPTIAMBaseURL
+	}
+	parsed, err := url.Parse(iamBaseURL)
+	if err != nil {
+		return iamBaseURL
+	}
+	if strings.EqualFold(parsed.Hostname(), "iam.pjlab.org.cn") {
+		parsed.Host = "iam-api.pjlab.org.cn"
+		return strings.TrimRight(parsed.String(), "/")
+	}
+	return iamBaseURL
+}
+
 func signinURLFromIAMBaseURL(iamBaseURL string) string {
 	iamBaseURL = strings.TrimRight(strings.TrimSpace(iamBaseURL), "/")
 	if iamBaseURL == "" {
@@ -1213,6 +1275,7 @@ func makeClientProfile(name string, cfg config) (clientProfile, bool) {
 	if region == "" {
 		region = defaultRegion
 	}
+	iamBaseURL = normalizeIAMBaseURLForRegion(iamBaseURL, region)
 	return clientProfile{
 		Name:              strings.TrimSpace(name),
 		AccessKey:         accessKey,
@@ -1276,6 +1339,9 @@ func applyConfigProfileDefaults(profile *ConfigProfile) {
 		return
 	}
 	profile.Cluster = normalizeClusterName(profile.Cluster)
+	if strings.TrimSpace(profile.Region) == "" {
+		profile.Region = defaultRegion
+	}
 	if strings.TrimSpace(profile.Subscription) == "" {
 		profile.Subscription = defaultSubscriptionForCluster(profile.Cluster)
 	}
@@ -1287,16 +1353,17 @@ func applyConfigProfileDefaults(profile *ConfigProfile) {
 		profile.KubernetesBaseURL = kubernetesBaseURL
 	}
 	if strings.TrimSpace(profile.IAMBaseURL) == "" {
-		profile.IAMBaseURL = defaultIAMBaseURLForCluster(profile.Cluster)
+		profile.IAMBaseURL = normalizeIAMBaseURLForRegion("", profile.Region)
+		if profile.IAMBaseURL == "" {
+			profile.IAMBaseURL = defaultIAMBaseURLForCluster(profile.Cluster)
+		}
 	}
+	profile.IAMBaseURL = normalizeIAMBaseURLForRegion(profile.IAMBaseURL, profile.Region)
 	if strings.TrimSpace(profile.MonitorBaseURL) == "" {
 		profile.MonitorBaseURL = defaultMonitorBaseURLForCluster(profile.Cluster)
 	}
 	if strings.TrimSpace(profile.ResourceGroup) == "" {
 		profile.ResourceGroup = defaultResourceGroup
-	}
-	if strings.TrimSpace(profile.Region) == "" {
-		profile.Region = defaultRegion
 	}
 }
 
@@ -1538,6 +1605,59 @@ func (c *VirtualClusterClient) findExactUsersForProfile(ctx context.Context, pro
 	return result, nil
 }
 
+func (c *VirtualClusterClient) findDetailedExactUsersForProfile(ctx context.Context, profile clientProfile, identifier string, exact []IAMUser) ([]IAMUser, error) {
+	u, _ := url.Parse(profile.IAMBaseURL)
+	u.Path = "/iam/idp/v1/users"
+	query := u.Query()
+	query.Set("page_token", "1")
+	query.Set("page_size", "10")
+	escaped := escapeIAMFilterValue(identifier)
+	field := "username"
+	for _, user := range exact {
+		if strings.EqualFold(strings.TrimSpace(user.ID), identifier) {
+			field = "id"
+			break
+		}
+	}
+	query.Set("filter", fmt.Sprintf(`(status="valid") AND (%s="%s")`, field, escaped))
+	u.RawQuery = query.Encode()
+
+	var payload iamUserListResponse
+	if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+		return nil, err
+	}
+	return payload.Users, nil
+}
+
+func enrichExactIAMUsers(exact []IAMUser, detailed []IAMUser) []IAMUser {
+	byID := make(map[string]IAMUser, len(detailed))
+	byUsername := make(map[string]IAMUser, len(detailed))
+	for _, user := range detailed {
+		if id := strings.ToLower(strings.TrimSpace(user.ID)); id != "" {
+			byID[id] = user
+		}
+		if username := strings.ToLower(strings.TrimSpace(user.Username)); username != "" {
+			byUsername[username] = user
+		}
+	}
+	for index := range exact {
+		user, ok := byID[strings.ToLower(strings.TrimSpace(exact[index].ID))]
+		if !ok {
+			user, ok = byUsername[strings.ToLower(strings.TrimSpace(exact[index].Username))]
+		}
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(exact[index].TenantCode) == "" {
+			exact[index].TenantCode = user.TenantCode
+		}
+		if strings.TrimSpace(exact[index].Source) == "" {
+			exact[index].Source = user.Source
+		}
+	}
+	return exact
+}
+
 func (c *VirtualClusterClient) FindUsers(ctx context.Context, identifier string) ([]IAMUser, error) {
 	return c.FindUsersForProfile(ctx, "", identifier)
 }
@@ -1557,6 +1677,18 @@ func (c *VirtualClusterClient) FindUsersForProfile(ctx context.Context, profileN
 	// filtered request before falling back to the paginated fuzzy search.
 	exact, exactErr := c.findExactUsersForProfile(ctx, profile, identifier)
 	if len(exact) > 0 {
+		needsDetails := false
+		for _, user := range exact {
+			if strings.TrimSpace(user.TenantCode) == "" || strings.TrimSpace(user.Source) == "" {
+				needsDetails = true
+				break
+			}
+		}
+		if needsDetails {
+			if detailed, detailErr := c.findDetailedExactUsersForProfile(ctx, profile, identifier, exact); detailErr == nil {
+				exact = enrichExactIAMUsers(exact, detailed)
+			}
+		}
 		sort.Slice(exact, func(i, j int) bool {
 			return strings.TrimSpace(exact[i].Username) < strings.TrimSpace(exact[j].Username)
 		})

@@ -1080,10 +1080,7 @@ func hostIPFromNodeName(nodeName string) string {
 }
 
 func (s *SSPResourceService) resolveRegion(requested string) string {
-	if value := strings.TrimSpace(requested); value != "" {
-		return value
-	}
-	return firstNonEmpty(s.platform.CurrentRegion(), sspDefaultRegion)
+	return strings.TrimSpace(requested)
 }
 
 func matchSSPWorkspace(identifier string, items []platform.SSPWorkspace) (platform.SSPWorkspace, error) {

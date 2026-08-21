@@ -421,15 +421,14 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 	if memberType != "USER" && memberType != "GROUP" {
 		return nil, fmt.Errorf("member type must be USER or GROUP")
 	}
-	memberName, memberIdentify, memberValue, err := s.resolveGrantMember(ctx, memberType, req.MemberIdentifier)
-	if err != nil {
-		return nil, err
-	}
 
 	if scope == "" {
 		resource, err := s.findGrantResource(ctx, resourceType, resourceName, req.BearerToken)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
+		}
+		if err := s.selectGrantResourceProfile(resource); err != nil {
+			return nil, err
 		}
 		scope = ensureRMScope(resource.RID)
 		if resourceName == "" {
@@ -441,6 +440,10 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 	}
 	if scope == "" {
 		return nil, fmt.Errorf("%s scope is empty", resourceType)
+	}
+	memberName, memberIdentify, memberValue, err := s.resolveGrantMember(ctx, memberType, req.MemberIdentifier)
+	if err != nil {
+		return nil, err
 	}
 
 	roleName, roleID, err := s.resolveGrantRole(ctx, resourceType, req.Role)
@@ -505,6 +508,10 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 		return nil, fmt.Errorf("set user policy: %w", err)
 	}
 	result.Result = "created"
+	verifyCreatedPolicy := len(resp.PolicyItems) == 0
+	if verifyCreatedPolicy {
+		result.Result = "accepted (unverified)"
+	}
 	if len(resp.PolicyItems) > 0 {
 		item := resp.PolicyItems[0]
 		result.PolicyID = firstNonEmpty(item.PolicyID, item.ID)
@@ -515,8 +522,30 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 				result.Result = "already exists"
 			case "SUCCESS", "CREATED", "CREATE_SUCCESS":
 				result.Result = "created"
+			case "UN_KNOWN", "UNKNOWN", "UNSPECIFIED":
+				result.Result = "accepted (unverified)"
+				verifyCreatedPolicy = true
 			default:
 				result.Result = status
+				verifyCreatedPolicy = true
+			}
+		}
+		if result.PolicyID == "" && result.Result != "already exists" {
+			verifyCreatedPolicy = true
+		}
+	}
+	if verifyCreatedPolicy {
+		relationPayload := platform.IAMMemberRelationPoliciesRequest{
+			MemberType:  memberType,
+			MemberValue: memberValue,
+			MemberID:    memberValue,
+			PageSize:    200,
+			PageToken:   "1",
+		}
+		if relation, verifyErr := s.vcClient.MemberRelationIAMPolicies(ctx, relationPayload, req.BearerToken); verifyErr == nil {
+			if policyID := findRemovePolicyID(relation, scope, memberType, memberValue, roleName, roleID); policyID != "" {
+				result.Result = "created"
+				result.PolicyID = policyID
 			}
 		}
 	}
@@ -541,15 +570,14 @@ func (s *AuthService) RemoveAFS(ctx context.Context, req AuthGrantAFSRequest) (*
 	if memberType != "USER" && memberType != "GROUP" {
 		return nil, fmt.Errorf("member type must be USER or GROUP")
 	}
-	memberName, memberIdentify, memberValue, err := s.resolveGrantMember(ctx, memberType, req.MemberIdentifier)
-	if err != nil {
-		return nil, err
-	}
 
 	if scope == "" {
 		resource, err := s.findGrantResource(ctx, resourceType, resourceName, req.BearerToken)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
+		}
+		if err := s.selectGrantResourceProfile(resource); err != nil {
+			return nil, err
 		}
 		scope = ensureRMScope(resource.RID)
 		if resourceName == "" {
@@ -561,6 +589,10 @@ func (s *AuthService) RemoveAFS(ctx context.Context, req AuthGrantAFSRequest) (*
 	}
 	if scope == "" {
 		return nil, fmt.Errorf("%s scope is empty", resourceType)
+	}
+	memberName, memberIdentify, memberValue, err := s.resolveGrantMember(ctx, memberType, req.MemberIdentifier)
+	if err != nil {
+		return nil, err
 	}
 
 	roleName, roleID, err := s.resolveGrantRole(ctx, resourceType, req.Role)
@@ -912,6 +944,20 @@ func (s *AuthService) findGrantResource(ctx context.Context, resourceType string
 	default:
 		return nil, fmt.Errorf("unsupported resource type %q", resourceType)
 	}
+}
+
+func (s *AuthService) selectGrantResourceProfile(resource *platform.StorageVolumeResource) error {
+	if resource == nil {
+		return fmt.Errorf("grant resource is empty")
+	}
+	profileName := strings.TrimSpace(resource.ProfileName)
+	if profileName == "" || profileName == s.vcClient.CurrentProfileName() {
+		return nil
+	}
+	if _, err := s.vcClient.SelectProfileNameForProcess(profileName); err != nil {
+		return fmt.Errorf("select resource profile %q: %w", profileName, err)
+	}
+	return nil
 }
 
 func ensureRMScope(scope string) string {

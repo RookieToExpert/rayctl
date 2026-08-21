@@ -298,7 +298,7 @@ type sspQueueListResponse struct {
 }
 
 func (c *VirtualClusterClient) ListSSPClusters(ctx context.Context, region string) ([]SSPCluster, error) {
-	profiles := c.profilesForRegion(region)
+	profiles := c.sspProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -458,11 +458,7 @@ func normalizeSSPCluster(cluster *SSPCluster, profile clientProfile) {
 // workspace namespaces being visible through the current kubeconfig.
 func (c *VirtualClusterClient) ListSSPWorkspaces(ctx context.Context, region string) ([]SSPWorkspace, error) {
 	region = strings.TrimSpace(region)
-	if region == "" {
-		return nil, fmt.Errorf("region is required")
-	}
-
-	profiles := c.profilesForRegion(region)
+	profiles := c.sspProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -471,6 +467,7 @@ func (c *VirtualClusterClient) ListSSPWorkspaces(ctx context.Context, region str
 	var lastErr error
 	success := false
 	for _, profile := range profiles {
+		profileRegion := firstNonEmpty(region, strings.TrimSpace(profile.Region))
 		pageToken := "1"
 		seenTokens := make(map[string]struct{})
 		profileResultCount := 0
@@ -483,7 +480,11 @@ func (c *VirtualClusterClient) ListSSPWorkspaces(ctx context.Context, region str
 			endpoint, _ := url.Parse(profile.BaseURL)
 			endpoint.Path = "/rmh/v1/resources:page"
 			query := endpoint.Query()
-			query.Set("filter", fmt.Sprintf(`resource_type="compute.ssp.v1.workspace" AND region="*%s*"`, escapeSSPFilterValue(region)))
+			filter := `resource_type="compute.ssp.v1.workspace"`
+			if profileRegion != "" {
+				filter += fmt.Sprintf(` AND region="*%s*"`, escapeSSPFilterValue(profileRegion))
+			}
+			query.Set("filter", filter)
 			query.Set("page_size", "200")
 			query.Set("page_token", pageToken)
 			endpoint.RawQuery = query.Encode()
@@ -866,7 +867,7 @@ func (c *VirtualClusterClient) GetSSPQueueResource(ctx context.Context, profileN
 }
 
 func (c *VirtualClusterClient) FindSSPQueueResource(ctx context.Context, region string, identifier string) (*SSPQueueResourceDetails, error) {
-	profiles := c.profilesForRegion(region)
+	profiles := c.sspProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -1043,7 +1044,7 @@ func firstNestedString(value any, keys ...string) string {
 // for the requested region. Callers can fall back to Kubernetes labels when it
 // is intentionally omitted from platform.json.
 func (c *VirtualClusterClient) ConfiguredSubscriptionForRegion(region string) string {
-	for _, profile := range c.profilesForRegion(region) {
+	for _, profile := range c.sspProfilesForRegion(region) {
 		if value := strings.TrimSpace(profile.Subscription); value != "" {
 			return value
 		}
@@ -1077,7 +1078,7 @@ func (c *VirtualClusterClient) findSSPTrainingJobs(ctx context.Context, profileN
 		return nil, fmt.Errorf("training job name or uid is required")
 	}
 
-	profiles := c.profilesForRegion(region)
+	profiles := c.sspProfilesForRegion(region)
 	if strings.TrimSpace(profileName) != "" {
 		profile, ok := c.clientProfileByName(profileName)
 		if !ok {
@@ -1144,6 +1145,65 @@ func (c *VirtualClusterClient) profilesForRegion(region string) []clientProfile 
 		if strings.EqualFold(strings.TrimSpace(profile.Region), region) {
 			result = append(result, profile)
 		}
+	}
+	return result
+}
+
+// sspProfilesForRegion keeps automatic SSP discovery within the current
+// tenant family while allowing its D and PT profiles to be queried together.
+func (c *VirtualClusterClient) sspProfilesForRegion(region string) []clientProfile {
+	region = strings.TrimSpace(region)
+	current, ok := c.currentClientProfile()
+	candidates := make([]clientProfile, 0)
+	for _, profile := range c.orderedProfiles() {
+		if region != "" && !strings.EqualFold(strings.TrimSpace(profile.Region), region) {
+			continue
+		}
+		candidates = append(candidates, profile)
+	}
+	if !ok {
+		return candidates
+	}
+	result := make([]clientProfile, 0, len(candidates))
+	for _, profile := range candidates {
+		if sameSSPTenantProfile(current, profile) {
+			result = append(result, profile)
+		}
+	}
+	if len(result) == 0 && region != "" {
+		return candidates
+	}
+	return result
+}
+
+func sameSSPTenantProfile(current clientProfile, candidate clientProfile) bool {
+	if profileTenantFamily(current.Name) == profileTenantFamily(candidate.Name) {
+		return true
+	}
+	if current.AccessKey != "" && strings.EqualFold(strings.TrimSpace(current.AccessKey), strings.TrimSpace(candidate.AccessKey)) {
+		return true
+	}
+	if current.Subscription != "" && strings.EqualFold(strings.TrimSpace(current.Subscription), strings.TrimSpace(candidate.Subscription)) {
+		return true
+	}
+	return false
+}
+
+// ConfiguredSSPRegions returns current-tenant SSP regions in profile order.
+func (c *VirtualClusterClient) ConfiguredSSPRegions() []string {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, profile := range c.sspProfilesForRegion("") {
+		region := strings.TrimSpace(profile.Region)
+		key := strings.ToLower(region)
+		if region == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, region)
 	}
 	return result
 }

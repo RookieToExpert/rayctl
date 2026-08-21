@@ -18,7 +18,7 @@ func TestAuthNetworkResourceCommands(t *testing.T) {
 	}
 }
 
-func TestAuthSSPCommandsAndEnvironmentFlags(t *testing.T) {
+func TestAuthCommandsUseGlobalEnvironmentFlag(t *testing.T) {
 	authCmd := newAuthCmd()
 	ssp, _, err := authCmd.Find([]string{"ssp"})
 	if err != nil || ssp == nil {
@@ -39,20 +39,19 @@ func TestAuthSSPCommandsAndEnvironmentFlags(t *testing.T) {
 		if childErr != nil || child == nil {
 			t.Fatalf("auth check %s command not found: %v", childName, childErr)
 		}
-		flag := child.Flags().Lookup("environment")
-		if flag == nil || flag.Shorthand != "v" {
-			t.Fatalf("auth check %s --environment/-v flag missing", childName)
+		if child.Flags().Lookup("environment") != nil {
+			t.Fatalf("auth check %s unexpectedly exposes a local environment flag", childName)
 		}
 	}
-}
-
-func TestAuthLoginSupportsEnvironmentSelection(t *testing.T) {
 	command, _, err := newAuthCmd().Find([]string{"login"})
 	if err != nil {
 		t.Fatalf("find auth login: %v", err)
 	}
-	flag := command.Flags().Lookup("environment")
-	if flag == nil || flag.Shorthand != "v" {
-		t.Fatal("auth login --environment/-v flag missing")
+	if command.Flags().Lookup("environment") != nil {
+		t.Fatal("auth login unexpectedly exposes a local environment flag")
+	}
+	flag := rootCmd.PersistentFlags().Lookup("environment")
+	if flag == nil || flag.Shorthand != "e" {
+		t.Fatal("global --environment/-e flag missing")
 	}
 }

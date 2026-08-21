@@ -144,7 +144,7 @@ func (c *VirtualClusterClient) findSSPAIDs(ctx context.Context, profileName stri
 		return nil, fmt.Errorf("subscription, region, workspace and AID identifier are required")
 	}
 
-	profiles := c.profilesForRegion(region)
+	profiles := c.sspProfilesForRegion(region)
 	if strings.TrimSpace(profileName) != "" {
 		profile, ok := c.clientProfileByName(profileName)
 		if !ok {
@@ -224,7 +224,7 @@ func (c *VirtualClusterClient) FindSSPAIDDNATRules(ctx context.Context, aid SSPA
 		return directRules, nil
 	}
 
-	profiles := c.profilesForRegion(sspAIDRegion(aid))
+	profiles := c.sspProfilesForRegion(sspAIDRegion(aid))
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("platform profile %q is unavailable", aid.ProfileName)
 	}

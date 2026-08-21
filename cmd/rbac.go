@@ -209,13 +209,13 @@ func newRBACRemoveCmd() *cobra.Command {
 func newRBACGetCmd() *cobra.Command {
 	var selector string
 	var long bool
-	var environment string
 
 	cmd := &cobra.Command{
 		Use:   "get <vc-name-or-uid> [vc-name-or-uid...]",
 		Short: "并行查看一个或多个 VC 中平台管理的 RBAC Binding",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			environment := explicitEnvironmentFilter()
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
@@ -264,7 +264,6 @@ func newRBACGetCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&selector, "selector", "s", "", "RoleBinding/ClusterRoleBinding labelSelector，默认 resource.compute.sensecore.cn/control")
 	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 Binding 名和精确到秒的创建时间")
-	cmd.Flags().StringVarP(&environment, "environment", "v", "", "限定平台环境: d、pt/p、dcloud；默认自动查询所有已配置环境")
 	return cmd
 }
 

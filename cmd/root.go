@@ -7,13 +7,15 @@ import (
 var kubeconfig string
 
 var rootCmd = &cobra.Command{
-	Use:   "rayctl",
-	Short: "rayctl is a lightweight Kubernetes CLI for high-frequency queries",
-	Long:  "rayctl is a custom Kubernetes CLI built with Cobra and client-go to simplify daily cluster inspection tasks.",
+	Use:               "rayctl",
+	Short:             "rayctl is a lightweight Kubernetes CLI for high-frequency queries",
+	Long:              "rayctl is a custom Kubernetes CLI built with Cobra and client-go to simplify daily cluster inspection tasks.",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return prepareEnvironmentSelection() },
 }
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&kubeconfig, "kubeconfig", "k", "", "Path to the kubeconfig file (defaults to KUBECONFIG or $HOME/kubeconfig)")
+	rootCmd.PersistentFlags().StringVarP(&targetEnvironment, "environment", "e", "auto", "平台环境: auto、d、pt、dcloud 或 all；默认根据当前 kubeconfig 自动识别")
 	rootCmd.AddCommand(newAFSCmd())
 	rootCmd.AddCommand(newAIDCmd())
 	rootCmd.AddCommand(newAIRCmd())

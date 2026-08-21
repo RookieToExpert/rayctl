@@ -132,34 +132,30 @@ func newAuthCheckResourceCmd(resourceType string, short string) *cobra.Command {
 
 func newAuthCheckGroupsCmd() *cobra.Command {
 	var long bool
-	var environment string
 	cmd := &cobra.Command{
 		Use:     "groups <group-name-or-id> [group-name-or-id...]",
 		Aliases: []string{"group"},
-		Short:   "查看用户组信息和权限",
+		Short:   "查看用户组信息和组自身拥有的权限",
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuthCheckGroups(cmd, args, long, environment)
+			return runAuthCheckGroups(cmd, args, long)
 		},
 	}
 	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 source/service/role names/create time 等详细权限信息")
-	cmd.Flags().StringVarP(&environment, "environment", "v", "", "指定平台环境: d、pt/p、dcloud；默认使用 current_profile")
 	return cmd
 }
 
 func newAuthCheckUserCmd() *cobra.Command {
 	var long bool
-	var environment string
 	cmd := &cobra.Command{
 		Use:   "user <username-or-userid> [username-or-userid...]",
-		Short: "查看用户所属组和权限",
+		Short: "查看用户所属组以及直接或继承的权限",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuthCheckUser(cmd, args, long, environment)
+			return runAuthCheckUser(cmd, args, long)
 		},
 	}
 	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 member/source/service/role names/create time 等详细权限信息")
-	cmd.Flags().StringVarP(&environment, "environment", "v", "", "指定平台环境: d、pt/p、dcloud；默认使用 current_profile")
 	return cmd
 }
 
@@ -296,17 +292,6 @@ func authMemberFlagValues(user string, group string) (string, string, error) {
 		return "GROUP", group, nil
 	}
 	return "", "", fmt.Errorf("请使用 --user 或 --group 指定授权对象")
-}
-
-func normalizedAuthEnvironment(environment string, profileName string) string {
-	value := strings.ToLower(strings.TrimSpace(environment))
-	if value == "p" {
-		return "pt"
-	}
-	if value != "" {
-		return value
-	}
-	return profileName
 }
 
 func newAuthGrantAFSCmd() *cobra.Command {
@@ -599,7 +584,6 @@ func newAuthRolesResourceCmd(resourceType string, use string, short string) *cob
 func newAuthLoginCmd() *cobra.Command {
 	var username string
 	var tenantCode string
-	var environment string
 	var debugLogin bool
 	var bearerToken string
 	var passwordStdin bool
@@ -611,11 +595,6 @@ func newAuthLoginCmd() *cobra.Command {
 			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
-			}
-			if strings.TrimSpace(environment) != "" {
-				if _, err := vcClient.SelectProfileForProcess(environment); err != nil {
-					return err
-				}
 			}
 			if strings.TrimSpace(bearerToken) != "" {
 				item, err := saveBearerSessionForCommand(cmd, vcClient, username, tenantCode, bearerToken)
@@ -637,7 +616,6 @@ func newAuthLoginCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&username, "username", "u", "", "登录账号，默认读取 PJLAB_USERNAME 或交互输入")
 	cmd.Flags().StringVar(&tenantCode, "tenant-code", "", "登录租户代码，默认读取 PJLAB_TENANT_CODE 或使用 username")
-	cmd.Flags().StringVarP(&environment, "environment", "v", "", "将登录 session 缓存到指定环境: d、pt/p、dcloud；不修改 current_profile")
 	cmd.Flags().BoolVar(&debugLogin, "debug-login", false, "打印脱敏登录调试信息，不输出密码或 token")
 	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "直接缓存控制台 Bearer token，不走账号密码登录")
 	cmd.Flags().BoolVar(&passwordStdin, "password-stdin", false, "从标准输入读取密码，适合包含特殊字符的密码")
@@ -755,14 +733,14 @@ func authResourceScopeRequiresBearer(resourceType string) bool {
 	}
 }
 
-func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool, environment string) error {
+func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool) error {
 	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 	if !ok {
 		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 	}
 
 	authService := service.NewAuthService(vcClient)
-	profileName, err := vcClient.ResolveProfileName(environment)
+	profileName, err := vcClient.ResolveProfileName("")
 	if err != nil {
 		return err
 	}
@@ -797,14 +775,14 @@ func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool, environmen
 	return errors.Join(queryErrors...)
 }
 
-func runAuthCheckUser(cmd *cobra.Command, args []string, long bool, environment string) error {
+func runAuthCheckUser(cmd *cobra.Command, args []string, long bool) error {
 	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 	if !ok {
 		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 	}
 
 	authService := service.NewAuthService(vcClient)
-	profileName, err := vcClient.ResolveProfileName(environment)
+	profileName, err := vcClient.ResolveProfileName("")
 	if err != nil {
 		return err
 	}

@@ -805,40 +805,94 @@ func PrintAuthResourceSummary(results []*service.AuthAFSResult, includeResource 
 }
 
 func PrintAuthUserSummary(results []*service.AuthUserResult) {
-	rows := make([][]string, 0)
-	for _, result := range results {
-		permissions := deduplicateAuthPermissions(result.Permissions)
+	if len(results) == 0 {
+		printAuthUserIdentityTable(nil)
+		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, [][]string{{"-", "-"}}, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
+		return
+	}
+	for resultIndex, result := range results {
+		if resultIndex > 0 {
+			fmt.Fprintln(os.Stdout)
+		}
+		printAuthUserIdentityTable(result)
+		permissions := compactAuthPermissions(result.Permissions)
+		rows := make([][]string, 0, maxInt(1, len(permissions)))
 		if len(permissions) == 0 {
-			rows = append(rows, []string{emptyDash(result.Username), emptyDash(result.ID), "-", "-"})
-			continue
+			rows = append(rows, []string{"-", "-"})
+		} else {
+			for _, item := range permissions {
+				rows = append(rows, []string{emptyDash(formatAuthScopeForUserDisplay(item.Scope, result.Groups)), emptyDash(item.Roles)})
+			}
 		}
-		for _, item := range permissions {
-			rows = append(rows, []string{emptyDash(result.Username), emptyDash(result.ID), emptyDash(formatAuthScopeForDisplay(item.Scope)), emptyDash(item.Roles)})
-		}
+		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, rows, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
 	}
-	if len(rows) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-"})
+}
+
+func printAuthUserIdentityTable(result *service.AuthUserResult) {
+	username := "-"
+	id := "-"
+	groups := "-"
+	if result != nil {
+		username = emptyDash(result.Username)
+		id = emptyDash(result.ID)
+		groups = userGroupNames(result.Groups)
 	}
-	printBoxTableWithOptions([]string{"USERNAME", "ID", "SCOPE", "ROLES"}, rows, []int{24, 36, 44, 36}, tableOptions{minWidths: []int{12, 36, 16, 12}, rowDividers: true})
+	printBoxTableWithOptions(
+		[]string{"USER", "ID", "GROUPS"},
+		[][]string{{username, id, groups}},
+		[]int{24, 36, 64},
+		tableOptions{minWidths: []int{12, 36, 16}},
+	)
 }
 
 func PrintAuthGroupSummary(results []*service.AuthGroupResult) {
-	rows := make([][]string, 0)
-	for _, result := range results {
+	if len(results) == 0 {
+		printAuthIdentityTable("GROUP", "-", "-")
+		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, [][]string{{"-", "-"}}, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
+		return
+	}
+	for resultIndex, result := range results {
+		if resultIndex > 0 {
+			fmt.Fprintln(os.Stdout)
+		}
 		name := firstNonEmptyOutput(result.DisplayName, result.Name, result.PosixGroupName)
-		permissions := deduplicateAuthPermissions(result.Permissions)
+		printAuthIdentityTable("GROUP", name, result.ID)
+		permissions := compactAuthPermissions(result.Permissions)
+		rows := make([][]string, 0, maxInt(1, len(permissions)))
 		if len(permissions) == 0 {
-			rows = append(rows, []string{emptyDash(name), emptyDash(result.ID), "-", "-"})
-			continue
+			rows = append(rows, []string{"-", "-"})
+		} else {
+			for _, item := range permissions {
+				group := service.AuthGroupItem{ID: result.ID, Name: result.Name, DisplayName: result.DisplayName, PosixGroupName: result.PosixGroupName}
+				rows = append(rows, []string{emptyDash(formatAuthScopeForUserDisplay(item.Scope, []service.AuthGroupItem{group})), emptyDash(item.Roles)})
+			}
 		}
-		for _, item := range permissions {
-			rows = append(rows, []string{emptyDash(name), emptyDash(result.ID), emptyDash(formatAuthScopeForDisplay(item.Scope)), emptyDash(item.Roles)})
+		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, rows, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
+	}
+}
+
+func printAuthIdentityTable(kind string, name string, id string) {
+	printBoxTableWithOptions(
+		[]string{kind, "ID"},
+		[][]string{{emptyDash(name), emptyDash(id)}},
+		[]int{32, 36},
+		tableOptions{minWidths: []int{12, 36}},
+	)
+}
+
+func formatAuthScopeForUserDisplay(scope string, groups []service.AuthGroupItem) string {
+	normalized := strings.Trim(strings.TrimPrefix(strings.TrimSpace(scope), "/rm"), "/")
+	parts := strings.Split(normalized, "/")
+	if len(parts) == 3 && strings.EqualFold(parts[0], "iam") && strings.EqualFold(parts[1], "groups") {
+		groupID := strings.TrimSpace(parts[2])
+		for _, group := range groups {
+			if strings.EqualFold(strings.TrimSpace(group.ID), groupID) {
+				return "用户组 " + firstNonEmptyOutput(group.DisplayName, group.Name, group.PosixGroupName, group.ID)
+			}
 		}
+		return "用户组 " + groupID
 	}
-	if len(rows) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-"})
-	}
-	printBoxTableWithOptions([]string{"GROUP", "ID", "SCOPE", "ROLES"}, rows, []int{28, 36, 44, 36}, tableOptions{minWidths: []int{12, 36, 16, 12}, rowDividers: true})
+	return formatAuthScopeForDisplay(scope)
 }
 
 func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
@@ -1021,6 +1075,36 @@ func deduplicateAuthPermissions(items []service.AuthPermissionItem) []service.Au
 		}
 		seen[key] = struct{}{}
 		result = append(result, item)
+	}
+	return result
+}
+
+func compactAuthPermissions(items []service.AuthPermissionItem) []service.AuthPermissionItem {
+	deduplicated := deduplicateAuthPermissions(items)
+	result := make([]service.AuthPermissionItem, 0, len(deduplicated))
+	indexByScope := make(map[string]int, len(deduplicated))
+	rolesByScope := make(map[string]map[string]struct{}, len(deduplicated))
+	for _, item := range deduplicated {
+		scope := strings.Trim(strings.TrimPrefix(strings.TrimSpace(item.Scope), "/rm"), "/")
+		index, exists := indexByScope[scope]
+		if !exists {
+			index = len(result)
+			indexByScope[scope] = index
+			result = append(result, item)
+			rolesByScope[scope] = make(map[string]struct{})
+		}
+		roles := strings.Split(firstNonEmptyOutput(item.Roles, item.RoleNames), ",")
+		for _, role := range roles {
+			if role = strings.TrimSpace(role); role != "" {
+				rolesByScope[scope][role] = struct{}{}
+			}
+		}
+		mergedRoles := make([]string, 0, len(rolesByScope[scope]))
+		for role := range rolesByScope[scope] {
+			mergedRoles = append(mergedRoles, role)
+		}
+		sort.Strings(mergedRoles)
+		result[index].Roles = strings.Join(mergedRoles, ", ")
 	}
 	return result
 }

@@ -25,7 +25,6 @@ func newClusterCmd() *cobra.Command {
 }
 
 func newClusterGetCmd() *cobra.Command {
-	var region string
 	cmd := &cobra.Command{
 		Use:   "get [cluster-name-or-uid...]",
 		Short: "列出 SSP Cluster，或查询一个或多个 Cluster 详情",
@@ -34,10 +33,14 @@ func newClusterGetCmd() *cobra.Command {
 			"  rayctl cluster get",
 			"  rayctl cluster get cluster-a3",
 			"  rayctl cluster get cluster-a3 cluster-muxi",
-			"  rayctl cluster get --region cn-pj-03",
+			"  rayctl cluster get -e pt",
 		}, "\n"),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegion()
+			if err != nil {
+				return err
+			}
 			platformClient, ok := platform.NewVirtualClusterClientFromEnv()
 			if !ok {
 				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
@@ -50,6 +53,10 @@ func newClusterGetCmd() *cobra.Command {
 				}
 				output.PrintSSPClusterList(result)
 				return nil
+			}
+			region, err = selectedSSPRegionForLookup()
+			if err != nil {
+				return err
 			}
 
 			type queryResult struct {
@@ -72,7 +79,6 @@ func newClusterGetCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().StringVar(&region, "region", "", "指定 SSP region，例如 cn-pj-01 或 cn-pj-03")
 	return cmd
 }
 

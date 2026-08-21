@@ -28,9 +28,9 @@ rayctl vc node list vc-a vc-b
 rayctl user get user-a user-b
 rayctl auth check user user-a user-b
 # 只读查询指定环境的同租户用户/用户组权限，不修改 current_profile
-rayctl auth check user ug-owner -v pt
-rayctl auth check groups ug-a2-jcpt-yunwei -v d
-rayctl auth check groups ug-a2-jcpt-yunwei -v dcloud
+rayctl auth check user ug-owner -e pt
+rayctl auth check groups ug-a2-jcpt-yunwei -e d
+rayctl auth check groups ug-a2-jcpt-yunwei -e dcloud
 rayctl rbac get vc-a vc-b
 rayctl policy get disallow-privileged-containers vc-a vc-b
 rayctl --kubeconfig=/path/to/config node get ecp
@@ -77,7 +77,7 @@ rayctl aid get <aid-name-or-uid> --workspace ws-t-wamcritic
 rayctl cluster get
 rayctl cluster get cluster-a3
 rayctl cluster get cluster-a3 cluster-muxi
-rayctl cluster get --region cn-pj-03
+rayctl cluster get -e pt
 rayctl workspace get
 rayctl ws get ws-d-a3-ai4s
 rayctl queue get

@@ -98,6 +98,31 @@ func TestResolveJobRegionUsesDetectedPodNode(t *testing.T) {
 	}
 }
 
+func TestSelectSSPJobLookupRegions(t *testing.T) {
+	tests := []struct {
+		name       string
+		requested  string
+		detected   string
+		configured []string
+		current    string
+		want       []string
+	}{
+		{name: "explicit region wins", requested: "cn-pj-03", detected: "cn-pj-01", configured: []string{"cn-pj-01", "cn-pj-03"}, want: []string{"cn-pj-03"}},
+		{name: "pod region wins", detected: "cn-pj-03", configured: []string{"cn-pj-01", "cn-pj-03"}, want: []string{"cn-pj-03"}},
+		{name: "configured regions enable automatic lookup", configured: []string{"cn-pj-01", "cn-pj-03", "cn-pj-03"}, current: "cn-pj-01", want: []string{"cn-pj-01", "cn-pj-03"}},
+		{name: "current profile fallback", current: "cn-pj-03", want: []string{"cn-pj-03"}},
+		{name: "default fallback", want: []string{"cn-pj-01"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := selectSSPJobLookupRegions(test.requested, test.detected, test.configured, test.current)
+			if strings.Join(got, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("selectSSPJobLookupRegions() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestFilterSSPPodsForJobPrefersUID(t *testing.T) {
 	pods := []corev1.Pod{
 		{ObjectMeta: metav1.ObjectMeta{Name: "wanted", Labels: map[string]string{sspWorkloadUIDLabel: "uid-1"}}},

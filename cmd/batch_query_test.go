@@ -72,16 +72,16 @@ func TestSSPPrimaryAndLegacyCommandStructure(t *testing.T) {
 	}
 }
 
-func TestRBACGetSupportsEnvironmentSelection(t *testing.T) {
+func TestRBACGetUsesGlobalEnvironmentSelection(t *testing.T) {
 	command, _, err := newRBACCmd().Find([]string{"get"})
 	if err != nil {
 		t.Fatalf("find rbac get: %v", err)
 	}
-	flag := command.Flags().Lookup("environment")
-	if flag == nil {
-		t.Fatal("rbac get --environment/-v flag missing")
+	if command.Flags().Lookup("environment") != nil {
+		t.Fatal("rbac get unexpectedly exposes a local environment flag")
 	}
-	if flag.Shorthand != "v" {
-		t.Fatalf("rbac get environment shorthand = %q, want v", flag.Shorthand)
+	flag := rootCmd.PersistentFlags().Lookup("environment")
+	if flag == nil || flag.Shorthand != "e" {
+		t.Fatal("global --environment/-e flag missing")
 	}
 }
