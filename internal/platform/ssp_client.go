@@ -142,6 +142,34 @@ type SSPTrainingJobTask struct {
 	} `json:"resource_spec"`
 }
 
+type SSPTrainingJobWorker struct {
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+	Namespace string `json:"namespace"`
+	Phase     string `json:"phase"`
+	ACN       struct {
+		Name     string `json:"name"`
+		UID      string `json:"uid"`
+		HostName string `json:"host_name"`
+		HostIP   string `json:"host_ip"`
+	} `json:"acn"`
+	Containers []struct {
+		Name string `json:"name"`
+	} `json:"containers"`
+	Resource struct {
+		CPUCount              any    `json:"cpu_count"`
+		MemoryGiB             any    `json:"memory_gib"`
+		AccelerateDeviceCount any    `json:"accelerate_device_count"`
+		AccelerateDeviceModel string `json:"accelerate_device_model"`
+		MachineType           string `json:"machine_type"`
+	} `json:"resource"`
+}
+
+type sspTrainingJobWorkerListResponse struct {
+	Workers   []SSPTrainingJobWorker `json:"workers"`
+	TotalSize int                    `json:"total_size"`
+}
+
 type sspTrainingJobListResponse struct {
 	TrainingJobs  []SSPTrainingJob `json:"training_jobs"`
 	TotalSize     int              `json:"total_size"`
@@ -275,20 +303,26 @@ type sspQueueWorkloadListResponse struct {
 }
 
 type SSPQueueResourceDetails struct {
-	Name          string
-	UID           string
-	State         string
-	Type          string
-	ClusterName   string
-	ClusterUID    string
-	VClusterName  string
-	Subscription  string
-	ResourceGroup string
-	Region        string
-	ProfileName   string
-	NodeNames     []string
-	CreateTime    string
-	UpdateTime    string
+	Name           string
+	UID            string
+	State          string
+	Type           string
+	WorkspaceName  string
+	WorkspaceUID   string
+	ClusterName    string
+	ClusterUID     string
+	VClusterName   string
+	Subscription   string
+	ResourceGroup  string
+	Region         string
+	ProfileName    string
+	NodeNames      []string
+	NodeCount      int
+	NodeCountKnown bool
+	SpotLending    *bool
+	DequeuePolicy  string
+	CreateTime     string
+	UpdateTime     string
 }
 
 type sspQueueListResponse struct {
@@ -978,13 +1012,39 @@ func sspQueueResourceDetails(queue StorageVolumeResource, cluster StorageVolumeR
 		Nodes []struct {
 			Name string `json:"name"`
 		} `json:"nodes"`
+		NodeStatus struct {
+			Total int `json:"total"`
+		} `json:"node_status"`
+		Cluster struct {
+			Name string `json:"name"`
+			UID  string `json:"uid"`
+		} `json:"cluster"`
+		Workspace struct {
+			Name string `json:"name"`
+			UID  string `json:"uid"`
+		} `json:"workspace"`
+		AdvancedSettings struct {
+			ProvideSpotResourceEnabled *bool  `json:"provide_spot_resource_enabled"`
+			DequeueStrategy            string `json:"dequeue_strategy"`
+		} `json:"advanced_settings"`
 	}
 	if json.Unmarshal([]byte(queue.Properties), &queueProperties) == nil {
 		details.Type = strings.TrimSpace(queueProperties.Type)
+		details.ClusterName = firstNonEmpty(details.ClusterName, strings.TrimSpace(queueProperties.Cluster.Name))
+		details.ClusterUID = firstNonEmpty(details.ClusterUID, strings.TrimSpace(queueProperties.Cluster.UID))
+		details.WorkspaceName = strings.TrimSpace(queueProperties.Workspace.Name)
+		details.WorkspaceUID = strings.TrimSpace(queueProperties.Workspace.UID)
+		details.NodeCount = queueProperties.NodeStatus.Total
+		details.NodeCountKnown = queueProperties.NodeStatus.Total > 0
+		details.SpotLending = queueProperties.AdvancedSettings.ProvideSpotResourceEnabled
+		details.DequeuePolicy = strings.TrimSpace(queueProperties.AdvancedSettings.DequeueStrategy)
 		for _, node := range queueProperties.Nodes {
 			if name := strings.TrimSpace(node.Name); name != "" {
 				details.NodeNames = append(details.NodeNames, name)
 			}
+		}
+		if !details.NodeCountKnown {
+			details.NodeCount = len(details.NodeNames)
 		}
 	}
 	var clusterProperties struct {
@@ -1058,6 +1118,32 @@ func (c *VirtualClusterClient) FindSSPTrainingJobs(ctx context.Context, subscrip
 
 func (c *VirtualClusterClient) FindSSPTrainingJobsForProfile(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPTrainingJob, error) {
 	return c.findSSPTrainingJobs(ctx, profileName, subscription, region, workspace, identifier)
+}
+
+func (c *VirtualClusterClient) ListSSPTrainingJobWorkers(ctx context.Context, job SSPTrainingJob, limit int) ([]SSPTrainingJobWorker, int, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	profile, ok := c.clientProfileByName(job.ProfileName)
+	if !ok {
+		return nil, 0, fmt.Errorf("platform profile %q not found", job.ProfileName)
+	}
+	subscription := firstNonEmpty(strings.TrimSpace(job.SubscriptionName), strings.TrimSpace(profile.Subscription))
+	region := firstNonEmpty(strings.TrimSpace(job.Region), strings.TrimSpace(profile.Region))
+	endpoint, err := sspTrainingJobsURL(profile, subscription, region, job.WorkspaceName)
+	if err != nil {
+		return nil, 0, err
+	}
+	endpoint.Path += "/" + url.PathEscape(strings.TrimSpace(job.Name)) + "/workers"
+	query := endpoint.Query()
+	query.Set("page_size", strconv.Itoa(limit))
+	query.Set("skip", "0")
+	endpoint.RawQuery = query.Encode()
+	var payload sspTrainingJobWorkerListResponse
+	if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
+		return nil, 0, err
+	}
+	return payload.Workers, payload.TotalSize, nil
 }
 
 func (c *VirtualClusterClient) findSSPTrainingJobs(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPTrainingJob, error) {

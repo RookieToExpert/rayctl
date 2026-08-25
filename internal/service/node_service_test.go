@@ -35,6 +35,27 @@ func TestNodeReadyStatusReturnsNotReady(t *testing.T) {
 	}
 }
 
+func TestNVIDIAAcceleratorResources(t *testing.T) {
+	resources := corev1.ResourceList{
+		corev1.ResourceName(nvidiaGPUResourceName): resource.MustParse("8"),
+	}
+	if got := gpuCapacityValue(resources); got != 8 {
+		t.Fatalf("gpuCapacityValue() = %d, want 8", got)
+	}
+	if got := gpuRequestValue(resources); got != 8 {
+		t.Fatalf("gpuRequestValue() = %d, want 8", got)
+	}
+}
+
+func TestNodeResourceUsageFormattingMatchesVCUsage(t *testing.T) {
+	if got := formatCPUUsage(resource.MustParse("96"), resource.MustParse("127900m")); got != "96/127.9" {
+		t.Fatalf("formatCPUUsage() = %q, want 96/127.9", got)
+	}
+	if got := formatMemoryUsage(resource.MustParse("1600Gi"), resource.MustParse("2108586112Ki")); got != "1600/2010.904GiB" {
+		t.Fatalf("formatMemoryUsage() = %q, want 1600/2010.904GiB", got)
+	}
+}
+
 func TestDescribeManyKeepsInputOrderAndIndividualErrors(t *testing.T) {
 	clientset := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "host-1"}},

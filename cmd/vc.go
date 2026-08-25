@@ -121,11 +121,10 @@ func newVCNodeListCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
-			clientset, err := kube.NewClientset(kubeconfig)
-			if err != nil {
-				return err
+			vcService := service.NewVCService(vcClient)
+			if clientset, err := kube.NewClientset(kubeconfig); err == nil {
+				vcService = service.NewVCServiceWithKubeClient(vcClient, clientset)
 			}
-			vcService := service.NewVCServiceWithKubeClient(vcClient, clientset)
 			type queryResult struct {
 				identifier string
 				result     *service.VCNodeListResult
@@ -173,7 +172,11 @@ func newVCNodeUsageCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
-			vcService := service.NewVCService(vcClient)
+			clientset, err := kube.NewClientset(kubeconfig)
+			if err != nil {
+				return err
+			}
+			vcService := service.NewVCServiceWithKubeClient(vcClient, clientset)
 			type queryResult struct {
 				identifier string
 				result     *service.VCResourceUsageResult

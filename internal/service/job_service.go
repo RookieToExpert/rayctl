@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -49,6 +51,8 @@ const (
 	jobUIDLookupPageSize        = int64(5000)
 	platformJobScanTimeout      = 4 * time.Second
 	platformJobProbeConcurrency = 16
+	registryLookupTimeout       = 750 * time.Millisecond
+	dockerLoginTimeout          = 3 * time.Second
 )
 
 type JobService struct {
@@ -237,6 +241,8 @@ type JobGetTimings struct {
 	PlatformPods   time.Duration
 	PlatformEvents time.Duration
 	PlatformLogs   time.Duration
+	Diagnosis      time.Duration
+	Enrichment     time.Duration
 	KubeJob        time.Duration
 	KubePods       time.Duration
 	KubeEvents     time.Duration
@@ -1199,6 +1205,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 	diagnosis := []string(nil)
 	secretChecks := []SecretCheckItem(nil)
 	detailEvidence := []CheckEvidenceItem(nil)
+	diagnosisBegin := time.Now()
 	if shouldAttachJobCheckSummary(status, terminal) {
 		if checkResult, err := s.CheckJob(ctx, identifier); err == nil && checkResult != nil {
 			stage = strings.TrimSpace(checkResult.Stage)
@@ -1221,6 +1228,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 			}
 		}
 	}
+	diagnosisDuration := time.Since(diagnosisBegin)
 
 	inspectPod := chooseInspectPod(pods)
 	logPod := chooseMasterLogPod(pods)
@@ -1275,11 +1283,22 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 		inspectPodName = inspectPod.Name
 	}
 	formatDuration := time.Since(formatBegin)
+	enrichmentBegin := time.Now()
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
-	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
+	var enrichmentWG sync.WaitGroup
+	enrichmentWG.Add(2)
+	go func() {
+		defer enrichmentWG.Done()
+		pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
+	}()
+	go func() {
+		defer enrichmentWG.Done()
+		imagePullSecrets = s.resolveImagePullSecretsFromKube(ctx, firstNonEmpty(identity.HostNamespace, identity.Namespace), imagePullSecrets)
+	}()
+	enrichmentWG.Wait()
 	stage, diagnosis = ensurePVCGetDiagnosis(status, terminal, stage, diagnosis, pvcRefs)
-	imagePullSecrets = s.resolveImagePullSecretsFromKube(ctx, firstNonEmpty(identity.HostNamespace, identity.Namespace), imagePullSecrets)
 	createdAt, jobStartedAt, endedAt := extractJobLifecycleTimes(job, pods, status)
+	enrichmentDuration := time.Since(enrichmentBegin)
 
 	return &JobGetResult{
 		Name:                   identity.Name,
@@ -1306,10 +1325,12 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 		CheckEvidence:          detailEvidence,
 		RecentLogLines:         recentLogLines,
 		Timings: JobGetTimings{
-			Locate:   locateDuration,
-			KubeLogs: kubeLogsDuration,
-			Format:   formatDuration,
-			Total:    time.Since(startedAt),
+			Locate:     locateDuration,
+			Diagnosis:  diagnosisDuration,
+			Enrichment: enrichmentDuration,
+			KubeLogs:   kubeLogsDuration,
+			Format:     formatDuration,
+			Total:      time.Since(startedAt),
 		},
 	}, nil
 }
@@ -1679,6 +1700,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 	diagnosis := []string(nil)
 	secretChecks := []SecretCheckItem(nil)
 	detailEvidence := []CheckEvidenceItem(nil)
+	diagnosisBegin := time.Now()
 	if shouldAttachJobCheckSummary(status, terminal) {
 		if checkResult, err := s.checkPlatformJob(ctx, &identity, job, pods); err == nil && checkResult != nil {
 			stage = strings.TrimSpace(checkResult.Stage)
@@ -1701,6 +1723,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 			}
 		}
 	}
+	diagnosisDuration := time.Since(diagnosisBegin)
 	identity.Submitter = firstNonEmpty(
 		identity.Submitter,
 		getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
@@ -1768,11 +1791,22 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		inspectPodName = inspectPod.Name
 	}
 	formatDuration := time.Since(formatBegin)
+	enrichmentBegin := time.Now()
 	imagePullSecrets, pvcRefs := extractJobSpecDetails(job)
-	pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
+	var enrichmentWG sync.WaitGroup
+	enrichmentWG.Add(2)
+	go func() {
+		defer enrichmentWG.Done()
+		pvcRefs = s.resolveVolumeClaimRefs(ctx, &identity, pvcRefs)
+	}()
+	go func() {
+		defer enrichmentWG.Done()
+		imagePullSecrets = s.resolveImagePullSecrets(ctx, &identity, imagePullSecrets)
+	}()
+	enrichmentWG.Wait()
 	stage, diagnosis = ensurePVCGetDiagnosis(status, terminal, stage, diagnosis, pvcRefs)
-	imagePullSecrets = s.resolveImagePullSecrets(ctx, &identity, imagePullSecrets)
 	createdAt, jobStartedAt, endedAt := extractJobLifecycleTimes(job, pods, status)
+	enrichmentDuration := time.Since(enrichmentBegin)
 
 	return &JobGetResult{
 		Name:                   identity.Name,
@@ -1803,6 +1837,8 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 			PlatformJob:  platformJobDuration,
 			PlatformPods: platformPodsDuration,
 			PlatformLogs: platformLogsDuration,
+			Diagnosis:    diagnosisDuration,
+			Enrichment:   enrichmentDuration,
 			Format:       formatDuration,
 			Total:        time.Since(startedAt),
 		},
@@ -4398,6 +4434,9 @@ func verifyDockerLogin(ctx context.Context, registry string, username string, pa
 	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
 		return fmt.Errorf("missing username or password")
 	}
+	if err := preflightDockerRegistry(ctx, registry); err != nil {
+		return err
+	}
 
 	tmpDir, err := os.MkdirTemp("", "rayctl-docker-login-*")
 	if err != nil {
@@ -4405,10 +4444,16 @@ func verifyDockerLogin(ctx context.Context, registry string, username string, pa
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cmd := exec.CommandContext(ctx, "docker", "--config", tmpDir, "login", registry, "--username", username, "--password-stdin")
+	loginCtx, cancel := context.WithTimeout(ctx, dockerLoginTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(loginCtx, "docker", "--config", tmpDir, "login", registry, "--username", username, "--password-stdin")
 	cmd.Stdin = strings.NewReader(password)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if loginCtx.Err() != nil {
+			return fmt.Errorf("docker login exceeded %s: %w", dockerLoginTimeout, loginCtx.Err())
+		}
 		message := strings.TrimSpace(string(output))
 		if message == "" {
 			message = err.Error()
@@ -4416,6 +4461,44 @@ func verifyDockerLogin(ctx context.Context, registry string, username string, pa
 		return fmt.Errorf("%s", message)
 	}
 	return nil
+}
+
+func preflightDockerRegistry(ctx context.Context, registry string) error {
+	host, err := dockerRegistryHostname(registry)
+	if err != nil {
+		return err
+	}
+	if net.ParseIP(host) != nil || strings.EqualFold(host, "localhost") {
+		return nil
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, registryLookupTimeout)
+	defer cancel()
+	if _, err := net.DefaultResolver.LookupHost(lookupCtx, host); err != nil {
+		return fmt.Errorf("lookup registry host %q: %w", host, err)
+	}
+	return nil
+}
+
+func dockerRegistryHostname(registry string) (string, error) {
+	registry = strings.TrimSpace(registry)
+	if registry == "" {
+		return "", fmt.Errorf("invalid URL: empty registry address")
+	}
+
+	candidate := registry
+	if !strings.Contains(candidate, "://") {
+		candidate = "//" + candidate
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL %q: %w", registry, err)
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("invalid URL %q: registry host is empty", registry)
+	}
+	return host, nil
 }
 
 func isDockerUnavailableError(err error) bool {
@@ -4439,6 +4522,9 @@ func classifyDockerLoginError(err error, registry string) (string, string) {
 	}
 	if isDockerUnavailableError(err) {
 		return "ERROR", strings.TrimSpace(err.Error())
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "ERROR", fmt.Sprintf("镜像仓库登录校验超过 %s，暂时无法确认账号密码是否有效", dockerLoginTimeout)
 	}
 	return "FAIL", strings.TrimSpace(err.Error())
 }

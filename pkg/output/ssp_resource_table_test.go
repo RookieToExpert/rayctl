@@ -49,7 +49,7 @@ func TestPrintSSPClusterDetailIncludesSummaryAndQueues(t *testing.T) {
 
 func TestPrintSSPQueueDetailIncludesPolicies(t *testing.T) {
 	text := captureTableOutput(t, func() {
-		PrintSSPQueueDetail(&service.SSPQueueItem{Name: "queue-demo", SpotLending: "开启", DequeuePolicy: "均衡"})
+		PrintSSPQueueDetail(&service.SSPQueueItem{Name: "queue-demo", SpotLending: "开启", DequeuePolicy: "均衡"}, false)
 	})
 	for _, expected := range []string{"空闲资源借出", "开启", "排队策略", "均衡"} {
 		if !strings.Contains(text, expected) {

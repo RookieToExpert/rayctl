@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -153,6 +154,28 @@ func TestQueueSchedulingLabels(t *testing.T) {
 	}
 }
 
+func TestQueueDetailReasons(t *testing.T) {
+	enabled := true
+	for _, test := range []struct {
+		name           string
+		details        platform.SSPQueueResourceDetails
+		includeDetails bool
+		want           string
+	}{
+		{name: "fast path", details: platform.SSPQueueResourceDetails{SpotLending: &enabled, NodeCountKnown: true}},
+		{name: "default fills missing lending", details: platform.SSPQueueResourceDetails{NodeCountKnown: true}, want: "spot-lending"},
+		{name: "default ignores missing node count", details: platform.SSPQueueResourceDetails{SpotLending: &enabled}},
+		{name: "long fills missing node count", details: platform.SSPQueueResourceDetails{SpotLending: &enabled}, includeDetails: true, want: "node-count"},
+		{name: "long fills both", details: platform.SSPQueueResourceDetails{}, includeDetails: true, want: "spot-lending,node-count"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := strings.Join(queueDetailReasons(test.details, test.includeDetails), ","); got != test.want {
+				t.Fatalf("queueDetailReasons() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestFormatSSPWorkloadResources(t *testing.T) {
 	var workload platform.SSPQueueWorkload
 	workload.Tasks = append(workload.Tasks, struct {
@@ -227,6 +250,18 @@ func TestInferWorkspaceNameFromQueue(t *testing.T) {
 	} {
 		if got := inferWorkspaceNameFromQueue(queue); got != want {
 			t.Fatalf("inferWorkspaceNameFromQueue(%q) = %q, want %q", queue, got, want)
+		}
+	}
+}
+
+func TestInferSSPRegionFromResourceName(t *testing.T) {
+	for name, want := range map[string]string{
+		"queue-d-reserved-a3-ai4s": "cn-pj-01",
+		"queue-t-reserved-demo":    "cn-pj-03",
+		"queue-custom":             "",
+	} {
+		if got := inferSSPRegionFromResourceName(name); got != want {
+			t.Fatalf("inferSSPRegionFromResourceName(%q) = %q, want %q", name, got, want)
 		}
 	}
 }

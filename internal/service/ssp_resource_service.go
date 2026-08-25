@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -103,6 +105,15 @@ type SSPQueueItem struct {
 	NodeCount     int
 	SpotLending   string
 	DequeuePolicy string
+	Timings       SSPQueueGetTimings
+}
+
+type SSPQueueGetTimings struct {
+	ResourceLookup time.Duration
+	DetailLookup   time.Duration
+	DetailReason   string
+	FallbackLookup time.Duration
+	Total          time.Duration
 }
 
 type SSPQueueListResult struct {
@@ -553,21 +564,103 @@ func (s *SSPResourceService) listQueuesForWorkspaces(ctx context.Context, worksp
 	return &SSPQueueListResult{Items: items}, nil
 }
 
-func (s *SSPResourceService) GetQueue(ctx context.Context, identifier string, region string) (*SSPQueueItem, error) {
-	item, err := s.getQueue(ctx, identifier, region, true)
-	if err != nil {
-		return nil, err
+func (s *SSPResourceService) GetQueue(ctx context.Context, identifier string, region string, includeDetails bool) (*SSPQueueItem, error) {
+	startedAt := time.Now()
+	resolvedRegion := firstNonEmpty(strings.TrimSpace(region), inferSSPRegionFromResourceName(identifier))
+	resourceStartedAt := time.Now()
+	details, directErr := s.platform.FindSSPQueueResource(ctx, resolvedRegion, identifier)
+	resourceElapsed := time.Since(resourceStartedAt)
+	if directErr == nil {
+		item := queueItemFromResourceDetails(*details)
+		item.Timings.ResourceLookup = resourceElapsed
+		// Keep the fast RMH path when possible. Older queue resources omit the
+		// lending policy, so only those queues need the slower detail request.
+		if reasons := queueDetailReasons(*details, includeDetails); len(reasons) > 0 {
+			item.Timings.DetailReason = strings.Join(reasons, ",")
+			detailStartedAt := time.Now()
+			if err := s.enrichQueueSchedulingSettings(ctx, &item); err != nil {
+				return nil, err
+			}
+			item.Timings.DetailLookup = time.Since(detailStartedAt)
+		}
+		item.Timings.Total = time.Since(startedAt)
+		return &item, nil
 	}
+
+	fallbackStartedAt := time.Now()
+	item, err := s.getQueue(ctx, identifier, resolvedRegion, includeDetails)
+	if err != nil {
+		return nil, errors.Join(directErr, err)
+	}
+	item.Timings.ResourceLookup = resourceElapsed
+	item.Timings.FallbackLookup = time.Since(fallbackStartedAt)
+	missingSpotLending := strings.TrimSpace(item.SpotLending) == "" || item.SpotLending == "-"
+	if includeDetails || missingSpotLending {
+		if missingSpotLending {
+			item.Timings.DetailReason = "spot-lending"
+		} else {
+			item.Timings.DetailReason = "full-details"
+		}
+		detailStartedAt := time.Now()
+		if err := s.enrichQueueSchedulingSettings(ctx, item); err != nil {
+			return nil, err
+		}
+		item.Timings.DetailLookup = time.Since(detailStartedAt)
+	}
+	item.Timings.Total = time.Since(startedAt)
+	return item, nil
+}
+
+func queueDetailReasons(details platform.SSPQueueResourceDetails, includeDetails bool) []string {
+	reasons := make([]string, 0, 2)
+	if details.SpotLending == nil {
+		reasons = append(reasons, "spot-lending")
+	}
+	if includeDetails && !details.NodeCountKnown {
+		reasons = append(reasons, "node-count")
+	}
+	return reasons
+}
+
+func queueItemFromResourceDetails(details platform.SSPQueueResourceDetails) SSPQueueItem {
+	return SSPQueueItem{
+		Name:          details.Name,
+		UID:           details.UID,
+		State:         details.State,
+		Type:          details.Type,
+		Workspace:     firstNonEmpty(details.WorkspaceName, inferWorkspaceNameFromQueue(details.Name)),
+		WorkspaceUID:  details.WorkspaceUID,
+		Cluster:       details.ClusterName,
+		ClusterUID:    details.ClusterUID,
+		VCluster:      details.VClusterName,
+		Subscription:  details.Subscription,
+		ResourceGroup: details.ResourceGroup,
+		Region:        details.Region,
+		Profile:       details.ProfileName,
+		CreatedAt:     formatSSPTime(details.CreateTime),
+		UpdatedAt:     formatSSPTime(details.UpdateTime),
+		NodeCount:     details.NodeCount,
+		SpotLending:   formatSSPSpotLending(details.SpotLending),
+		DequeuePolicy: formatSSPDequeuePolicy(details.DequeuePolicy),
+	}
+}
+
+func (s *SSPResourceService) enrichQueueSchedulingSettings(ctx context.Context, item *SSPQueueItem) error {
 	if err := s.ensureQueuePlatformLocation(ctx, item); err != nil {
-		return nil, err
+		return err
 	}
 	detail, err := s.platform.GetSSPQueue(ctx, item.Profile, item.Subscription, item.ResourceGroup, item.Region, item.Cluster, item.Name)
 	if err != nil {
-		return nil, fmt.Errorf("get queue %s detail: %w", item.Name, err)
+		return fmt.Errorf("get queue %s detail: %w", item.Name, err)
+	}
+	item.Workspace = firstNonEmpty(item.Workspace, detail.WorkspaceName, detail.Properties.Workspace.Name)
+	item.WorkspaceUID = firstNonEmpty(item.WorkspaceUID, detail.Properties.Workspace.UID)
+	if detail.Properties.NodeStatus.Total > 0 {
+		item.NodeCount = detail.Properties.NodeStatus.Total
 	}
 	item.SpotLending = formatSSPSpotLending(detail.Properties.AdvancedSettings.ProvideSpotResourceEnabled)
 	item.DequeuePolicy = formatSSPDequeuePolicy(detail.Properties.AdvancedSettings.DequeueStrategy)
-	return item, nil
+	return nil
 }
 
 func (s *SSPResourceService) ListQueueWorkloads(ctx context.Context, identifier string, region string, query SSPQueueWorkloadQuery) (*SSPQueueWorkloadResult, error) {
@@ -792,6 +885,18 @@ func inferWorkspaceNameFromQueue(queueName string) string {
 		}
 	}
 	return "-"
+}
+
+func inferSSPRegionFromResourceName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case strings.HasPrefix(name, "queue-d-"), strings.HasPrefix(name, "ws-d-"):
+		return "cn-pj-01"
+	case strings.HasPrefix(name, "queue-t-"), strings.HasPrefix(name, "ws-t-"):
+		return "cn-pj-03"
+	default:
+		return ""
+	}
 }
 
 func firstSSPResourceNumber(value string) float64 {

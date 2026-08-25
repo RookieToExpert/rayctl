@@ -143,7 +143,7 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 
 func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}) {
 	printBoxTableWithOptions(
-		[]string{"HOST", "VC", "RDY", "UNSCH", "RPR", "GPU", "CPU", "MEM", "PODS"},
+		[]string{"HOST", "VC", "RDY", "UNSCH", "RPR", "ACCEL", "CPU", "MEM", "PODS"},
 		[][]string{{
 			details.Hostname,
 			emptyDash(details.VClusterName),
@@ -322,6 +322,8 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 				{"platform pods", formatOptionalDuration(result.Timings.PlatformPods)},
 				{"platform events", formatOptionalDuration(result.Timings.PlatformEvents)},
 				{"platform logs", formatOptionalDuration(result.Timings.PlatformLogs)},
+				{"diagnosis", formatOptionalDuration(result.Timings.Diagnosis)},
+				{"enrichment", formatOptionalDuration(result.Timings.Enrichment)},
 				{"kube job", formatOptionalDuration(result.Timings.KubeJob)},
 				{"kube pods", formatOptionalDuration(result.Timings.KubePods)},
 				{"kube events", formatOptionalDuration(result.Timings.KubeEvents)},
@@ -350,6 +352,7 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 		{"SUBMITTER", emptyDash(result.Submitter)},
 		{"FRAMEWORK", emptyDash(result.Framework)},
 		{"PRIORITY", emptyDash(result.Priority)},
+		{"REQUIRED NODES", strconv.Itoa(result.RequiredNodes)},
 		{"CREATED", emptyDash(result.CreatedAt)},
 		{"STARTED", emptyDash(result.StartedAt)},
 	}

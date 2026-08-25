@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/kubernetes"
@@ -100,6 +101,8 @@ func normalizeQueueWorkloadType(value string) string {
 }
 
 func newQueueGetCmd() *cobra.Command {
+	var debugTiming bool
+	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "get [queue-name-or-uid...]",
 		Short: "列出 SSP 队列，或查询一个或多个队列详情",
@@ -131,7 +134,7 @@ func newQueueGetCmd() *cobra.Command {
 				err        error
 			}
 			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
-				result, err := resourceService.GetQueue(ctx, identifier, region)
+				result, err := resourceService.GetQueue(ctx, identifier, region, longOutput)
 				return queryResult{identifier: identifier, result: result, err: err}
 			})
 			queryErrors := make([]error, 0)
@@ -140,11 +143,22 @@ func newQueueGetCmd() *cobra.Command {
 					queryErrors = append(queryErrors, fmt.Errorf("queue %q: %w", result.identifier, result.err))
 					continue
 				}
-				output.PrintSSPQueueDetail(result.result)
+				output.PrintSSPQueueDetail(result.result, longOutput)
+				if debugTiming {
+					fmt.Fprintf(cmd.ErrOrStderr(), "queue get timing: resource=%s detail=%s reason=%s fallback=%s total=%s\n",
+						result.result.Timings.ResourceLookup.Round(time.Millisecond),
+						result.result.Timings.DetailLookup.Round(time.Millisecond),
+						result.result.Timings.DetailReason,
+						result.result.Timings.FallbackLookup.Round(time.Millisecond),
+						result.result.Timings.Total.Round(time.Millisecond),
+					)
+				}
 			}
 			return errors.Join(queryErrors...)
 		},
 	}
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 workspace UID 和节点数等完整详情")
+	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "打印 queue get 各阶段耗时")
 	return cmd
 }
 

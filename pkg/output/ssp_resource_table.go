@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"rayctl/internal/service"
 )
@@ -198,30 +199,35 @@ func PrintSSPQueueList(result *service.SSPQueueListResult) {
 	)
 }
 
-func PrintSSPQueueDetail(result *service.SSPQueueItem) {
+func PrintSSPQueueDetail(result *service.SSPQueueItem, longOutput bool) {
 	if result == nil {
 		return
 	}
+	rows := [][]string{
+		{"QUEUE", emptyDash(result.Name)},
+		{"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)},
+		{"TYPE", emptyDash(result.Type)},
+		{"WORKSPACE", emptyDash(result.Workspace)},
+		{"VC", emptyDash(result.VCluster)},
+		{"空闲资源借出", emptyDash(result.SpotLending)},
+		{"排队策略", emptyDash(result.DequeuePolicy)},
+		{"SUBSCRIPTION", emptyDash(result.Subscription)},
+		{"RESOURCE GROUP", emptyDash(result.ResourceGroup)},
+		{"REGION", emptyDash(result.Region)},
+		{"PROFILE", emptyDash(result.Profile)},
+		{"CREATED", emptyDash(result.CreatedAt)},
+		{"UPDATED", emptyDash(result.UpdatedAt)},
+	}
+	if longOutput {
+		rows = append(rows,
+			[]string{"WORKSPACE UID", emptyDash(result.WorkspaceUID)},
+			[]string{"NODE COUNT", strconv.Itoa(result.NodeCount)},
+		)
+	}
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
-		[][]string{
-			{"QUEUE", emptyDash(result.Name)},
-			{"UID", emptyDash(result.UID)},
-			{"STATE", emptyDash(result.State)},
-			{"TYPE", emptyDash(result.Type)},
-			{"空闲资源借出", emptyDash(result.SpotLending)},
-			{"排队策略", emptyDash(result.DequeuePolicy)},
-			{"WORKSPACE", emptyDash(result.Workspace)},
-			{"WORKSPACE UID", emptyDash(result.WorkspaceUID)},
-			{"VC", emptyDash(result.VCluster)},
-			{"NODE COUNT", strconv.Itoa(result.NodeCount)},
-			{"SUBSCRIPTION", emptyDash(result.Subscription)},
-			{"RESOURCE GROUP", emptyDash(result.ResourceGroup)},
-			{"REGION", emptyDash(result.Region)},
-			{"PROFILE", emptyDash(result.Profile)},
-			{"CREATED", emptyDash(result.CreatedAt)},
-			{"UPDATED", emptyDash(result.UpdatedAt)},
-		},
+		rows,
 		[]int{18, 76},
 		tableOptions{minWidths: []int{14, 24}},
 	)
@@ -285,6 +291,147 @@ func formatSSPWorkloadType(value string) string {
 	default:
 		return emptyDash(value)
 	}
+}
+
+func PrintSSPAIRJobList(result *service.SSPAIRJobListResult) {
+	rows := make([][]string, 0)
+	if result != nil {
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Workspace), emptyDash(item.Queue),
+				fmt.Sprintf("%d/%d", item.ReadyReplicas, item.Replicas), emptyDash(item.Creator), emptyDash(item.CreatedAt),
+			})
+		}
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"NAME", "STATE", "WORKSPACE", "QUEUE", "READY/TOTAL", "CREATOR", "CREATED"}, rows,
+		[]int{48, 12, 38, 48, 14, 22, 20},
+		tableOptions{noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), 0, 2, 3, 5)...), minWidths: []int{28, 8, 22, 26, 12, 14, 19}},
+	)
+}
+
+func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {
+	if result == nil {
+		return
+	}
+	rows := [][]string{
+		{"TYPE", "AIR JOB"}, {"NAME", emptyDash(result.Name)}, {"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)}, {"WORKSPACE", emptyDash(result.Workspace)}, {"QUEUE", emptyDash(result.Queue)},
+		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)}, {"PRIORITY", emptyDash(result.Priority)},
+		{"READY / TOTAL", fmt.Sprintf("%d / %d", result.ReadyReplicas, result.Replicas)}, {"CREATOR", emptyDash(result.Creator)},
+		{"INTERNAL IP", emptyDash(result.InternalIP)}, {"REGION", emptyDash(result.Region)}, {"PROFILE", emptyDash(result.Profile)},
+		{"CREATED", emptyDash(result.CreatedAt)}, {"UPDATED", emptyDash(result.UpdatedAt)},
+	}
+	if longOutput {
+		rows = append(rows,
+			[]string{"RESOURCE", formatAIRResource(result.Resource)},
+			[]string{"IMAGE", emptyDash(result.Resource.Image)},
+		)
+	}
+	printBoxTableWithOptions([]string{"FIELD", "VALUE"}, rows, []int{18, 100}, tableOptions{minWidths: []int{14, 30}})
+	if !longOutput {
+		return
+	}
+	printAIRDNATRules(result.DNATRules)
+	if len(result.Volumes) > 0 {
+		fmt.Fprintln(os.Stdout)
+		volumeRows := make([][]string, 0, len(result.Volumes))
+		for _, volume := range result.Volumes {
+			volumeRows = append(volumeRows, []string{emptyDash(volume.Type), emptyDash(volume.Name), emptyDash(volume.MountPath), emptyDash(volume.Endpoint)})
+		}
+		printBoxTableWithMaxWidths([]string{"TYPE", "VOLUME", "MOUNT PATH", "ENDPOINT"}, volumeRows, []int{18, 34, 36, 44})
+	}
+	if result.WorkerTotal > 0 || len(result.Workers) > 0 {
+		fmt.Fprintln(os.Stdout)
+		workerRows := make([][]string, 0, maxInt(1, len(result.Workers)))
+		for _, worker := range result.Workers {
+			workerRows = append(workerRows, []string{
+				emptyDash(worker.Name), emptyDash(worker.Phase), emptyDash(worker.HostIP), emptyDash(worker.PodIP),
+				strconv.Itoa(worker.Restarts), emptyDash(worker.StartedAt), emptyDash(worker.LastStarted),
+			})
+		}
+		if len(workerRows) == 0 {
+			workerRows = append(workerRows, []string{"-", "-", "-", "-", "-", "-", "-"})
+		}
+		fmt.Fprintf(os.Stdout, "WORKERS: showing %d of %d\n", len(result.Workers), result.WorkerTotal)
+		printBoxTableWithOptions(
+			[]string{"WORKER", "PHASE", "HOST IP", "POD IP", "RESTARTS", "STARTED", "LAST STARTED"},
+			workerRows,
+			[]int{48, 14, 18, 18, 10, 20, 20},
+			tableOptions{
+				noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(workerRows), 0, 2, 3, 5, 6)...),
+				minWidths:   []int{28, 10, 14, 14, 9, 19, 19},
+			},
+		)
+	}
+}
+
+func PrintSSPAIRGatewayList(result *service.SSPAIRGatewayListResult) {
+	rows := make([][]string, 0)
+	if result != nil {
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Workspace), emptyDash(item.Queue),
+				strconv.Itoa(item.Replicas), emptyDash(item.Creator), emptyDash(item.CreatedAt),
+			})
+		}
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"NAME", "STATE", "WORKSPACE", "QUEUE", "REPLICAS", "CREATOR", "CREATED"}, rows,
+		[]int{48, 12, 38, 48, 10, 22, 20},
+		tableOptions{noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), 0, 2, 3, 5)...), minWidths: []int{28, 8, 22, 26, 9, 14, 19}},
+	)
+}
+
+func PrintSSPAIRGatewayDetail(result *service.SSPAIRGatewayItem, longOutput bool) {
+	if result == nil {
+		return
+	}
+	rows := [][]string{
+		{"TYPE", "AIR GATEWAY"}, {"NAME", emptyDash(result.Name)}, {"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)}, {"WORKSPACE", emptyDash(result.Workspace)}, {"QUEUE", emptyDash(result.Queue)},
+		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)}, {"PRIORITY", emptyDash(result.Priority)},
+		{"REPLICAS", strconv.Itoa(result.Replicas)}, {"CREATOR", emptyDash(result.Creator)}, {"REGION", emptyDash(result.Region)},
+		{"PROFILE", emptyDash(result.Profile)}, {"CREATED", emptyDash(result.CreatedAt)}, {"UPDATED", emptyDash(result.UpdatedAt)},
+	}
+	if longOutput {
+		rows = append(rows, []string{"RESOURCE", formatAIRResource(result.Resource)})
+	}
+	printBoxTableWithOptions([]string{"FIELD", "VALUE"}, rows, []int{18, 100}, tableOptions{minWidths: []int{14, 30}})
+	if longOutput {
+		printAIRDNATRules(result.DNATRules)
+	}
+}
+
+func printAIRDNATRules(rules []service.SSPAIRDNATItem) {
+	if len(rules) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	rows := make([][]string, 0, len(rules))
+	for _, rule := range rules {
+		rows = append(rows, []string{emptyDash(rule.External), emptyDash(rule.Internal), emptyDash(rule.Protocol), emptyDash(rule.Gateway)})
+	}
+	printBoxTableWithMaxWidths([]string{"EXTERNAL", "INTERNAL", "PROTOCOL", "NAT GATEWAY"}, rows, []int{28, 28, 12, 34})
+}
+
+func formatAIRResource(resource service.SSPAIRResourceItem) string {
+	parts := make([]string, 0, 5)
+	for _, item := range []struct{ label, value string }{
+		{"CPU", resource.CPU}, {"MEM", resource.Memory}, {"ACCEL", resource.Accelerator},
+		{"MACHINE", resource.MachineType}, {"RDMA", resource.RDMA},
+	} {
+		if item.value != "" {
+			parts = append(parts, item.label+"="+item.value)
+		}
+	}
+	return emptyDash(strings.Join(parts, " "))
 }
 
 func PrintSSPQueueNodeList(result *service.SSPQueueNodeListResult, longOutput bool) {

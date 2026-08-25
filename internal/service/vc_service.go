@@ -7,8 +7,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -16,8 +18,11 @@ import (
 )
 
 type VCService struct {
-	vcClient  *platform.VirtualClusterClient
-	clientset kubernetes.Interface
+	vcClient           *platform.VirtualClusterClient
+	clientset          kubernetes.Interface
+	allocatableOnce    sync.Once
+	allocatableByNode  map[string]corev1.ResourceList
+	allocatableListErr error
 }
 
 type VCListResult struct {
@@ -378,6 +383,11 @@ func (s *VCService) GetResourceUsage(ctx context.Context, clusterIdentifier stri
 			Usage:    usageByUID[strings.TrimSpace(node.UID)],
 		})
 	}
+	if kubernetesNodes, nodeErr := s.vcClient.ListKubernetesNodesForProfile(ctx, cluster.Tenant, cluster.Name); nodeErr == nil {
+		applyKubernetesNodeAllocatable(items, kubernetesNodes)
+	} else {
+		s.applyLocalNodeAllocatable(ctx, items)
+	}
 	sort.Slice(items, func(i, j int) bool {
 		return strings.ToLower(firstNonEmpty(items[i].HostIP, items[i].HostName, items[i].UID)) <
 			strings.ToLower(firstNonEmpty(items[j].HostIP, items[j].HostName, items[j].UID))
@@ -388,6 +398,114 @@ func (s *VCService) GetResourceUsage(ctx context.Context, clusterIdentifier stri
 		ProfileName: cluster.Tenant,
 		Items:       items,
 	}, nil
+}
+
+func (s *VCService) applyLocalNodeAllocatable(ctx context.Context, items []VCNodeResourceUsageItem) {
+	if s == nil || s.clientset == nil || len(items) == 0 {
+		return
+	}
+	s.allocatableOnce.Do(func() {
+		nodes, err := s.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{ResourceVersion: "0"})
+		if err != nil {
+			s.allocatableListErr = err
+			return
+		}
+		s.allocatableByNode = make(map[string]corev1.ResourceList, len(nodes.Items)*2)
+		for index := range nodes.Items {
+			node := &nodes.Items[index]
+			resources := node.Status.Allocatable
+			if name := normalizeVCNodeLookupKey(node.Name); name != "" {
+				s.allocatableByNode[name] = resources
+			}
+			for _, address := range node.Status.Addresses {
+				if address.Type != corev1.NodeInternalIP {
+					continue
+				}
+				if ip := normalizeVCNodeLookupKey(address.Address); ip != "" {
+					s.allocatableByNode[ip] = resources
+				}
+			}
+		}
+	})
+	if s.allocatableListErr != nil {
+		return
+	}
+	applyAllocatableByNode(items, s.allocatableByNode)
+}
+
+func applyKubernetesNodeAllocatable(items []VCNodeResourceUsageItem, nodes []corev1.Node) {
+	allocatableByNode := make(map[string]corev1.ResourceList, len(nodes)*2)
+	for index := range nodes {
+		node := &nodes[index]
+		if name := normalizeVCNodeLookupKey(node.Name); name != "" {
+			allocatableByNode[name] = node.Status.Allocatable
+		}
+		for _, address := range node.Status.Addresses {
+			if address.Type == corev1.NodeInternalIP {
+				allocatableByNode[normalizeVCNodeLookupKey(address.Address)] = node.Status.Allocatable
+			}
+		}
+	}
+	applyAllocatableByNode(items, allocatableByNode)
+}
+
+func applyAllocatableByNode(items []VCNodeResourceUsageItem, allocatableByNode map[string]corev1.ResourceList) {
+	for index := range items {
+		resources, ok := allocatableByNode[normalizeVCNodeLookupKey(items[index].HostName)]
+		if !ok {
+			resources, ok = allocatableByNode[normalizeVCNodeLookupKey(items[index].HostIP)]
+		}
+		if ok {
+			applyAllocatableToVCNodeUsage(&items[index].Usage, resources)
+		}
+	}
+}
+
+func applyAllocatableToVCNodeUsage(usage *platform.VirtualClusterNodeResourceUsage, resources corev1.ResourceList) {
+	if usage == nil {
+		return
+	}
+	if cpu, ok := resources[corev1.ResourceCPU]; ok {
+		usage.Usage.Total.CPU = formatAllocatableCPU(cpu.MilliValue())
+	}
+	if memory, ok := resources[corev1.ResourceMemory]; ok {
+		usage.Usage.Total.Memory = formatAllocatableMemory(memory.Value())
+	}
+	if accelerator, ok := allocatableAccelerator(resources); ok {
+		usage.Usage.Total.Device = strconv.FormatInt(accelerator, 10)
+		allocated, err := strconv.ParseFloat(strings.TrimSpace(usage.Usage.Allocated.Device), 64)
+		if err == nil {
+			available := float64(accelerator) - allocated
+			if available < 0 {
+				available = 0
+			}
+			usage.Usage.Available.Device = strconv.FormatFloat(available, 'f', -1, 64)
+		}
+	}
+}
+
+func allocatableAccelerator(resources corev1.ResourceList) (int64, bool) {
+	for _, resourceName := range gpuResourceNames() {
+		if accelerator, ok := resources[corev1.ResourceName(resourceName)]; ok {
+			return accelerator.Value(), true
+		}
+	}
+	return 0, false
+}
+
+func formatAllocatableCPU(milliCPU int64) string {
+	return strconv.FormatFloat(float64(milliCPU)/1000, 'f', -1, 64)
+}
+
+func formatAllocatableMemory(bytes int64) string {
+	const gibibyte = int64(1024 * 1024 * 1024)
+	gibibytes := strconv.FormatFloat(float64(bytes)/float64(gibibyte), 'f', 3, 64)
+	gibibytes = strings.TrimRight(strings.TrimRight(gibibytes, "0"), ".")
+	return gibibytes + "GiB"
+}
+
+func normalizeVCNodeLookupKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func (s *VCService) PrepareNodeRemove(ctx context.Context, clusterIdentifier string, nodeIdentifiers []string) (*VCNodeRemoveResult, error) {

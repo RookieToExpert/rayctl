@@ -29,6 +29,7 @@ const (
 	nodeQueueUIDLabelKey          = "resource.compute.sensecore.cn/queue-uid"
 	metaxGPUResourceName          = "metax-tech.com/gpu"
 	huaweiGPUResourceName         = "huawei.com/Ascend910"
+	nvidiaGPUResourceName         = "nvidia.com/gpu"
 	metaxGPUTopologyAnnotationKey = "metax-tech.com/gpu.topology.zones"
 )
 
@@ -540,6 +541,7 @@ func gpuResourceNames() []string {
 	return []string{
 		metaxGPUResourceName,
 		huaweiGPUResourceName,
+		nvidiaGPUResourceName,
 	}
 }
 
@@ -612,7 +614,7 @@ func formatCPUUsage(allocated, total resource.Quantity) string {
 }
 
 func formatMemoryUsage(allocated, total resource.Quantity) string {
-	return fmt.Sprintf("%s/%s", humanMemory(allocated), humanMemory(total))
+	return fmt.Sprintf("%s/%sGiB", humanMemoryGiB(allocated), humanMemoryGiB(total))
 }
 
 func humanCPU(q resource.Quantity) string {
@@ -620,18 +622,13 @@ func humanCPU(q resource.Quantity) string {
 	if milli%1000 == 0 {
 		return fmt.Sprintf("%d", milli/1000)
 	}
-	return fmt.Sprintf("%.3f", float64(milli)/1000.0)
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", float64(milli)/1000.0), "0"), ".")
 }
 
-func humanMemory(q resource.Quantity) string {
-	bytes := q.Value()
+func humanMemoryGiB(q resource.Quantity) string {
 	const gi = int64(1024 * 1024 * 1024)
-	const mi = int64(1024 * 1024)
-
-	if bytes%gi == 0 {
-		return fmt.Sprintf("%dGi", bytes/gi)
-	}
-	return fmt.Sprintf("%dMi", bytes/mi)
+	value := fmt.Sprintf("%.3f", float64(q.Value())/float64(gi))
+	return strings.TrimRight(strings.TrimRight(value, "0"), ".")
 }
 
 func nodeReadyStatus(conditions []corev1.NodeCondition) string {

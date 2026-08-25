@@ -2810,6 +2810,19 @@ func (c *VirtualClusterClient) listPodsWithProfile(ctx context.Context, profile 
 	return podList.Items, nil
 }
 
+func (c *VirtualClusterClient) ListKubernetesNodesForProfile(ctx context.Context, profileName string, vclusterName string) ([]corev1.Node, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/api/v1/nodes", nil)
+	var nodeList corev1.NodeList
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &nodeList); err != nil {
+		return nil, err
+	}
+	return nodeList.Items, nil
+}
+
 func (c *VirtualClusterClient) GetPodGroup(ctx context.Context, vclusterName string, namespace string, podGroupName string) (*unstructured.Unstructured, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {

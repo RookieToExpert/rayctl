@@ -254,6 +254,35 @@ func TestClassifyDockerLoginErrorKeepsUnauthorizedAsCredentialFailure(t *testing
 	}
 }
 
+func TestDockerRegistryHostname(t *testing.T) {
+	tests := map[string]string{
+		"registry2.d.pjlab.org.cn":     "registry2.d.pjlab.org.cn",
+		"registry.example.com:5000":    "registry.example.com",
+		"https://index.docker.io/v1/":  "index.docker.io",
+		"registry.example.com/v2/path": "registry.example.com",
+		"[2001:db8::1]:5000":           "2001:db8::1",
+	}
+	for registry, want := range tests {
+		got, err := dockerRegistryHostname(registry)
+		if err != nil {
+			t.Fatalf("dockerRegistryHostname(%q) error = %v", registry, err)
+		}
+		if got != want {
+			t.Fatalf("dockerRegistryHostname(%q) = %q, want %q", registry, got, want)
+		}
+	}
+}
+
+func TestClassifyDockerLoginTimeoutAsUnavailable(t *testing.T) {
+	status, message := classifyDockerLoginError(fmt.Errorf("docker login: %w", context.DeadlineExceeded), "registry.example.com")
+	if status != "ERROR" {
+		t.Fatalf("status = %q, want ERROR", status)
+	}
+	if !strings.Contains(message, "暂时无法确认") {
+		t.Fatalf("message = %q, want temporary verification failure", message)
+	}
+}
+
 func TestIsSSPManagedWorkloadPod(t *testing.T) {
 	for _, workloadType := range []string{SSPWorkloadTypeTrainingJob, SSPWorkloadTypeAID} {
 		pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sspWorkloadTypeLabel: workloadType}}}

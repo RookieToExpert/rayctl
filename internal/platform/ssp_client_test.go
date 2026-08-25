@@ -81,6 +81,32 @@ func TestFindSSPTrainingJobsUsesRegionProfileAndExactFilter(t *testing.T) {
 	}
 }
 
+func TestListSSPTrainingJobWorkersUsesDetailWorkerEndpoint(t *testing.T) {
+	var requestPath, pageSize, skip string
+	client := &VirtualClusterClient{
+		profiles: map[string]clientProfile{"pt": {
+			Name: "pt", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.pjlab.org.cn", ResourceGroup: "default", Region: "cn-pj-03",
+		}},
+		httpClient: &http.Client{Transport: sspRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requestPath = r.URL.Path
+			pageSize = r.URL.Query().Get("page_size")
+			skip = r.URL.Query().Get("skip")
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"total_size":1,"workers":[{"name":"demo-task-0","namespace":"virtual-ns","phase":"PENDING","resource":{"accelerate_device_count":4,"cpu_count":16,"memory_gib":192}}]}`)), Request: r}, nil
+		})},
+	}
+	job := SSPTrainingJob{Name: "demo", WorkspaceName: "ws-demo", SubscriptionName: "sub-1", Region: "cn-pj-03", ProfileName: "pt"}
+	workers, total, err := client.ListSSPTrainingJobWorkers(context.Background(), job, 100)
+	if err != nil {
+		t.Fatalf("ListSSPTrainingJobWorkers() error = %v", err)
+	}
+	if requestPath != "/ait/data/v1/subscriptions/sub-1/resourceGroups/default/regions/cn-pj-03/workspaces/ws-demo/trainingJobs/demo/workers" || pageSize != "100" || skip != "0" {
+		t.Fatalf("path=%q page_size=%q skip=%q", requestPath, pageSize, skip)
+	}
+	if total != 1 || len(workers) != 1 || workers[0].Name != "demo-task-0" {
+		t.Fatalf("total=%d workers=%#v", total, workers)
+	}
+}
+
 func TestConfiguredSubscriptionForRegion(t *testing.T) {
 	client := &VirtualClusterClient{
 		currentProfile: "d",
@@ -294,7 +320,7 @@ func TestGetSSPQueueResourceReadsClusterRelationAndNodes(t *testing.T) {
         "name": "queue-demo",
         "type": "compute.ssp.v1.queue",
         "state": "RUNNING",
-        "properties": "{\"type\":\"EXCLUSIVE\",\"nodes\":[{\"name\":\"acn-one\"},{\"name\":\"acn-two\"}]}"
+        "properties": "{\"type\":\"EXCLUSIVE\",\"nodes\":[{\"name\":\"acn-one\"},{\"name\":\"acn-two\"}],\"node_status\":{\"total\":144},\"workspace\":{\"name\":\"ws-demo\",\"uid\":\"ws-uid\"},\"advanced_settings\":{\"provide_spot_resource_enabled\":true,\"dequeue_strategy\":\"BALANCED\"}}"
       }
     }]
   }]
@@ -314,6 +340,9 @@ func TestGetSSPQueueResourceReadsClusterRelationAndNodes(t *testing.T) {
 	}
 	if details.UID != "queue-uid" || details.ClusterName != "cluster-a3" || details.VClusterName != "vc-a3-demo" || details.Subscription != "sub-1" || len(details.NodeNames) != 2 {
 		t.Fatalf("unexpected queue details: %#v", details)
+	}
+	if details.WorkspaceName != "ws-demo" || details.WorkspaceUID != "ws-uid" || details.NodeCount != 144 || !details.NodeCountKnown || details.SpotLending == nil || !*details.SpotLending || details.DequeuePolicy != "BALANCED" {
+		t.Fatalf("unexpected queue detail properties: %#v", details)
 	}
 	queues, err := client.ListSSPQueueResources(context.Background(), "pt", "cn-pj-03")
 	if err != nil {

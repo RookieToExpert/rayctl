@@ -172,6 +172,27 @@ func TestMakeSSPPodResourceItemsFallsBackToPodMachineType(t *testing.T) {
 	}
 }
 
+func TestMakeSSPWorkerResourceItemsAndRequiredNodes(t *testing.T) {
+	task := platform.SSPTrainingJobTask{Name: "task", Replicas: 2}
+	task.ResourceSpec.AccelerateDeviceModel = "A800"
+	var worker platform.SSPTrainingJobWorker
+	worker.Name = "demo-task-0"
+	worker.Phase = "PENDING"
+	worker.Resource.CPUCount = 16
+	worker.Resource.MemoryGiB = 192
+	worker.Resource.AccelerateDeviceCount = 4
+	worker.Containers = append(worker.Containers, struct {
+		Name string `json:"name"`
+	}{Name: "task"})
+	items, nodes := makeSSPWorkerResourceItems([]platform.SSPTrainingJobWorker{worker}, []platform.SSPTrainingJobTask{task})
+	if len(items) != 1 || items[0].Pod != "demo-task-0" || items[0].Phase != "Pending" || items[0].CPU != "16" || items[0].Memory != "192Gi" || items[0].Accelerator != "4" || items[0].Model != "A800" {
+		t.Fatalf("items = %#v", items)
+	}
+	if len(nodes) != 0 || requiredSSPJobNodes([]platform.SSPTrainingJobTask{task}, 1) != 2 {
+		t.Fatalf("nodes=%#v required=%d", nodes, requiredSSPJobNodes([]platform.SSPTrainingJobTask{task}, 1))
+	}
+}
+
 func TestEnrichSSPPodMachineTypesFallsBackToAssignedNode(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 		Name:   "host-1",

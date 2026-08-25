@@ -102,6 +102,7 @@ type SSPJobGetResult struct {
 	InspectPod             string
 	CheckEvidence          []CheckEvidenceItem
 	RecentLogLines         []string
+	RequiredNodes          int
 }
 
 type SSPJobTaskItem struct {
@@ -385,19 +386,24 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 	if hostNamespace == "" {
 		hostNamespace = s.findHostNamespace(ctx, job.WorkspaceName, job.Namespace)
 	}
-	if hostNamespace == "" && !isTerminalSSPJobState(normalizeSSPJobState(job.Status.State)) {
-		return nil, &SSPKubeconfigMismatchError{Job: job.Name, Workspace: job.WorkspaceName}
-	}
 	pods := filterSSPPodsForJob(seedPods, job)
-	if len(pods) == 0 {
+	if len(pods) == 0 && hostNamespace != "" {
 		var err error
 		pods, err = s.findTrainingJobPods(ctx, firstNonEmpty(job.UID, job.Name), hostNamespace)
 		if err != nil {
 			return nil, fmt.Errorf("list SSP job pods: %w", err)
 		}
 	}
+	workers := []platform.SSPTrainingJobWorker(nil)
+	workerTotal := 0
+	if len(pods) == 0 {
+		workers, workerTotal, _ = s.platform.ListSSPTrainingJobWorkers(ctx, job, 100)
+	}
+	if hostNamespace == "" && len(workers) == 0 && !isTerminalSSPJobState(normalizeSSPJobState(job.Status.State)) {
+		return nil, &SSPKubeconfigMismatchError{Job: job.Name, Workspace: job.WorkspaceName}
+	}
 
-	return s.buildResult(ctx, job, hostNamespace, pods, includeLogs), nil
+	return s.buildResult(ctx, job, hostNamespace, pods, workers, workerTotal, includeLogs), nil
 }
 
 func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requested string, pods []corev1.Pod) ([]sspWorkspaceRef, error) {
@@ -770,7 +776,7 @@ func (s *SSPJobService) findHostNamespace(ctx context.Context, workspace string,
 	return ""
 }
 
-func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainingJob, hostNamespace string, pods []corev1.Pod, includeLogs bool) *SSPJobGetResult {
+func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainingJob, hostNamespace string, pods []corev1.Pod, workers []platform.SSPTrainingJobWorker, workerTotal int, includeLogs bool) *SSPJobGetResult {
 	status := normalizeSSPJobState(job.Status.State)
 	terminal := isTerminalSSPJobState(status)
 	vcResult := asyncCall(ctx, func(ctx context.Context) (string, error) {
@@ -794,13 +800,19 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 		EndedAt:       formatSSPTime(job.Status.EndTime),
 		Terminal:      terminal,
 		InspectPod:    "-",
+		RequiredNodes: requiredSSPJobNodes(job.Spec.VCJob.Tasks, workerTotal),
 	}
 	result.PodResources, result.Nodes = makeSSPPodResourceItems(pods, job.Spec.VCJob.Tasks)
+	if len(result.PodResources) == 0 && len(workers) > 0 {
+		result.PodResources, result.Nodes = makeSSPWorkerResourceItems(workers, job.Spec.VCJob.Tasks)
+	}
 	result.PodResources = s.enrichSSPPodMachineTypes(ctx, result.PodResources)
 	inspectPod := chooseInspectPod(append([]corev1.Pod(nil), pods...))
 	logPod := chooseMasterLogPod(pods)
 	if inspectPod != nil {
 		result.InspectPod = inspectPod.Name
+	} else if len(workers) > 0 {
+		result.InspectPod = workers[0].Name
 	}
 	if terminal {
 		result.VCluster = (<-vcResult).Value
@@ -828,6 +840,15 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 		}
 	}
 	switch {
+	case len(pods) == 0 && len(workers) > 0:
+		result.Stage = "scheduling"
+		displayTotal := workerTotal
+		if displayTotal < len(workers) {
+			displayTotal = len(workers)
+		}
+		result.Diagnosis = []string{fmt.Sprintf("平台已创建 %d/%d 个 Worker，首个 Worker 状态为 %s，但当前 HC 尚未发现对应 Pod。", len(workers), displayTotal, normalizeSSPJobState(workers[0].Phase))}
+		result.Instruction = "可先按 INSPECT POD 在平台 Worker 视图检查；如需 Kubernetes 事件，请确认当前 HC kubeconfig 和 workspace namespace 映射。"
+		result.CheckEvidence = platformConditionEvidence(job.Status.Conditions)
 	case len(pods) == 0:
 		result.Stage = "scheduling"
 		result.Diagnosis = []string{"任务处于 Pending，但当前 HC 尚未观察到 Pod，当前更可能仍在队列、控制器或 Gang 调度阶段。"}
@@ -862,6 +883,67 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 	}
 	result.Stage, result.Diagnosis = ensurePVCGetDiagnosis(status, terminal, result.Stage, result.Diagnosis, result.PersistentVolumeClaims)
 	return result
+}
+
+func requiredSSPJobNodes(tasks []platform.SSPTrainingJobTask, workerTotal int) int {
+	total := 0
+	for _, task := range tasks {
+		if task.Replicas > 0 {
+			total += task.Replicas
+		}
+	}
+	if total == 0 {
+		return workerTotal
+	}
+	return total
+}
+
+func makeSSPWorkerResourceItems(workers []platform.SSPTrainingJobWorker, tasks []platform.SSPTrainingJobTask) ([]SSPJobPodResourceItem, []string) {
+	tasksByName := make(map[string]platform.SSPTrainingJobTask, len(tasks)*2)
+	for _, task := range tasks {
+		for _, value := range []string{task.Name, task.Role} {
+			if key := strings.ToLower(strings.TrimSpace(value)); key != "" {
+				tasksByName[key] = task
+			}
+		}
+	}
+	items := make([]SSPJobPodResourceItem, 0, len(workers))
+	nodeSet := make(map[string]struct{})
+	for _, worker := range workers {
+		taskName := ""
+		if len(worker.Containers) > 0 {
+			taskName = worker.Containers[0].Name
+		}
+		task, found := tasksByName[strings.ToLower(strings.TrimSpace(taskName))]
+		if !found && len(tasks) == 1 {
+			task = tasks[0]
+			found = true
+		}
+		node := firstNonEmpty(worker.ACN.HostName, worker.ACN.Name)
+		item := SSPJobPodResourceItem{
+			Pod: worker.Name, Phase: normalizeSSPJobState(worker.Phase), Node: dashIfEmpty(node),
+			CPU: formatSSPResource(worker.Resource.CPUCount, ""), Memory: formatSSPResource(worker.Resource.MemoryGiB, "Gi"),
+			MachineType: worker.Resource.MachineType, Model: worker.Resource.AccelerateDeviceModel,
+			Accelerator: formatSSPResource(worker.Resource.AccelerateDeviceCount, ""),
+		}
+		if found {
+			item.CPU = firstNonEmpty(item.CPU, formatSSPResource(task.ResourceSpec.CPUCount, ""))
+			item.Memory = firstNonEmpty(item.Memory, formatSSPResource(task.ResourceSpec.MemoryGiB, "Gi"))
+			item.MachineType = firstNonEmpty(item.MachineType, strings.Join(task.ResourceSpec.MachineTypes, ", "))
+			item.Model = firstNonEmpty(item.Model, task.ResourceSpec.AccelerateDeviceModel)
+			item.Accelerator = firstNonEmpty(item.Accelerator, formatSSPResource(task.ResourceSpec.AccelerateDeviceCount, ""))
+		}
+		items = append(items, item)
+		if node != "" {
+			nodeSet[node] = struct{}{}
+		}
+	}
+	nodes := make([]string, 0, len(nodeSet))
+	for node := range nodeSet {
+		nodes = append(nodes, node)
+	}
+	sort.Strings(nodes)
+	return items, nodes
 }
 
 func makeSSPPodItems(pods []corev1.Pod) ([]JobPodItem, []string) {

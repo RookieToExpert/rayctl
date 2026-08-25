@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -69,6 +70,52 @@ func TestFilterFreeAcceleratorNodes(t *testing.T) {
 
 	if len(result.Items) != 1 || result.Items[0].HostName != "free" {
 		t.Fatalf("filtered items = %#v", result.Items)
+	}
+}
+
+func TestApplyAllocatableToVCNodeUsage(t *testing.T) {
+	usage := platform.VirtualClusterNodeResourceUsage{}
+	usage.Usage.Total.CPU = "160"
+	usage.Usage.Total.Memory = "2048GiB"
+	usage.Usage.Total.Device = "8"
+	usage.Usage.Allocated.Device = "0"
+	resources := corev1.ResourceList{
+		corev1.ResourceCPU:                         resource.MustParse("144"),
+		corev1.ResourceMemory:                      resource.MustParse("1920Gi"),
+		corev1.ResourceName(huaweiGPUResourceName): resource.MustParse("7"),
+	}
+
+	applyAllocatableToVCNodeUsage(&usage, resources)
+
+	if usage.Usage.Total.CPU != "144" {
+		t.Fatalf("cpu total = %q, want 144", usage.Usage.Total.CPU)
+	}
+	if usage.Usage.Total.Memory != "1920GiB" {
+		t.Fatalf("memory total = %q, want 1920GiB", usage.Usage.Total.Memory)
+	}
+	if usage.Usage.Total.Device != "7" {
+		t.Fatalf("device total = %q, want 7", usage.Usage.Total.Device)
+	}
+	if usage.Usage.Available.Device != "7" {
+		t.Fatalf("device available = %q, want 7", usage.Usage.Available.Device)
+	}
+}
+
+func TestApplyNVIDIAAllocatableToVCNodeUsage(t *testing.T) {
+	usage := platform.VirtualClusterNodeResourceUsage{}
+	usage.Usage.Total.Device = "8"
+	usage.Usage.Allocated.Device = "3"
+	resources := corev1.ResourceList{
+		corev1.ResourceName(nvidiaGPUResourceName): resource.MustParse("7"),
+	}
+
+	applyAllocatableToVCNodeUsage(&usage, resources)
+
+	if usage.Usage.Total.Device != "7" {
+		t.Fatalf("device total = %q, want 7", usage.Usage.Total.Device)
+	}
+	if usage.Usage.Available.Device != "4" {
+		t.Fatalf("device available = %q, want 4", usage.Usage.Available.Device)
 	}
 }
 
