@@ -18,30 +18,39 @@ func newAFSCmd() *cobra.Command {
 		Short: "查询 AFS 资源及其 PVC/PV 映射关系",
 	}
 
+	afsCmd.AddCommand(newAFSListCmd())
 	afsCmd.AddCommand(newAFSGetCmd())
 	afsCmd.AddCommand(newAFSCheckCmd())
 	return afsCmd
 }
 
+func newAFSListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "列出 AFS 资源",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			networkService, err := newNetworkResourceService()
+			if err != nil {
+				return err
+			}
+			result, err := networkService.ListAFS(cmd.Context())
+			if err != nil {
+				return err
+			}
+			output.PrintAFSList(result)
+			return nil
+		},
+	}
+}
+
 func newAFSGetCmd() *cobra.Command {
 	var longOutput bool
 	cmd := &cobra.Command{
-		Use:   "get [afs-name-or-uid...]",
-		Short: "列出 AFS，或并行查询一个或多个 AFS 与 host PV/PVC 映射",
-		Args:  cobra.ArbitraryArgs,
+		Use:   "get <afs-name-or-uid> [afs-name-or-uid...]",
+		Short: "并行查询一个或多个 AFS 与 host PV/PVC 映射",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				networkService, err := newNetworkResourceService()
-				if err != nil {
-					return err
-				}
-				result, err := networkService.ListAFS(cmd.Context())
-				if err != nil {
-					return err
-				}
-				output.PrintAFSList(result)
-				return nil
-			}
 			return runAFSQueries(cmd, args, longOutput)
 		},
 	}
@@ -79,6 +88,7 @@ func newAFSCheckCmd() *cobra.Command {
 		Use:        "check <afs-name-or-uid> [afs-name-or-uid...]",
 		Short:      "兼容入口：查询 AFS 与 host PV/PVC 映射",
 		Deprecated: "请使用 rayctl afs get <afs-name-or-uid...>",
+		Hidden:     true,
 		Args:       cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAFSQueries(cmd, args, longOutput)

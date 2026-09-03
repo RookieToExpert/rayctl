@@ -293,6 +293,64 @@ func formatSSPWorkloadType(value string) string {
 	}
 }
 
+func PrintSSPAITList(result *service.SSPCatalogListResult) {
+	printSSPCatalogList(result, false, true)
+}
+
+func PrintSSPAIDList(result *service.SSPCatalogListResult, longOutput bool) {
+	printSSPCatalogList(result, longOutput, longOutput)
+}
+
+func printSSPCatalogList(result *service.SSPCatalogListResult, includeResource bool, includeCreated bool) {
+	rows := make([][]string, 0)
+	total := 0
+	if result != nil {
+		total = len(result.Items)
+		for _, item := range result.Items {
+			row := []string{
+				emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Workspace),
+				emptyDash(item.Queue), emptyDash(item.Creator),
+			}
+			if includeResource {
+				row = append(row, emptyDash(item.Resource))
+			}
+			if includeCreated {
+				row = append(row, emptyDash(item.CreatedAt))
+			}
+			rows = append(rows, row)
+		}
+	}
+	headers := []string{"NAME", "STATE", "WORKSPACE", "QUEUE", "CREATOR"}
+	maxWidths := []int{48, 16, 38, 48, 22}
+	minWidths := []int{28, 12, 22, 26, 14}
+	if includeResource {
+		headers = append(headers, "RESOURCE")
+		maxWidths = append(maxWidths, 58)
+		minWidths = append(minWidths, 24)
+	}
+	if includeCreated {
+		headers = append(headers, "CREATED")
+		maxWidths = append(maxWidths, 20)
+		minWidths = append(minWidths, 19)
+	}
+	if len(rows) == 0 {
+		row := make([]string, len(headers))
+		for index := range row {
+			row[index] = "-"
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(
+		headers, rows,
+		maxWidths,
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), 0, 1, 2, 3, 4)...),
+			minWidths:   minWidths,
+		},
+	)
+	fmt.Fprintf(os.Stdout, "\n本次筛选共 %d 条。\n", total)
+}
+
 func PrintSSPAIRJobList(result *service.SSPAIRJobListResult) {
 	rows := make([][]string, 0)
 	if result != nil {
@@ -438,25 +496,43 @@ func PrintSSPQueueNodeList(result *service.SSPQueueNodeListResult, longOutput bo
 	if result == nil {
 		return
 	}
+	rows := [][]string{
+		{"QUEUE", emptyDash(result.Queue.Name)},
+		{"QUEUE UID", emptyDash(result.Queue.UID)},
+		{"TYPE", emptyDash(result.Queue.Type)},
+		{"WORKSPACE", emptyDash(result.Queue.Workspace)},
+		{"VC", emptyDash(result.Queue.VCluster)},
+		{"NODE COUNT", strconv.Itoa(len(result.Items))},
+	}
+	if result.SharedVCPool {
+		rows = append(rows,
+			[]string{"NODE SCOPE", "VC 共享候选池（非队列独占节点）"},
+			[]string{"调度说明", "ELASTIC 动态分配节点，已分配节点会被优先复用"},
+		)
+	}
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
-		[][]string{
-			{"QUEUE", emptyDash(result.Queue.Name)},
-			{"QUEUE UID", emptyDash(result.Queue.UID)},
-			{"WORKSPACE", emptyDash(result.Queue.Workspace)},
-			{"VC", emptyDash(result.Queue.VCluster)},
-			{"NODE COUNT", strconv.Itoa(len(result.Items))},
-		},
+		rows,
 		[]int{16, 76},
 		tableOptions{minWidths: []int{12, 24}},
 	)
 	fmt.Fprintln(os.Stdout)
-	printVCNodeItems(result.Items, longOutput)
+	printVCNodeItems(result.Items, longOutput, false)
 }
 
 func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 	multipleQueues := len(results) > 1
+	showAccelerator := sspQueueUsageHasAccelerator(results)
 	rows := make([][]string, 0)
+	for _, result := range results {
+		if result != nil && result.SharedVCPool {
+			fmt.Fprintf(
+				os.Stdout,
+				"说明 [%s]: ELASTIC 动态分配节点；下表展示 VC 共享候选池，已分配节点会被优先复用，并非队列独占资源。\n\n",
+				emptyDash(result.Queue.Name),
+			)
+		}
+	}
 	for _, result := range results {
 		if result == nil {
 			continue
@@ -478,20 +554,31 @@ func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 				emptyDash(item.HostName),
 				emptyDash(item.HostIP),
 				emptyDash(item.State),
-				emptyDash(accelerator),
-				emptyDash(cpu),
-				emptyDash(memory),
 			}
+			if showAccelerator {
+				row = append(row, emptyDash(accelerator))
+			}
+			row = append(row, emptyDash(cpu), emptyDash(memory))
 			if multipleQueues {
 				row = append([]string{emptyDash(result.Queue.Name)}, row...)
 			}
 			rows = append(rows, row)
 		}
 	}
-	headers := []string{"HOST", "IP", "STATE", "ACCEL ALLOC/TOTAL", "CPU ALLOC/TOTAL", "MEMORY ALLOC/TOTAL"}
-	widths := []int{20, 15, 10, 18, 18, 22}
-	minimums := []int{20, 15, 8, 17, 15, 20}
-	emptyRow := []string{"-", "-", "-", "-", "-", "-"}
+	headers := []string{"HOST", "IP", "STATE"}
+	widths := []int{20, 15, 10}
+	minimums := []int{20, 15, 8}
+	emptyRow := []string{"-", "-", "-"}
+	if showAccelerator {
+		headers = append(headers, "ACCEL ALLOC/TOTAL")
+		widths = append(widths, 18)
+		minimums = append(minimums, 17)
+		emptyRow = append(emptyRow, "-")
+	}
+	headers = append(headers, "CPU ALLOC/TOTAL", "MEMORY ALLOC/TOTAL")
+	widths = append(widths, 18, 22)
+	minimums = append(minimums, 15, 20)
+	emptyRow = append(emptyRow, "-", "-")
 	if multipleQueues {
 		headers = append([]string{"QUEUE"}, headers...)
 		widths = append([]int{34}, widths...)
@@ -502,4 +589,21 @@ func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 		rows = append(rows, emptyRow)
 	}
 	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
+}
+
+func sspQueueUsageHasAccelerator(results []*service.SSPQueueNodeUsageResult) bool {
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		for _, item := range result.Items {
+			if item.AcceleratorTotal > 0 || item.AcceleratorFree > 0 ||
+				platformResourceAmountIsPositive(item.AcceleratorTotalText) ||
+				platformResourceAmountIsPositive(item.AcceleratorAllocated) ||
+				platformResourceAmountIsPositive(item.Accelerator) {
+				return true
+			}
+		}
+	}
+	return false
 }

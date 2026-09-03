@@ -21,16 +21,36 @@ func newECSCmd() *cobra.Command {
 		Short: "查询 ECS/AIS 在 HC 中对应的 VM/VMI 信息",
 	}
 
+	ecsCmd.AddCommand(newECSGetCmd())
 	ecsCmd.AddCommand(newECSCheckCmd())
 	ecsCmd.AddCommand(newECSLoginCmd())
 	return ecsCmd
 }
 
+func newECSGetCmd() *cobra.Command {
+	return newECSQueryCmd(
+		"get <ais-name-or-ecs-name-or-uid> [ais-name-or-ecs-name-or-uid...]",
+		"并行查询一个或多个 AIS/ECS 的 VM、namespace、node、创建人和内网 IP",
+		"  rayctl ecs get ais-example ecs-example another-uid",
+	)
+}
+
 func newECSCheckCmd() *cobra.Command {
+	cmd := newECSQueryCmd(
+		"check <ais-name-or-ecs-name-or-uid> [ais-name-or-ecs-name-or-uid...]",
+		"兼容旧版：查询一个或多个 AIS/ECS",
+		"  rayctl ecs check ais-example ecs-example another-uid",
+	)
+	cmd.Hidden = true
+	cmd.Deprecated = "请使用 rayctl ecs get"
+	return cmd
+}
+
+func newECSQueryCmd(use string, short string, example string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "check <ais-name-or-ecs-name-or-uid> [ais-name-or-ecs-name-or-uid...]",
-		Short:   "并行查询一个或多个 AIS/ECS 的 VM、namespace、node、创建人和内网 IP",
-		Example: "  rayctl ecs check ais-example ecs-example another-uid",
+		Use:     use,
+		Short:   short,
+		Example: example,
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dynamicClient, err := kube.NewDynamicClient(kubeconfig)

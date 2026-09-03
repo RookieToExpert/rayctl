@@ -27,6 +27,25 @@ func TestFindSSPAIDsUsesNameFilter(t *testing.T) {
 	}
 }
 
+func TestListSSPAIDsInWorkspaceUsesStateAndLimit(t *testing.T) {
+	var filter, pageSize string
+	client := testSSPAIDClient(func(request *http.Request) string {
+		filter = request.URL.Query().Get("filter")
+		pageSize = request.URL.Query().Get("page_size")
+		return `{"aids":[{"name":"dev-demo","state":"Running"}],"total_size":1}`
+	})
+	items, err := client.ListSSPAIDsInWorkspace(context.Background(), SSPWorkspace{Name: "ws-demo", ProfileName: "pt", Subscription: "sub-1", Region: "cn-pj-03"}, "Running", 10)
+	if err != nil {
+		t.Fatalf("ListSSPAIDsInWorkspace() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Properties.Workload.WorkspaceName != "ws-demo" {
+		t.Fatalf("items = %#v", items)
+	}
+	if filter != `state="Running"` || pageSize != "10" {
+		t.Fatalf("filter=%q page_size=%q", filter, pageSize)
+	}
+}
+
 func TestFindSSPAIDsScansLocallyForUID(t *testing.T) {
 	requests := 0
 	client := testSSPAIDClient(func(request *http.Request) string {

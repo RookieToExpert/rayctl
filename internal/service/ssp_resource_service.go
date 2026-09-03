@@ -124,6 +124,7 @@ type SSPQueueWorkloadQuery struct {
 	Type     string
 	State    string
 	Priority string
+	Limit    int
 }
 
 type SSPQueueWorkloadItem struct {
@@ -146,8 +147,9 @@ type SSPQueueWorkloadResult struct {
 }
 
 type SSPQueueNodeListResult struct {
-	Queue SSPQueueItem
-	Items []VCNodeListItem
+	Queue        SSPQueueItem
+	Items        []VCNodeListItem
+	SharedVCPool bool
 }
 
 type SSPQueueNodeUsageItem struct {
@@ -168,17 +170,25 @@ type SSPQueueNodeUsageItem struct {
 }
 
 type SSPQueueNodeUsageResult struct {
-	Queue SSPQueueItem
-	Items []SSPQueueNodeUsageItem
+	Queue        SSPQueueItem
+	Items        []SSPQueueNodeUsageItem
+	SharedVCPool bool
 }
 
-func (r *SSPQueueNodeUsageResult) FilterFreeAcceleratorNodes() {
+func (r *SSPQueueNodeUsageResult) FilterFreeNodes() {
 	if r == nil {
 		return
 	}
 	filtered := r.Items[:0]
 	for _, item := range r.Items {
-		if item.AcceleratorFree > 0 {
+		if item.AcceleratorTotal > 0 {
+			if item.AcceleratorFree > 0 {
+				filtered = append(filtered, item)
+			}
+			continue
+		}
+		if resourceAmountAvailable("", item.CPUTotal, item.CPUAllocated) &&
+			resourceAmountAvailable("", item.MemoryTotal, item.MemoryAllocated) {
 			filtered = append(filtered, item)
 		}
 	}
@@ -672,7 +682,7 @@ func (s *SSPResourceService) ListQueueWorkloads(ctx context.Context, identifier 
 		return nil, err
 	}
 	workloads, err := s.platform.ListSSPQueueWorkloads(ctx, queue.Profile, queue.Subscription, queue.ResourceGroup, queue.Region, queue.Cluster, queue.Name, platform.SSPQueueWorkloadQuery{
-		Type: query.Type, State: query.State, Priority: query.Priority,
+		Type: query.Type, State: query.State, Priority: query.Priority, Limit: query.Limit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list workloads for queue %s: %w", queue.Name, err)
@@ -755,7 +765,17 @@ func (s *SSPResourceService) ListQueueNodes(ctx context.Context, identifier stri
 	if err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(strings.TrimSpace(queue.Type), "ELASTIC") {
+		if err := s.ensureQueuePlatformLocation(ctx, queue); err != nil {
+			return nil, err
+		}
+	}
+	if queueUsesSharedVCNodes(*queue) {
+		return s.listSharedVCQueueNodes(ctx, queue)
+	}
 	if items, ok := s.queueNodeListItemsFromKube(ctx, *queue); ok {
+		fillNodeModelsByMachineType(items, make(map[string]string))
+		s.enrichQueueNodeModelsFromScheduledJobs(ctx, queue, items)
 		queue.NodeCount = len(items)
 		return &SSPQueueNodeListResult{Queue: *queue, Items: items}, nil
 	}
@@ -766,6 +786,126 @@ func (s *SSPResourceService) ListQueueNodes(ctx context.Context, identifier stri
 	items := s.queueNodeListItems(ctx, nodes, true)
 	queue.NodeCount = len(items)
 	return &SSPQueueNodeListResult{Queue: *queue, Items: items}, nil
+}
+
+func (s *SSPResourceService) listSharedVCQueueNodes(ctx context.Context, queue *SSPQueueItem) (*SSPQueueNodeListResult, error) {
+	vcNodes, err := s.platform.ListVirtualClusterNodes(ctx, queue.Profile, queue.Subscription, queue.Region, queue.VCluster)
+	if err != nil {
+		return nil, fmt.Errorf("list shared vc nodes for elastic queue %s: %w", queue.Name, err)
+	}
+	items := make([]VCNodeListItem, 0, len(vcNodes))
+	for _, node := range vcNodes {
+		items = append(items, vcNodeListItemFromPlatform(node))
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(firstNonEmpty(items[i].HostIP, items[i].HostName)) <
+			strings.ToLower(firstNonEmpty(items[j].HostIP, items[j].HostName))
+	})
+	queue.NodeCount = len(items)
+	return &SSPQueueNodeListResult{Queue: *queue, Items: items, SharedVCPool: true}, nil
+}
+
+func (s *SSPResourceService) enrichQueueNodeModelsFromScheduledJobs(ctx context.Context, queue *SSPQueueItem, items []VCNodeListItem) {
+	missing := missingNodeMachineTypes(items)
+	if len(missing) == 0 || s.queueNodeClientResolver == nil || s.platform == nil || queue == nil {
+		return
+	}
+	clientset, err := s.queueNodeClientResolver(*queue)
+	if err != nil || clientset == nil {
+		return
+	}
+	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		LabelSelector:   labels.Set(map[string]string{sspQueueUIDLabel: queue.UID}).AsSelector().String(),
+		ResourceVersion: "0",
+		Limit:           500,
+	})
+	if err != nil {
+		return
+	}
+	machineTypeByHost := make(map[string]string, len(items))
+	for _, item := range items {
+		machineTypeByHost[strings.ToLower(strings.TrimSpace(item.HostName))] = strings.ToLower(strings.TrimSpace(item.MachineType))
+	}
+	type jobLookup struct {
+		machineType string
+		workspace   string
+		name        string
+	}
+	lookups := make([]jobLookup, 0, len(missing))
+	seen := make(map[string]struct{})
+	for _, pod := range pods.Items {
+		machineType := machineTypeByHost[strings.ToLower(strings.TrimSpace(pod.Spec.NodeName))]
+		if _, needed := missing[machineType]; !needed {
+			continue
+		}
+		if workloadType := strings.ToLower(strings.TrimSpace(pod.Labels["resource.compute.sensecore.cn/workload-type"])); workloadType != "training-job" {
+			continue
+		}
+		name := strings.TrimSpace(pod.Labels["resource.compute.sensecore.cn/workload-name"])
+		workspace := firstNonEmpty(strings.TrimSpace(pod.Labels["resource.compute.sensecore.cn/workspace-name"]), queue.Workspace)
+		if name == "" || workspace == "" {
+			continue
+		}
+		key := machineType + "\x00" + workspace + "\x00" + name
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		lookups = append(lookups, jobLookup{machineType: machineType, workspace: workspace, name: name})
+		delete(missing, machineType)
+		if len(missing) == 0 {
+			break
+		}
+	}
+	if len(lookups) == 0 {
+		return
+	}
+	type modelResult struct {
+		machineType string
+		model       string
+	}
+	models := boundedMap(ctx, lookups, 4, func(queryCtx context.Context, lookup jobLookup) modelResult {
+		jobs, err := s.platform.FindSSPTrainingJobsForProfile(queryCtx, queue.Profile, queue.Subscription, queue.Region, lookup.workspace, lookup.name)
+		if err != nil || len(jobs) == 0 {
+			return modelResult{machineType: lookup.machineType}
+		}
+		taskModels := make(map[string]struct{})
+		for _, task := range jobs[0].Spec.VCJob.Tasks {
+			model := strings.TrimSpace(task.ResourceSpec.AccelerateDeviceModel)
+			if model == "" {
+				continue
+			}
+			taskModels[model] = struct{}{}
+			for _, machineType := range task.ResourceSpec.MachineTypes {
+				if strings.EqualFold(strings.TrimSpace(machineType), lookup.machineType) {
+					return modelResult{machineType: lookup.machineType, model: model}
+				}
+			}
+		}
+		if len(taskModels) == 1 {
+			for model := range taskModels {
+				return modelResult{machineType: lookup.machineType, model: model}
+			}
+		}
+		workers, _, err := s.platform.ListSSPTrainingJobWorkers(queryCtx, jobs[0], 100)
+		if err == nil {
+			for _, worker := range workers {
+				if strings.EqualFold(strings.TrimSpace(worker.Resource.MachineType), lookup.machineType) {
+					if model := strings.TrimSpace(worker.Resource.AccelerateDeviceModel); model != "" {
+						return modelResult{machineType: lookup.machineType, model: model}
+					}
+				}
+			}
+		}
+		return modelResult{machineType: lookup.machineType}
+	})
+	modelByMachineType := make(map[string]string, len(models))
+	for _, result := range models {
+		if result.model != "" {
+			modelByMachineType[result.machineType] = result.model
+		}
+	}
+	fillNodeModelsByMachineType(items, modelByMachineType)
 }
 
 func (s *SSPResourceService) queueNodeListItemsFromKube(ctx context.Context, queue SSPQueueItem) ([]VCNodeListItem, bool) {
@@ -796,6 +936,14 @@ func (s *SSPResourceService) GetQueueNodeUsage(ctx context.Context, identifier s
 	if err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(strings.TrimSpace(queue.Type), "ELASTIC") {
+		if err := s.ensureQueuePlatformLocation(ctx, queue); err != nil {
+			return nil, err
+		}
+	}
+	if queueUsesSharedVCNodes(*queue) {
+		return s.getSharedVCQueueNodeUsage(ctx, queue)
+	}
 	nodes, err := s.platformQueueNodes(ctx, queue)
 	if err != nil {
 		return nil, err
@@ -823,6 +971,43 @@ func (s *SSPResourceService) GetQueueNodeUsage(ctx context.Context, identifier s
 	sort.Slice(items, func(i, j int) bool { return strings.ToLower(items[i].HostIP) < strings.ToLower(items[j].HostIP) })
 	queue.NodeCount = len(nodes)
 	return &SSPQueueNodeUsageResult{Queue: *queue, Items: items}, nil
+}
+
+func (s *SSPResourceService) getSharedVCQueueNodeUsage(ctx context.Context, queue *SSPQueueItem) (*SSPQueueNodeUsageResult, error) {
+	usage, err := NewVCServiceWithKubeClient(s.platform, s.clientset).GetResourceUsageForProfile(
+		ctx, queue.Profile, queue.Subscription, queue.Region, queue.VCluster,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get shared vc usage for elastic queue %s: %w", queue.Name, err)
+	}
+	items := queueNodeUsageItemsFromVC(usage.Items)
+	queue.NodeCount = len(items)
+	return &SSPQueueNodeUsageResult{Queue: *queue, Items: items, SharedVCPool: true}, nil
+}
+
+func queueUsesSharedVCNodes(queue SSPQueueItem) bool {
+	return strings.EqualFold(strings.TrimSpace(queue.Type), "ELASTIC") &&
+		strings.TrimSpace(queue.VCluster) != "" && strings.TrimSpace(queue.VCluster) != "-"
+}
+
+func queueNodeUsageItemsFromVC(items []VCNodeResourceUsageItem) []SSPQueueNodeUsageItem {
+	result := make([]SSPQueueNodeUsageItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, SSPQueueNodeUsageItem{
+			HostName:             item.HostName,
+			HostIP:               item.HostIP,
+			State:                item.State,
+			CPUAllocated:         item.Usage.Usage.Allocated.CPU,
+			CPUTotal:             item.Usage.Usage.Total.CPU,
+			MemoryAllocated:      item.Usage.Usage.Allocated.Memory,
+			MemoryTotal:          item.Usage.Usage.Total.Memory,
+			AcceleratorAllocated: item.Usage.Usage.Allocated.Device,
+			AcceleratorTotalText: item.Usage.Usage.Total.Device,
+			AcceleratorFree:      int64(firstSSPResourceNumber(item.Usage.Usage.Available.Device)),
+			AcceleratorTotal:     int64(firstSSPResourceNumber(item.Usage.Usage.Total.Device)),
+		})
+	}
+	return result
 }
 
 func (s *SSPResourceService) resolveQueueForNodes(ctx context.Context, identifier string, region string) (*SSPQueueItem, error) {
@@ -1162,11 +1347,7 @@ func queueNodeListItem(node corev1.Node) VCNodeListItem {
 		State:       nodeReadyStatus(node.Status.Conditions),
 		Zone:        strings.TrimSpace(node.Labels[sspNodeZoneLabel]),
 		MachineType: strings.TrimSpace(node.Labels[sspMachineTypeLabel]),
-		Model: firstNonEmpty(
-			strings.TrimSpace(node.Labels["accelerator-type"]),
-			strings.TrimSpace(node.Labels["node.kubernetes.io/npu.chip.name"]),
-			strings.TrimSpace(node.Labels["accelerator"]),
-		),
+		Model:       nodeAcceleratorModel(node.Labels),
 	}
 }
 

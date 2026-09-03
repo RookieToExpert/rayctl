@@ -81,6 +81,32 @@ func TestFindSSPTrainingJobsUsesRegionProfileAndExactFilter(t *testing.T) {
 	}
 }
 
+func TestListSSPTrainingJobsInWorkspaceUsesStateAndLimit(t *testing.T) {
+	var requestPath, requestFilter, pageSize string
+	client := &VirtualClusterClient{
+		profiles: map[string]clientProfile{"pt": {
+			Name: "pt", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.pjlab.org.cn", ResourceGroup: "default", Region: "cn-pj-03", Subscription: "sub-1",
+		}},
+		httpClient: &http.Client{Transport: sspRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requestPath = r.URL.Path
+			requestFilter = r.URL.Query().Get("filter")
+			pageSize = r.URL.Query().Get("page_size")
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"training_jobs":[{"name":"job-one","status":{"state":"Running","create_time":"2026-09-02T01:02:03Z"}}],"total_size":1}`)), Request: r}, nil
+		})},
+	}
+	workspace := SSPWorkspace{Name: "ws-demo", ProfileName: "pt", Region: "cn-pj-03"}
+	items, err := client.ListSSPTrainingJobsInWorkspace(context.Background(), workspace, "Running", 25)
+	if err != nil {
+		t.Fatalf("ListSSPTrainingJobsInWorkspace() error = %v", err)
+	}
+	if len(items) != 1 || items[0].WorkspaceName != "ws-demo" || items[0].ProfileName != "pt" {
+		t.Fatalf("items = %#v", items)
+	}
+	if requestPath != "/ait/data/v1/subscriptions/sub-1/resourceGroups/default/regions/cn-pj-03/workspaces/ws-demo/trainingJobs" || requestFilter != `state="Running"` || pageSize != "25" {
+		t.Fatalf("path=%q filter=%q page_size=%q", requestPath, requestFilter, pageSize)
+	}
+}
+
 func TestListSSPTrainingJobWorkersUsesDetailWorkerEndpoint(t *testing.T) {
 	var requestPath, pageSize, skip string
 	client := &VirtualClusterClient{

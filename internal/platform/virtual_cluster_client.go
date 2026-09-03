@@ -2782,7 +2782,7 @@ func (c *VirtualClusterClient) listVolcanoJobsWithProfile(ctx context.Context, p
 func (c *VirtualClusterClient) ListPods(ctx context.Context, vclusterName string, namespace string) ([]corev1.Pod, error) {
 	var lastErr error
 	for _, profile := range c.orderedProfiles() {
-		pods, err := c.listPodsWithProfile(ctx, profile, vclusterName, namespace)
+		pods, err := c.listPodsWithProfile(ctx, profile, vclusterName, namespace, "")
 		if err != nil {
 			lastErr = err
 			continue
@@ -2797,12 +2797,24 @@ func (c *VirtualClusterClient) ListPodsForProfile(ctx context.Context, profileNa
 	if !ok {
 		return nil, fmt.Errorf("platform profile %q not found", profileName)
 	}
-	return c.listPodsWithProfile(ctx, profile, vclusterName, namespace)
+	return c.listPodsWithProfile(ctx, profile, vclusterName, namespace, "")
 }
 
-func (c *VirtualClusterClient) listPodsWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string) ([]corev1.Pod, error) {
+func (c *VirtualClusterClient) ListActivePodsForProfile(ctx context.Context, profileName string, vclusterName string, namespace string) ([]corev1.Pod, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listPodsWithProfile(ctx, profile, vclusterName, namespace, "status.phase!=Succeeded,status.phase!=Failed")
+}
+
+func (c *VirtualClusterClient) listPodsWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, fieldSelector string) ([]corev1.Pod, error) {
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods", url.PathEscape(strings.TrimSpace(namespace)))
-	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, path, nil)
+	query := url.Values{}
+	if strings.TrimSpace(fieldSelector) != "" {
+		query.Set("fieldSelector", strings.TrimSpace(fieldSelector))
+	}
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, path, query)
 	var podList corev1.PodList
 	if err := c.getJSONWithProfile(ctx, profile, reqURL, &podList); err != nil {
 		return nil, err

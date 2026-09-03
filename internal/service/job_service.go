@@ -122,6 +122,7 @@ type JobGetResult struct {
 	CheckEvidence          []CheckEvidenceItem
 	RecentEvents           []EventItem
 	RecentLogLines         []string
+	ResourceSpecs          []JobResourceSpecItem
 	Timings                JobGetTimings
 }
 
@@ -197,6 +198,8 @@ type JobCreateRequest struct {
 type VolumeClaimRef struct {
 	Name             string
 	ClaimName        string
+	MountPath        string
+	VolumeType       string
 	PVName           string
 	BackendPV        string
 	DisplayPV        string
@@ -803,19 +806,26 @@ func (s *JobService) GetClusterJobs(ctx context.Context, identifier string, incl
 }
 
 func (s *JobService) getActiveClusterJobs(ctx context.Context, targetName string, vcRef string, profileName string, statusFilter string) (*JobClusterListResult, error) {
-	var totalJobCount int
+	return s.getActiveClusterJobsWithTotals(ctx, targetName, vcRef, profileName, statusFilter, true)
+}
+
+func (s *JobService) getActiveClusterJobsWithTotals(ctx context.Context, targetName string, vcRef string, profileName string, statusFilter string, includeJobTotal bool) (*JobClusterListResult, error) {
+	totalJobCount := -1
 	var totalPodCount int
 	var allPods []corev1.Pod
 	var jobsErr, podsErr error
 	var wg sync.WaitGroup
-	wg.Add(2)
+	if includeJobTotal {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			totalJobCount, jobsErr = s.vcClient.CountVolcanoJobsForProfile(ctx, profileName, vcRef, "default")
+		}()
+	}
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		totalJobCount, jobsErr = s.vcClient.CountVolcanoJobsForProfile(ctx, profileName, vcRef, "default")
-	}()
-	go func() {
-		defer wg.Done()
-		allPods, podsErr = s.vcClient.ListPodsForProfile(ctx, profileName, vcRef, "default")
+		allPods, podsErr = s.vcClient.ListActivePodsForProfile(ctx, profileName, vcRef, "default")
 	}()
 	wg.Wait()
 	if jobsErr != nil {
@@ -833,10 +843,9 @@ func (s *JobService) getActiveClusterJobs(ctx context.Context, targetName string
 		}
 		podsByJob[jobName] = append(podsByJob[jobName], pod)
 	}
-	totalPodCount = 0
-	for _, pods := range podsByJob {
-		totalPodCount += len(pods)
-	}
+	// The active path intentionally avoids downloading historical Pods. A
+	// negative total tells the renderer that the all-time Pod count was skipped.
+	totalPodCount = -1
 
 	activeNames := make([]string, 0)
 	for jobName, pods := range podsByJob {
@@ -905,6 +914,10 @@ func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeIna
 	if err != nil {
 		return nil, fmt.Errorf("list current tenant virtual clusters: %w", err)
 	}
+	showInactive := includeInactive || strings.EqualFold(strings.TrimSpace(statusFilter), "all")
+	if !showInactive {
+		return s.getCurrentTenantActiveClusterJobs(ctx, vclusters, statusFilter)
+	}
 
 	items := make([]JobClusterItem, 0)
 	activeJobCount := 0
@@ -916,11 +929,11 @@ func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeIna
 		clusterName := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
 		vcRef := firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID))
 
-		list, err := s.vcClient.ListVolcanoJobs(ctx, vcRef, "default")
+		list, err := s.vcClient.ListVolcanoJobsForProfile(ctx, vc.ProfileName, vcRef, "default")
 		if err != nil {
 			return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", clusterName, err)
 		}
-		allPods, err := s.vcClient.ListPods(ctx, vcRef, "default")
+		allPods, err := s.vcClient.ListPodsForProfile(ctx, vc.ProfileName, vcRef, "default")
 		if err != nil {
 			return nil, fmt.Errorf("list pods for cluster %q: %w", clusterName, err)
 		}
@@ -948,7 +961,7 @@ func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeIna
 				activeJobCount++
 				activePodCount += activeCount
 			}
-			if !includeInactive && !isActiveVolcanoJobPhase(status) {
+			if !showInactive && !isActiveVolcanoJobPhase(status) {
 				continue
 			}
 			items = append(items, JobClusterItem{
@@ -984,6 +997,49 @@ func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeIna
 		ShowClusterName: true,
 		StatusFilter:    normalizeClusterStatusFilter(statusFilter),
 	}, nil
+}
+
+func (s *JobService) getCurrentTenantActiveClusterJobs(ctx context.Context, vclusters []platform.VirtualCluster, statusFilter string) (*JobClusterListResult, error) {
+	type clusterResult struct {
+		name   string
+		result *JobClusterListResult
+		err    error
+	}
+	results := boundedMap(ctx, vclusters, 24, func(ctx context.Context, vc platform.VirtualCluster) clusterResult {
+		clusterName := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
+		vcRef := firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID))
+		result, err := s.getActiveClusterJobsWithTotals(ctx, clusterName, vcRef, vc.ProfileName, statusFilter, false)
+		return clusterResult{name: clusterName, result: result, err: err}
+	})
+
+	combined := &JobClusterListResult{
+		ClusterName:     "当前租户全部分区",
+		ShowClusterName: true,
+		StatusFilter:    normalizeClusterStatusFilter(statusFilter),
+		TotalJobCount:   -1,
+		TotalPodCount:   -1,
+	}
+	for _, query := range results {
+		if query.err != nil {
+			return nil, fmt.Errorf("list active jobs for cluster %q: %w", query.name, query.err)
+		}
+		if query.result == nil {
+			continue
+		}
+		combined.Items = append(combined.Items, query.result.Items...)
+		combined.ActiveJobCount += query.result.ActiveJobCount
+		combined.ActivePodCount += query.result.ActivePodCount
+	}
+	sort.Slice(combined.Items, func(i, j int) bool {
+		if !combined.Items[i].CreatedAtTime.Equal(combined.Items[j].CreatedAtTime) {
+			return combined.Items[i].CreatedAtTime.After(combined.Items[j].CreatedAtTime)
+		}
+		if combined.Items[i].ClusterName != combined.Items[j].ClusterName {
+			return combined.Items[i].ClusterName < combined.Items[j].ClusterName
+		}
+		return combined.Items[i].JobName < combined.Items[j].JobName
+	})
+	return combined, nil
 }
 
 // GetCurrentTenantUserJobs returns active jobs submitted by the requested users.
@@ -1324,6 +1380,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 		InspectPod:             inspectPodName,
 		CheckEvidence:          detailEvidence,
 		RecentLogLines:         recentLogLines,
+		ResourceSpecs:          jobResourceSpecsFromVolcanoJob(job),
 		Timings: JobGetTimings{
 			Locate:     locateDuration,
 			Diagnosis:  diagnosisDuration,
@@ -1832,6 +1889,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		InspectPod:             inspectPodName,
 		CheckEvidence:          detailEvidence,
 		RecentLogLines:         recentLogLines,
+		ResourceSpecs:          jobResourceSpecsFromVolcanoJob(job),
 		Timings: JobGetTimings{
 			Locate:       locateDuration,
 			PlatformJob:  platformJobDuration,

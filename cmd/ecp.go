@@ -16,6 +16,7 @@ func newECPJobCmd() *cobra.Command {
 		Use:   "job",
 		Short: "查询或创建旧 ECP VCJob",
 	}
+	cmd.AddCommand(newECPJobListCmd())
 	cmd.AddCommand(newECPJobGetCmd())
 	cmd.AddCommand(newJobCreateCmd())
 	return cmd

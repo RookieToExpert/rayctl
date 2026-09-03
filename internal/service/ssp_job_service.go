@@ -103,6 +103,7 @@ type SSPJobGetResult struct {
 	CheckEvidence          []CheckEvidenceItem
 	RecentLogLines         []string
 	RequiredNodes          int
+	ResourceSpecs          []JobResourceSpecItem
 }
 
 type SSPJobTaskItem struct {
@@ -801,6 +802,7 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 		Terminal:      terminal,
 		InspectPod:    "-",
 		RequiredNodes: requiredSSPJobNodes(job.Spec.VCJob.Tasks, workerTotal),
+		ResourceSpecs: sspJobResourceSpecs(job.Spec.VCJob.Tasks),
 	}
 	result.PodResources, result.Nodes = makeSSPPodResourceItems(pods, job.Spec.VCJob.Tasks)
 	if len(result.PodResources) == 0 && len(workers) > 0 {
@@ -824,7 +826,7 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
 	identity := &jobIdentity{Name: job.Name, Namespace: job.Namespace, UID: job.UID, HostNamespace: hostNamespace}
 	result.PersistentVolumeClaims = s.resolveSSPVolumeClaimRefs(ctx, hostNamespace, pvcRefs)
-	volumeDescriptors := s.resolveSSPVolumeDescriptors(ctx, trainingJobVolumeDescriptors(job.Spec.VolumeMounts))
+	volumeDescriptors := s.resolveSSPVolumeDescriptors(ctx, job.ProfileName, trainingJobVolumeDescriptors(job.Spec.VolumeMounts))
 	result.PersistentVolumeClaims = enrichSSPVolumeClaims(result.PersistentVolumeClaims, volumeDescriptors)
 	result.ImagePullSecrets = s.jobHelper.resolveImagePullSecretsFromKube(ctx, hostNamespace, imagePullSecrets)
 	result.VCluster = (<-vcResult).Value
@@ -882,6 +884,22 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 		}
 	}
 	result.Stage, result.Diagnosis = ensurePVCGetDiagnosis(status, terminal, result.Stage, result.Diagnosis, result.PersistentVolumeClaims)
+	return result
+}
+
+func sspJobResourceSpecs(tasks []platform.SSPTrainingJobTask) []JobResourceSpecItem {
+	result := make([]JobResourceSpecItem, 0, len(tasks))
+	for _, task := range tasks {
+		result = append(result, JobResourceSpecItem{
+			Task:        firstNonEmpty(strings.TrimSpace(task.Name), strings.TrimSpace(task.Role)),
+			Replicas:    task.Replicas,
+			CPU:         formatSSPResource(task.ResourceSpec.CPUCount, ""),
+			Memory:      formatSSPResource(task.ResourceSpec.MemoryGiB, "Gi"),
+			Accelerator: formatSSPResource(task.ResourceSpec.AccelerateDeviceCount, ""),
+			Model:       strings.TrimSpace(task.ResourceSpec.AccelerateDeviceModel),
+			MachineType: strings.Join(task.ResourceSpec.MachineTypes, ", "),
+		})
+	}
 	return result
 }
 
@@ -1052,16 +1070,17 @@ func (s *SSPJobService) enrichSSPPodMachineTypes(ctx context.Context, items []SS
 }
 
 type sspVolumeDescriptor struct {
-	Type     string
-	ID       string
-	Name     string
-	Endpoint string
+	Type      string
+	ID        string
+	Name      string
+	Endpoint  string
+	MountPath string
 }
 
 func trainingJobVolumeDescriptors(mounts []platform.SSPTrainingJobVolumeMount) []sspVolumeDescriptor {
 	result := make([]sspVolumeDescriptor, 0, len(mounts))
 	for _, mount := range mounts {
-		result = append(result, sspVolumeDescriptor{Type: mount.Type, ID: mount.ID, Name: mount.Name, Endpoint: mount.Endpoint})
+		result = append(result, sspVolumeDescriptor{Type: mount.Type, ID: mount.ID, Name: mount.Name, Endpoint: mount.Endpoint, MountPath: mount.MountPath})
 	}
 	return result
 }
@@ -1069,12 +1088,12 @@ func trainingJobVolumeDescriptors(mounts []platform.SSPTrainingJobVolumeMount) [
 func aidVolumeDescriptors(mounts []platform.SSPAIDVolumeMount) []sspVolumeDescriptor {
 	result := make([]sspVolumeDescriptor, 0, len(mounts))
 	for _, mount := range mounts {
-		result = append(result, sspVolumeDescriptor{Type: mount.Type, ID: mount.ID, Name: mount.Name, Endpoint: mount.Endpoint})
+		result = append(result, sspVolumeDescriptor{Type: mount.Type, ID: mount.ID, Name: mount.Name, Endpoint: mount.Endpoint, MountPath: mount.MountPath})
 	}
 	return result
 }
 
-func (s *SSPJobService) resolveSSPVolumeDescriptors(ctx context.Context, volumes []sspVolumeDescriptor) []sspVolumeDescriptor {
+func (s *SSPJobService) resolveSSPVolumeDescriptors(ctx context.Context, profileName string, volumes []sspVolumeDescriptor) []sspVolumeDescriptor {
 	result := append([]sspVolumeDescriptor(nil), volumes...)
 	if s.platform == nil {
 		return result
@@ -1093,7 +1112,13 @@ func (s *SSPJobService) resolveSSPVolumeDescriptors(ctx context.Context, volumes
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			resource, err := s.platform.FindResourceByUID(ctx, uid, "virtualVolumes")
+			var resource *platform.StorageVolumeResource
+			var err error
+			if strings.TrimSpace(profileName) != "" {
+				resource, err = s.platform.FindResourceByUIDForProfile(ctx, profileName, uid, "virtualVolumes")
+			} else {
+				resource, err = s.platform.FindResourceByUID(ctx, uid, "virtualVolumes")
+			}
 			if err != nil || resource == nil {
 				return
 			}
@@ -1105,14 +1130,24 @@ func (s *SSPJobService) resolveSSPVolumeDescriptors(ctx context.Context, volumes
 }
 
 func enrichSSPVolumeClaims(claims []VolumeClaimRef, mounts []sspVolumeDescriptor) []VolumeClaimRef {
-	if len(claims) == 0 || len(mounts) == 0 {
+	if len(mounts) == 0 {
 		return claims
+	}
+	if len(claims) == 0 {
+		result := make([]VolumeClaimRef, 0, len(mounts))
+		for _, mount := range mounts {
+			result = append(result, VolumeClaimRef{
+				ClaimName:      "-",
+				MountPath:      dashIfEmpty(mount.MountPath),
+				VolumeType:     formatSSPVolumeType(mount.Type),
+				Status:         "Configured",
+				FrontendVolume: formatSSPVolumeLocation(mount),
+			})
+		}
+		return result
 	}
 	result := append([]VolumeClaimRef(nil), claims...)
 	for index := range result {
-		if value := strings.TrimSpace(result[index].FrontendVolume); value != "" && value != "-" {
-			continue
-		}
 		mountIndex := index
 		if parsed, ok := trailingNumericIndex(result[index].ClaimName); ok {
 			mountIndex = parsed
@@ -1120,9 +1155,27 @@ func enrichSSPVolumeClaims(claims []VolumeClaimRef, mounts []sspVolumeDescriptor
 		if mountIndex < 0 || mountIndex >= len(mounts) {
 			continue
 		}
-		result[index].FrontendVolume = formatSSPVolumeLocation(mounts[mountIndex])
+		mount := mounts[mountIndex]
+		result[index].MountPath = dashIfEmpty(mount.MountPath)
+		result[index].VolumeType = formatSSPVolumeType(mount.Type)
+		if value := strings.TrimSpace(result[index].FrontendVolume); value == "" || value == "-" {
+			result[index].FrontendVolume = formatSSPVolumeLocation(mount)
+		}
 	}
 	return result
+}
+
+func formatSSPVolumeType(value string) string {
+	value = strings.TrimSpace(value)
+	lower := strings.ToLower(value)
+	switch {
+	case strings.Contains(lower, "aoss"), strings.Contains(lower, "object"), strings.Contains(lower, "s3"):
+		return "AOSS"
+	case strings.Contains(lower, "oceanstor"), strings.Contains(lower, "afs"):
+		return "AFS"
+	default:
+		return dashIfEmpty(value)
+	}
 }
 
 func trailingNumericIndex(value string) (int, bool) {
@@ -1331,12 +1384,50 @@ func podConditionInformationScore(condition corev1.PodCondition) int {
 
 func platformConditionEvidence(conditions []map[string]any) []CheckEvidenceItem {
 	items := make([]CheckEvidenceItem, 0, len(conditions))
+	transitionOnlyByStatus := make(map[string]int)
 	for _, condition := range conditions {
-		items = append(items, CheckEvidenceItem{
+		status := firstNonEmpty(
+			stringFromMap(condition, "reason"),
+			stringFromMap(condition, "type"),
+		)
+		if status == "" {
+			state := firstNonEmpty(
+				stringFromMap(condition, "state"),
+				stringFromMap(condition, "status"),
+				stringFromMap(condition, "phase"),
+			)
+			if state != "" {
+				status = normalizeSSPJobState(state)
+			}
+		}
+		detail := firstNonEmpty(
+			stringFromMap(condition, "message"),
+			stringFromMap(condition, "detail"),
+			stringFromMap(condition, "description"),
+		)
+		transitionTime := stringFromMap(condition, "last_transition_time")
+		if status == "" && detail == "" {
+			continue
+		}
+
+		item := CheckEvidenceItem{
 			Source: "platform",
-			Status: firstNonEmpty(stringFromMap(condition, "reason"), stringFromMap(condition, "type"), stringFromMap(condition, "state")),
-			Detail: firstNonEmpty(stringFromMap(condition, "message"), stringFromMap(condition, "detail"), "state transition only"),
-		})
+			Status: status,
+			Detail: detail,
+		}
+		if item.Detail == "" && transitionTime != "" {
+			item.Detail = "状态更新时间 " + formatSSPTime(transitionTime)
+			key := strings.ToLower(strings.TrimSpace(item.Status))
+			if index, ok := transitionOnlyByStatus[key]; ok {
+				items[index] = item
+				continue
+			}
+			transitionOnlyByStatus[key] = len(items)
+		}
+		if item.Detail == "" {
+			item.Detail = "仅记录状态变化"
+		}
+		items = append(items, item)
 	}
 	return items
 }
@@ -1404,7 +1495,15 @@ func stringFromMap(value map[string]any, key string) string {
 	if value == nil {
 		return ""
 	}
-	return strings.TrimSpace(fmt.Sprintf("%v", value[key]))
+	raw, ok := value[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	text := strings.TrimSpace(fmt.Sprintf("%v", raw))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
 }
 
 func uniqueStrings(values []string) []string {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"rayctl/internal/kube"
 	"rayctl/internal/platform"
@@ -27,7 +28,7 @@ func newNodeCmd() *cobra.Command {
 	}
 
 	// 注册子命令：获取节点列表
-	nodeCmd.AddCommand(newNodeGetCmd())
+	nodeCmd.AddCommand(newNodeListCmd())
 	// 注册子命令：查看节点详情 (包含资源与运行中的 Pod)
 	nodeCmd.AddCommand(newNodeDescribeCmd())
 	// 注册子命令：封锁节点 (标记不可调度并添加维修标签)
@@ -38,27 +39,34 @@ func newNodeCmd() *cobra.Command {
 	return nodeCmd
 }
 
-// newNodeGetCmd 创建 "get" 子命令，用于根据 profile 或 label selector 获取节点列表。
-func newNodeGetCmd() *cobra.Command {
+// newNodeListCmd 创建 "list" 子命令，用于根据 profile 或 label selector 获取节点列表。
+func newNodeListCmd() *cobra.Command {
 	var longOutput bool
 	var showAll bool
+	var queueFilter string
+	var vcFilter string
 
 	// 定义 get 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:   "get [profile-or-selector]",
+		Use:   "list [profile-or-selector]",
 		Short: "通过 profile 或 label selector 列出节点",
 		Long: "通过 profile、label selector 或 InternalIP 片段列出节点。\n" +
 			"支持直接传入 IP 过滤片段，例如 10.12.14；也支持使用 | 分隔多个片段做或匹配，例如 '10.12|10.140'。",
 		Example: strings.Join([]string{
-			"  rayctl node get",
-			"  rayctl node get ecp",
-			"  rayctl node get 'node-role.compute.sensecore.cn/prod=ecs'",
-			"  rayctl node get -A 10.12.14",
-			"  rayctl node get -A '10.12|10.140'",
+			"  rayctl node list",
+			"  rayctl node list ecp",
+			"  rayctl node list 'node-role.compute.sensecore.cn/prod=ecs'",
+			"  rayctl node list -q queue-d-reserved-a3-llm-share",
+			"  rayctl node list -v vc-a3-ailab",
+			"  rayctl node list -q queue-d-reserved-a3-llm-share -v vc-a3-ailab",
+			"  rayctl node list -A 10.12.14",
+			"  rayctl node list -A '10.12|10.140'",
 		}, "\n"),
 		// 限制最多只能接受 1 个位置参数 (作为 target)
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			queueFilter = strings.TrimSpace(queueFilter)
+			vcFilter = strings.TrimSpace(vcFilter)
 			// 1. 初始化 Kubernetes 客户端，使用全局的 kubeconfig 变量
 			// kube.NewClientset 定义于 internal/kube/client.go
 			clientset, err := kube.NewClientset(kubeconfig)
@@ -90,7 +98,8 @@ func newNodeGetCmd() *cobra.Command {
 				resolvedSelector = fmt.Sprintf("InternalIP matches %s", strings.Join(ipFilters, " | "))
 			}
 
-			if vcClient, ok := platform.NewVirtualClusterClientFromEnv(); ok {
+			vcClient, hasVCClient := platform.NewVirtualClusterClientFromEnv()
+			if hasVCClient {
 				if longOutput {
 					if computeNodes, err := vcClient.ListAIComputeNodes(context.Background()); err == nil {
 						byHostName := make(map[string]platform.AIComputeNode, len(computeNodes))
@@ -165,12 +174,30 @@ func newNodeGetCmd() *cobra.Command {
 				}
 			}
 
+			if queueFilter != "" {
+				if !hasVCClient {
+					return fmt.Errorf("--queue requires platform configuration in ~/.rayctl/platform.json")
+				}
+				resourceService := service.NewSSPResourceService(clientset, vcClient)
+				resourceService.SetQueueNodeClientResolver(localQueueVClusterClient)
+				queueNodes, err := resourceService.ListQueueNodes(cmd.Context(), queueFilter, "")
+				if err != nil {
+					return fmt.Errorf("resolve queue %q nodes: %w", queueFilter, err)
+				}
+				nodes = filterNodeListByQueue(nodes, queueNodes)
+			}
+			if vcFilter != "" {
+				nodes = filterNodeListByVC(nodes, vcFilter)
+			}
+			resolvedSelector = nodeListFilterDescription(resolvedSelector, queueFilter, vcFilter)
+
 			displayLimit := 100
 			if showAll {
 				displayLimit = 0
 			}
 
 			displayNodes, start, end := limitNodes(nodes, displayLimit)
+			enrichNodeListQueuesFromLocalVC(cmd.Context(), displayNodes, 6)
 
 			// 4. 调用 output 包将节点列表以表格等形式打印到终端
 			// output.PrintNodeList 定义于 pkg/output/table.go
@@ -183,11 +210,80 @@ func newNodeGetCmd() *cobra.Command {
 			return nil
 		},
 	}
-
 	cmd.Flags().BoolVarP(&showAll, "all", "A", false, "Show all nodes")
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail columns such as tenant")
+	cmd.Flags().StringVarP(&queueFilter, "queue", "q", "", "只显示指定 SSP Queue 下的节点（名称或 UID）")
+	cmd.Flags().StringVarP(&vcFilter, "vc", "v", "", "只显示指定 VC 下的节点（名称或 UID）")
 
 	return cmd
+}
+
+func filterNodeListByQueue(nodes []service.NodeListItem, queueNodes *service.SSPQueueNodeListResult) []service.NodeListItem {
+	if queueNodes == nil {
+		return nil
+	}
+	matchedHosts := make(map[string]struct{}, len(queueNodes.Items)*2)
+	for _, item := range queueNodes.Items {
+		if host := strings.ToLower(strings.TrimSpace(item.HostName)); host != "" {
+			matchedHosts[host] = struct{}{}
+		}
+		if ip := strings.ToLower(strings.TrimSpace(item.HostIP)); ip != "" {
+			matchedHosts[ip] = struct{}{}
+		}
+	}
+	result := make([]service.NodeListItem, 0, len(nodes))
+	for _, node := range nodes {
+		_, nameMatched := matchedHosts[strings.ToLower(strings.TrimSpace(node.Name))]
+		_, ipMatched := matchedHosts[strings.ToLower(strings.TrimSpace(node.InternalIP))]
+		if !nameMatched && !ipMatched {
+			continue
+		}
+		node.QueueName = firstNonEmptyString(queueNodes.Queue.Name, node.QueueName)
+		result = append(result, node)
+	}
+	return result
+}
+
+func filterNodeListByVC(nodes []service.NodeListItem, identifier string) []service.NodeListItem {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
+	if identifier == "" {
+		return nodes
+	}
+	result := make([]service.NodeListItem, 0, len(nodes))
+	for _, node := range nodes {
+		candidates := []string{
+			strings.TrimSpace(node.ClusterName),
+			strings.TrimSpace(node.ClusterUID),
+		}
+		if node.ClusterUID != "" {
+			candidates = append(candidates, "vc-"+strings.TrimPrefix(strings.TrimSpace(node.ClusterUID), "vc-"))
+		}
+		matched := false
+		for _, candidate := range candidates {
+			if strings.EqualFold(identifier, candidate) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			result = append(result, node)
+		}
+	}
+	return result
+}
+
+func nodeListFilterDescription(selector string, queue string, vc string) string {
+	parts := make([]string, 0, 3)
+	if strings.TrimSpace(selector) != "" {
+		parts = append(parts, selector)
+	}
+	if strings.TrimSpace(queue) != "" {
+		parts = append(parts, "queue="+strings.TrimSpace(queue))
+	}
+	if strings.TrimSpace(vc) != "" {
+		parts = append(parts, "vc="+strings.TrimSpace(vc))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func limitNodes(nodes []service.NodeListItem, limit int) ([]service.NodeListItem, int, int) {
@@ -239,6 +335,7 @@ func newNodeDescribeCmd() *cobra.Command {
 			if hasVCClient {
 				resolveNodeVCNames(cmd.Context(), vcClient, results, 4)
 			}
+			resolveNodeDescribeQueuesFromLocalVC(cmd.Context(), results, 4)
 
 			var queryErrors []error
 			printed := 0
@@ -263,6 +360,91 @@ func newNodeDescribeCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for node check")
 
 	return cmd
+}
+
+type localVCNodeQueueResult struct {
+	VC          string
+	QueueByNode map[string]string
+	Duration    time.Duration
+}
+
+func enrichNodeListQueuesFromLocalVC(ctx context.Context, nodes []service.NodeListItem, maxParallel int) {
+	indicesByVC := make(map[string][]int)
+	for index, node := range nodes {
+		if strings.TrimSpace(node.QueueName) != "" || !isVClusterDisplayName(node.ClusterName) {
+			continue
+		}
+		indicesByVC[node.ClusterName] = append(indicesByVC[node.ClusterName], index)
+	}
+	lookups := loadLocalVCNodeQueues(ctx, mapKeys(indicesByVC), maxParallel)
+	for _, lookup := range lookups {
+		for _, index := range indicesByVC[lookup.VC] {
+			if queue := lookup.QueueByNode[nodes[index].Name]; queue != "" {
+				nodes[index].QueueName = queue
+			}
+		}
+	}
+}
+
+func resolveNodeDescribeQueuesFromLocalVC(ctx context.Context, results []service.NodeDescribeQueryResult, maxParallel int) {
+	indicesByVC := make(map[string][]int)
+	for index, result := range results {
+		if result.Err != nil || result.Details == nil || strings.TrimSpace(result.Details.QueueName) != "" || !isVClusterDisplayName(result.Details.VClusterName) {
+			continue
+		}
+		indicesByVC[result.Details.VClusterName] = append(indicesByVC[result.Details.VClusterName], index)
+	}
+	lookups := loadLocalVCNodeQueues(ctx, mapKeys(indicesByVC), maxParallel)
+	for _, lookup := range lookups {
+		for _, index := range indicesByVC[lookup.VC] {
+			details := results[index].Details
+			if queue := lookup.QueueByNode[details.Hostname]; queue != "" {
+				details.QueueName = queue
+			}
+			details.Timings.ResolveQueue = lookup.Duration
+		}
+	}
+}
+
+func loadLocalVCNodeQueues(ctx context.Context, vcNames []string, maxParallel int) []localVCNodeQueueResult {
+	return runBoundedQueries(ctx, vcNames, maxParallel, func(parent context.Context, vcName string) localVCNodeQueueResult {
+		startedAt := time.Now()
+		result := localVCNodeQueueResult{VC: vcName, QueueByNode: make(map[string]string)}
+		clientset, err := localQueueVClusterClient(service.SSPQueueItem{VCluster: vcName})
+		if err != nil {
+			result.Duration = time.Since(startedAt)
+			return result
+		}
+		queryCtx, cancel := context.WithTimeout(parent, 2*time.Second)
+		defer cancel()
+		nodes, err := clientset.CoreV1().Nodes().List(queryCtx, metav1.ListOptions{ResourceVersion: "0"})
+		if err == nil {
+			for _, node := range nodes.Items {
+				queue := firstNonEmptyString(
+					strings.TrimSpace(node.Labels["resource.compute.sensecore.cn/queue-name"]),
+					strings.TrimSpace(node.Labels["resource.compute.sensecore.cn/queue-uid"]),
+				)
+				if queue != "" {
+					result.QueueByNode[node.Name] = queue
+				}
+			}
+		}
+		result.Duration = time.Since(startedAt)
+		return result
+	})
+}
+
+func isVClusterDisplayName(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "vc-") && !strings.HasPrefix(value, "vc-0")
+}
+
+func mapKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func resolveNodeVCNames(ctx context.Context, vcClient *platform.VirtualClusterClient, results []service.NodeDescribeQueryResult, maxParallel int) {

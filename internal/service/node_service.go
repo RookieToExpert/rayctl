@@ -26,6 +26,7 @@ const (
 	nsVClusterNamespaceLabelKey   = "vcluster.loft.sh/vcluster-namespace"
 	nsVirtualNameLabelKey         = "vcluster.loft.sh/custom-namespace-name"
 	nsVirtualNameAnnotationKey    = "vcluster.loft.sh/object-name"
+	nodeQueueNameLabelKey         = "resource.compute.sensecore.cn/queue-name"
 	nodeQueueUIDLabelKey          = "resource.compute.sensecore.cn/queue-uid"
 	metaxGPUResourceName          = "metax-tech.com/gpu"
 	huaweiGPUResourceName         = "huawei.com/Ascend910"
@@ -53,6 +54,7 @@ type NodeListItem struct {
 	InternalIP  string
 	ClusterName string
 	ClusterUID  string
+	QueueName   string
 	Tenant      string
 }
 
@@ -67,6 +69,7 @@ type NodeDescribe struct {
 	Hostname        string
 	VClusterName    string
 	VClusterUID     string
+	QueueName       string
 	Ready           string
 	Unschedulable   bool
 	Repair          bool
@@ -90,6 +93,7 @@ type DescribeTimings struct {
 	ListPods       time.Duration
 	Summarize      time.Duration
 	ResolveVC      time.Duration
+	ResolveQueue   time.Duration
 	Total          time.Duration
 }
 
@@ -138,6 +142,7 @@ func (s *NodeService) List(ctx context.Context, target string, extraSelector str
 				node.Labels["resource.compute.sensecore.cn/vc-uid"],
 			),
 			ClusterUID: nodeResolveClusterUID(node.Labels),
+			QueueName:  nodeQueueDisplayName(node.Labels, nil),
 		})
 	}
 
@@ -224,6 +229,7 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 			node.Labels["resource.compute.sensecore.cn/vc-uid"],
 		),
 		VClusterUID:     nodeResolveClusterUID(node.Labels),
+		QueueName:       nodeQueueDisplayName(node.Labels, pods),
 		Ready:           nodeReadyStatus(node.Status.Conditions),
 		Unschedulable:   node.Spec.Unschedulable,
 		Repair:          node.Labels[repairUsageLabelKey] == repairUsageLabelValue,
@@ -240,6 +246,42 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 			Total:          time.Since(startedAt),
 		},
 	}, nil
+}
+
+func nodeQueueDisplayName(nodeLabels map[string]string, pods []corev1.Pod) string {
+	if name := strings.TrimSpace(nodeLabels[nodeQueueNameLabelKey]); name != "" {
+		return name
+	}
+
+	queueNames := make(map[string]struct{})
+	queueUIDs := make(map[string]struct{})
+	for _, pod := range pods {
+		if name := strings.TrimSpace(pod.Labels[nodeQueueNameLabelKey]); name != "" {
+			queueNames[name] = struct{}{}
+		}
+		if uid := strings.TrimSpace(pod.Labels[nodeQueueUIDLabelKey]); uid != "" {
+			queueUIDs[uid] = struct{}{}
+		}
+	}
+	if len(queueNames) > 0 {
+		return sortedStringSet(queueNames)
+	}
+	if uid := strings.TrimSpace(nodeLabels[nodeQueueUIDLabelKey]); uid != "" {
+		return uid
+	}
+	return sortedStringSet(queueUIDs)
+}
+
+func sortedStringSet(values map[string]struct{}) string {
+	if len(values) == 0 {
+		return ""
+	}
+	items := make([]string, 0, len(values))
+	for value := range values {
+		items = append(items, value)
+	}
+	sort.Strings(items)
+	return strings.Join(items, ", ")
 }
 
 func nodeResolveClusterUID(labels map[string]string) string {

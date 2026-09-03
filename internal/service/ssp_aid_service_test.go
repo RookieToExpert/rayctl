@@ -70,6 +70,43 @@ func TestAIDDisplayHelpers(t *testing.T) {
 	}
 }
 
+func TestAppendSSPAIDDNATRulesUsesAIDHostForCompleteMapping(t *testing.T) {
+	result := &SSPAIDGetResult{InternalIP: "10.119.137.252"}
+	rule := platform.SSPAIDDNATRule{ExternalIP: "10.140.158.149", ExternalPort: "11960", InternalPort: "22", Protocol: "TCP"}
+
+	appendSSPAIDDNATRules(result, []platform.SSPAIDDNATRule{rule})
+
+	if len(result.DNATRules) != 1 || result.DNATRules[0].External != "10.140.158.149:11960" || result.DNATRules[0].Internal != "10.119.137.252:22" || result.DNATRules[0].State != "UNKNOWN" {
+		t.Fatalf("DNATRules = %#v", result.DNATRules)
+	}
+}
+
+func TestAppendSSPAIDDNATRulesSkipsEIPWithoutPortMapping(t *testing.T) {
+	result := &SSPAIDGetResult{InternalIP: "10.119.137.252"}
+	rule := platform.SSPAIDDNATRule{ExternalIP: "10.140.158.149", InternalPort: "22", Protocol: "TCP"}
+
+	appendSSPAIDDNATRules(result, []platform.SSPAIDDNATRule{rule})
+
+	if len(result.DNATRules) != 0 {
+		t.Fatalf("partial EIP was rendered as DNAT: %#v", result.DNATRules)
+	}
+}
+
+func TestAIDWorkspaceNamespace(t *testing.T) {
+	pods := []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "vcluster-host-namespace",
+		Annotations: map[string]string{
+			"vcluster.loft.sh/object-namespace": "workspace-queue-uid",
+		},
+	}}}
+	if got := aidWorkspaceNamespace(pods, pods[0].Namespace); got != "workspace-queue-uid" {
+		t.Fatalf("aidWorkspaceNamespace() = %q, want workspace-queue-uid", got)
+	}
+	if got := aidWorkspaceNamespace(nil, "workspace-namespace"); got != "workspace-namespace" {
+		t.Fatalf("aidWorkspaceNamespace() fallback = %q, want workspace-namespace", got)
+	}
+}
+
 func TestFormatSSPAIDResourceSummary(t *testing.T) {
 	got := formatSSPAIDResourceSummary(SSPAIDResourceItem{
 		CPU:         "14",

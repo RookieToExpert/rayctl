@@ -56,6 +56,24 @@ func TestNodeResourceUsageFormattingMatchesVCUsage(t *testing.T) {
 	}
 }
 
+func TestNodeQueueDisplayName(t *testing.T) {
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{nodeQueueNameLabelKey: "queue-b"}}},
+		{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{nodeQueueNameLabelKey: "queue-a"}}},
+		{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{nodeQueueNameLabelKey: "queue-b"}}},
+	}
+	if got := nodeQueueDisplayName(nil, pods); got != "queue-a, queue-b" {
+		t.Fatalf("nodeQueueDisplayName() = %q, want queue-a, queue-b", got)
+	}
+	labels := map[string]string{
+		nodeQueueNameLabelKey: "queue-node",
+		nodeQueueUIDLabelKey:  "queue-uid",
+	}
+	if got := nodeQueueDisplayName(labels, pods); got != "queue-node" {
+		t.Fatalf("nodeQueueDisplayName() node label = %q, want queue-node", got)
+	}
+}
+
 func TestDescribeManyKeepsInputOrderAndIndividualErrors(t *testing.T) {
 	clientset := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "host-1"}},

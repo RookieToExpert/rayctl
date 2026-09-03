@@ -31,10 +31,8 @@ func newJobCmd() *cobra.Command {
 	}
 
 	getCmd := newSSPJobGetCmd()
-	legacyCluster := newJobGetClusterCmd()
-	legacyCluster.Deprecated = "请使用 rayctl ecp job get cluster"
-	getCmd.AddCommand(legacyCluster)
 	jobCmd.AddCommand(getCmd)
+	jobCmd.AddCommand(newAITListCmd())
 
 	legacyCreate := newJobCreateCmd()
 	legacyCreate.Deprecated = "这是 ECP VCJob 创建入口，请使用 rayctl ecp job create"
@@ -49,17 +47,11 @@ func newECPJobGetCmd() *cobra.Command {
 
 	getCmd := &cobra.Command{
 		Use:   "get <job-name-or-pod-name-or-uid> [job-name-or-pod-name-or-uid...]",
-		Short: "并行查询一个或多个旧 ECP VCJob，或按 VC 分区列出任务",
-		Long: "根据任务名、Pod 名或 UID 并行查询一个或多个旧 ECP VCJob 详情。\n" +
-			"也可以使用 cluster 子命令查看指定 VC 分区或当前租户全部 VC 的任务列表；默认只显示 Running 和 Pending 任务。",
+		Short: "并行查询一个或多个旧 ECP VCJob",
+		Long:  "根据任务名、Pod 名或 UID 并行查询一个或多个旧 ECP VCJob 详情。",
 		Example: strings.Join([]string{
 			"  rayctl ecp job get example-job",
 			"  rayctl ecp job get job-a job-b job-c",
-			"  rayctl ecp job get cluster vc-a3-intern-delivery",
-			"  rayctl ecp job get cluster vc-a3-intern-delivery pending",
-			"  rayctl ecp job get cluster vc-a3-intern-delivery --all-status",
-			"  rayctl ecp job get cluster -a",
-			"  rayctl ecp job get cluster -a pending",
 		}, "\n"),
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(getCmd *cobra.Command, args []string) error {
@@ -84,8 +76,61 @@ func newECPJobGetCmd() *cobra.Command {
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
 	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 master Pod 的最新日志")
 	getCmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
-	getCmd.AddCommand(newJobGetClusterCmd())
 	return getCmd
+}
+
+func newECPJobListCmd() *cobra.Command {
+	var state string
+	var limit int
+	var all bool
+	var includeInactive bool
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出当前环境中的旧 ECP VCJob",
+		Long: "默认汇总当前 profile 全部 VC 中的 Running/Pending 任务。\n" +
+			"使用 --all-status 查询已结束的历史任务；使用 cluster 子命令仅查询指定 VC。",
+		Example: strings.Join([]string{
+			"  rayctl ecp job list",
+			"  rayctl ecp job list -s pending",
+			"  rayctl ecp job list -n 100",
+			"  rayctl ecp job list --all-status -A",
+			"  rayctl ecp job list cluster vc-a3-intern-delivery",
+		}, "\n"),
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !isValidClusterStatusFilter(state) && strings.TrimSpace(state) != "" {
+				return fmt.Errorf("unsupported status filter %q", state)
+			}
+			if !all && (limit < 1 || limit > 1000) {
+				return fmt.Errorf("--limit must be between 1 and 1000")
+			}
+			if strings.EqualFold(strings.TrimSpace(state), "all") {
+				includeInactive = true
+			}
+
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			}
+			jobService := service.NewJobService(nil, nil, vcClient)
+			result, err := jobService.GetCurrentTenantClusterJobs(cmd.Context(), includeInactive, state)
+			if err != nil {
+				return err
+			}
+			if !all && len(result.Items) > limit {
+				result.Items = result.Items[:limit]
+			}
+			output.PrintJobClusterList(result)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&state, "state", "s", "", "按状态筛选: pending、running、active 或 all")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "最多显示的最新任务数，范围 1-1000")
+	cmd.Flags().BoolVarP(&all, "all", "A", false, "显示全部匹配任务，忽略 --limit")
+	cmd.Flags().BoolVar(&includeInactive, "all-status", false, "查询包括已结束任务在内的历史任务")
+	cmd.AddCommand(newJobListClusterCmd())
+	return cmd
 }
 
 func formatJobGetError(ctx context.Context, identifier string, timeout time.Duration, err error) error {
@@ -99,7 +144,7 @@ func normalizeJobGetIdentifier(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-func newJobGetClusterCmd() *cobra.Command {
+func newJobListClusterCmd() *cobra.Command {
 	var includeInactive bool
 	var allVC bool
 
@@ -109,11 +154,11 @@ func newJobGetClusterCmd() *cobra.Command {
 		Long: "查看指定 VC 分区下的任务列表，默认只显示 Running 和 Pending 任务。\n" +
 			"可用 pending、running 或 active 过滤状态；使用 --all-status 显示包括已结束任务在内的全部状态；使用 -a 查询当前租户全部 VC。",
 		Example: strings.Join([]string{
-			"  rayctl job get cluster vc-a3-intern-delivery",
-			"  rayctl job get cluster vc-a3-intern-delivery pending",
-			"  rayctl job get cluster vc-a3-intern-delivery --all-status",
-			"  rayctl job get cluster -a",
-			"  rayctl job get cluster -a running",
+			"  rayctl ecp job list cluster vc-a3-intern-delivery",
+			"  rayctl ecp job list cluster vc-a3-intern-delivery pending",
+			"  rayctl ecp job list cluster vc-a3-intern-delivery --all-status",
+			"  rayctl ecp job list cluster -a",
+			"  rayctl ecp job list cluster -a running",
 		}, "\n"),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if allVC {
@@ -134,25 +179,24 @@ func newJobGetClusterCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			clientset, dynamicClient, err := newJobClients()
-			if err != nil {
-				return err
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
 			}
-
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
-			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
+			jobService := service.NewJobService(nil, nil, vcClient)
 			var result *service.JobClusterListResult
+			var err error
 			statusFilter := ""
 			if allVC {
 				if len(args) == 1 {
 					statusFilter = args[0]
 				}
-				result, err = jobService.GetCurrentTenantClusterJobs(context.Background(), includeInactive, statusFilter)
+				result, err = jobService.GetCurrentTenantClusterJobs(cmd.Context(), includeInactive, statusFilter)
 			} else {
 				if len(args) == 2 {
 					statusFilter = args[1]
 				}
-				result, err = jobService.GetClusterJobs(context.Background(), args[0], includeInactive, statusFilter)
+				result, err = jobService.GetClusterJobs(cmd.Context(), args[0], includeInactive, statusFilter)
 			}
 			if err != nil {
 				return err

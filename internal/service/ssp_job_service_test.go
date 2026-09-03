@@ -79,6 +79,44 @@ func TestNormalizeSSPJobState(t *testing.T) {
 	}
 }
 
+func TestPlatformConditionEvidenceUsesStatusAndLatestTransition(t *testing.T) {
+	conditions := []map[string]any{
+		{"last_transition_time": "2026-08-27T07:09:21Z", "status": "PENDING", "message": nil},
+		{"last_transition_time": "2026-08-27T07:09:23Z", "status": "PENDING"},
+		{"reason": "QueueBlocked", "message": "queue has no capacity"},
+		{"status": nil, "detail": nil},
+	}
+
+	got := platformConditionEvidence(conditions)
+	if len(got) != 2 {
+		t.Fatalf("platformConditionEvidence() returned %d rows, want 2: %#v", len(got), got)
+	}
+	if got[0].Status != "Pending" || got[0].Detail != "状态更新时间 2026-08-27 15:09:23" {
+		t.Fatalf("unexpected transition evidence: %#v", got[0])
+	}
+	if got[1].Status != "QueueBlocked" || got[1].Detail != "queue has no capacity" {
+		t.Fatalf("unexpected detailed evidence: %#v", got[1])
+	}
+}
+
+func TestEnrichSSPVolumeClaimsFallsBackToPlatformMounts(t *testing.T) {
+	mounts := []sspVolumeDescriptor{
+		{Type: "PV_OCEANSTOR", Name: "afs-demo", MountPath: "/data"},
+		{Type: "PV_AOSS", Name: "bucket-demo", Endpoint: "https://s3.example.com", MountPath: "/object"},
+	}
+
+	got := enrichSSPVolumeClaims(nil, mounts)
+	if len(got) != 2 {
+		t.Fatalf("enrichSSPVolumeClaims() returned %d rows, want 2", len(got))
+	}
+	if got[0].MountPath != "/data" || got[0].VolumeType != "AFS" || got[0].FrontendVolume != "afs-demo" {
+		t.Fatalf("unexpected AFS mount: %#v", got[0])
+	}
+	if got[1].MountPath != "/object" || got[1].VolumeType != "AOSS" || !strings.Contains(got[1].FrontendVolume, "bucket-demo") {
+		t.Fatalf("unexpected AOSS mount: %#v", got[1])
+	}
+}
+
 func TestResolveJobRegionDefaultsToD(t *testing.T) {
 	service := NewSSPJobService(fake.NewSimpleClientset(), nil)
 	if got := service.resolveJobRegion(t.Context(), nil); got != "cn-pj-01" {

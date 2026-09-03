@@ -12,10 +12,12 @@ func TestJobRequestsForProfileDoNotProbeOtherProfiles(t *testing.T) {
 	requestCount := 0
 	requestedPaths := make([]string, 0, 9)
 	requestedAccepts := make([]string, 0, 9)
+	requestedFieldSelectors := make([]string, 0, 10)
 	clientHTTP := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requestCount++
 		requestedPaths = append(requestedPaths, r.URL.Path)
 		requestedAccepts = append(requestedAccepts, r.Header.Get("Accept"))
+		requestedFieldSelectors = append(requestedFieldSelectors, r.URL.Query().Get("fieldSelector"))
 		if r.URL.Host != "pt-compute.example.test" {
 			t.Fatalf("request host = %q, want pt-compute.example.test", r.URL.Host)
 		}
@@ -68,6 +70,9 @@ func TestJobRequestsForProfileDoNotProbeOtherProfiles(t *testing.T) {
 	if _, err := client.ListPodsForProfile(context.Background(), "pt", "vc-example", "default"); err != nil {
 		t.Fatalf("ListPodsForProfile() error = %v", err)
 	}
+	if _, err := client.ListActivePodsForProfile(context.Background(), "pt", "vc-example", "default"); err != nil {
+		t.Fatalf("ListActivePodsForProfile() error = %v", err)
+	}
 	if _, err := client.GetSecretForProfile(context.Background(), "pt", "vc-example", "default", "pull-secret"); err != nil {
 		t.Fatalf("GetSecretForProfile() error = %v", err)
 	}
@@ -87,16 +92,19 @@ func TestJobRequestsForProfileDoNotProbeOtherProfiles(t *testing.T) {
 	if count != 9548 {
 		t.Fatalf("CountVolcanoJobsForProfile() = %d, want 9548", count)
 	}
-	if requestCount != 9 {
-		t.Fatalf("request count = %d, want 9", requestCount)
+	if requestCount != 10 {
+		t.Fatalf("request count = %d, want 10", requestCount)
 	}
 	if got := requestedPaths[3]; !strings.HasSuffix(got, "/api/v1/namespaces/default/pods") {
 		t.Fatalf("cluster pod list path = %q, want namespace-scoped pod path", got)
 	}
-	if got := requestedAccepts[7]; !strings.Contains(got, "PartialObjectMetadataList") {
-		t.Fatalf("job metadata Accept = %q, want PartialObjectMetadataList", got)
+	if got := requestedFieldSelectors[4]; got != "status.phase!=Succeeded,status.phase!=Failed" {
+		t.Fatalf("active pod fieldSelector = %q", got)
 	}
 	if got := requestedAccepts[8]; !strings.Contains(got, "PartialObjectMetadataList") {
+		t.Fatalf("job metadata Accept = %q, want PartialObjectMetadataList", got)
+	}
+	if got := requestedAccepts[9]; !strings.Contains(got, "PartialObjectMetadataList") {
 		t.Fatalf("job count Accept = %q, want PartialObjectMetadataList", got)
 	}
 }

@@ -18,6 +18,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&targetEnvironment, "environment", "e", "auto", "平台环境: auto、d、pt、dcloud 或 all；默认根据当前 kubeconfig 自动识别")
 	rootCmd.AddCommand(newAFSCmd())
 	rootCmd.AddCommand(newAIDCmd())
+	rootCmd.AddCommand(newAITCmd())
 	rootCmd.AddCommand(newAIRCmd())
 	rootCmd.AddCommand(newAuthCmd())
 	rootCmd.AddCommand(newClusterCmd())
@@ -37,7 +38,6 @@ func init() {
 	rootCmd.AddCommand(newVPCCmd())
 	rootCmd.AddCommand(newWorkspaceCmd())
 	rootCmd.AddCommand(newSubnetCmd())
-	rootCmd.AddCommand(newSSPCmd())
 }
 
 func Execute() error {

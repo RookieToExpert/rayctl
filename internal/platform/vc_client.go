@@ -111,6 +111,28 @@ func (c *VirtualClusterClient) FindExactVirtualCluster(ctx context.Context, iden
 	}, nil
 }
 
+// FindExactVirtualClusterForProfile resolves a VC through one explicit
+// platform profile. This avoids cross-region ambiguity for related resources
+// such as SSP queues that already carry their owning profile.
+func (c *VirtualClusterClient) FindExactVirtualClusterForProfile(ctx context.Context, profileName, subscription, region, identifier string) (*VirtualCluster, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	profile.Subscription = firstNonEmpty(strings.TrimSpace(subscription), strings.TrimSpace(profile.Subscription))
+	profile.Region = firstNonEmpty(strings.TrimSpace(region), strings.TrimSpace(profile.Region))
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("virtual cluster identifier is required")
+	}
+	cluster, err := c.getVirtualClusterWithProfile(ctx, profile, identifier)
+	if err != nil {
+		return nil, err
+	}
+	cluster.ProfileName = profile.Name
+	return cluster, nil
+}
+
 func (c *VirtualClusterClient) getVirtualClusterWithProfile(ctx context.Context, profile clientProfile, name string) (*VirtualCluster, error) {
 	u, _ := url.Parse(profile.BaseURL)
 	u.Path = fmt.Sprintf(

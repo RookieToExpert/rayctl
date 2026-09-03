@@ -135,6 +135,62 @@ func (c *VirtualClusterClient) FindSSPAIDsForProfile(ctx context.Context, profil
 	return c.findSSPAIDs(ctx, profileName, subscription, region, workspace, identifier)
 }
 
+// ListSSPAIDsInWorkspace returns the newest AID instances in one workspace.
+func (c *VirtualClusterClient) ListSSPAIDsInWorkspace(ctx context.Context, workspace SSPWorkspace, state string, limit int) ([]SSPAID, error) {
+	if limit == 0 {
+		limit = 50
+	}
+	profile, ok := c.clientProfileByName(workspace.ProfileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", workspace.ProfileName)
+	}
+	subscription := firstNonEmpty(strings.TrimSpace(workspace.Subscription), strings.TrimSpace(profile.Subscription))
+	region := firstNonEmpty(strings.TrimSpace(workspace.Region), strings.TrimSpace(profile.Region))
+	endpoint, err := sspAIDsURL(profile, subscription, region, workspace.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	capacity := limit
+	if capacity < 0 {
+		capacity = 100
+	}
+	items := make([]SSPAID, 0, capacity)
+	for skip := 0; limit < 0 || len(items) < limit; {
+		pageSize := 100
+		if limit > 0 {
+			pageSize = min(pageSize, limit-len(items))
+		}
+		query := endpoint.Query()
+		query.Set("page_size", fmt.Sprintf("%d", pageSize))
+		query.Set("skip", fmt.Sprintf("%d", skip))
+		query.Set("order_by", "created_at desc")
+		if state = strings.TrimSpace(state); state != "" {
+			query.Set("filter", fmt.Sprintf(`state="%s"`, escapeSSPFilterValue(state)))
+		}
+		endpoint.RawQuery = query.Encode()
+
+		var payload sspAIDListResponse
+		if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
+			return nil, err
+		}
+		for _, item := range payload.AIDs {
+			item.ProfileName = profile.Name
+			item.Properties.Workload.WorkspaceName = firstNonEmpty(strings.TrimSpace(item.Properties.Workload.WorkspaceName), strings.TrimSpace(workspace.Name))
+			items = append(items, item)
+		}
+		count := len(payload.AIDs)
+		if count == 0 || count < pageSize || (payload.TotalSize > 0 && skip+count >= payload.TotalSize) {
+			break
+		}
+		skip += count
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
 func (c *VirtualClusterClient) findSSPAIDs(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPAID, error) {
 	subscription = strings.TrimSpace(subscription)
 	region = strings.TrimSpace(region)

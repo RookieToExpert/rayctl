@@ -38,28 +38,42 @@ func TestFormatJobGetTimeoutError(t *testing.T) {
 	}
 }
 
-func TestECPJobGetHelpIncludesClusterUsage(t *testing.T) {
-	cmd := newECPJobGetCmd()
-	help := strings.Join([]string{cmd.Short, cmd.Long, cmd.Example}, "\n")
-	for _, fragment := range []string{
-		"按 VC 分区",
-		"ecp job get cluster vc-a3-intern-delivery",
-		"ecp job get cluster -a pending",
-		"--all-status",
-	} {
-		if !strings.Contains(help, fragment) {
-			t.Fatalf("ecp job get help does not contain %q:\n%s", fragment, help)
+func TestECPJobListHelpIncludesClusterUsage(t *testing.T) {
+	cmd := newECPJobListCmd()
+	if cmd.RunE == nil {
+		t.Fatal("ecp job list does not implement the global list entrypoint")
+	}
+	for _, flag := range []string{"state", "limit", "all", "all-status"} {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Fatalf("ecp job list is missing --%s", flag)
 		}
 	}
-
+	for _, fragment := range []string{"全部 VC", "ecp job list -s pending", "ecp job list --all-status -A"} {
+		help := strings.Join([]string{cmd.Short, cmd.Long, cmd.Example}, "\n")
+		if !strings.Contains(help, fragment) {
+			t.Fatalf("ecp job list help does not contain %q:\n%s", fragment, help)
+		}
+	}
 	clusterCmd, _, err := cmd.Find([]string{"cluster"})
 	if err != nil {
 		t.Fatalf("find cluster subcommand: %v", err)
 	}
+	help := strings.Join([]string{clusterCmd.Short, clusterCmd.Long, clusterCmd.Example}, "\n")
+	for _, fragment := range []string{
+		"任务列表",
+		"ecp job list cluster vc-a3-intern-delivery",
+		"ecp job list cluster -a running",
+		"--all-status",
+	} {
+		if !strings.Contains(help, fragment) {
+			t.Fatalf("ecp job list help does not contain %q:\n%s", fragment, help)
+		}
+	}
+
 	clusterHelp := strings.Join([]string{clusterCmd.Long, clusterCmd.Example}, "\n")
 	for _, fragment := range []string{"Running 和 Pending", "--all-status", "当前租户全部 VC"} {
 		if !strings.Contains(clusterHelp, fragment) {
-			t.Fatalf("job get cluster help does not contain %q:\n%s", fragment, clusterHelp)
+			t.Fatalf("job list cluster help does not contain %q:\n%s", fragment, clusterHelp)
 		}
 	}
 }

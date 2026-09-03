@@ -33,11 +33,12 @@ type SSPAIDGetResult struct {
 	State                  string
 	VCluster               string
 	Workspace              string
+	Namespace              string
 	Queue                  string
 	QueueType              string
 	Priority               string
 	Submitter              string
-	HostIP                 string
+	InternalIP             string
 	SSHEnabled             string
 	CodeServerEnabled      string
 	Image                  string
@@ -190,9 +191,15 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 		hostNamespace = pods[0].Namespace
 	} else {
 		hostNamespace = candidate.Workspace.HostNamespace
+		if hostNamespace == "" {
+			hostNamespace = s.sspBase.findHostNamespace(ctx, aid.Properties.Workload.WorkspaceName, "")
+		}
 		pods, err = s.findAIDPods(ctx, firstNonEmpty(aid.UID, aid.Name), hostNamespace)
 		if err != nil {
 			return nil, fmt.Errorf("list AID pods: %w", err)
+		}
+		if hostNamespace == "" && len(pods) > 0 {
+			hostNamespace = pods[0].Namespace
 		}
 	}
 	timings.RefinePods = time.Since(stageStartedAt)
@@ -360,7 +367,7 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 	queue := firstNonEmpty(aid.Properties.Workload.Queue.Name, lastResourceSegment(aid.Properties.Workload.Queue.ID))
 	resource := aid.Properties.Workload.BaseSpec
 	vcResult := asyncCall(ctx, func(ctx context.Context) (string, error) {
-		return s.sspBase.resolveSSPVClusterName(ctx, pods, hostNamespace, aid.ProfileName), nil
+		return s.resolveAIDVClusterName(ctx, aid, queue, pods, hostNamespace), nil
 	})
 	result := &SSPAIDGetResult{
 		Name:              aid.Name,
@@ -368,11 +375,12 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 		State:             state,
 		VCluster:          "-",
 		Workspace:         aid.Properties.Workload.WorkspaceName,
+		Namespace:         aidWorkspaceNamespace(pods, hostNamespace),
 		Queue:             queue,
 		QueueType:         aid.Properties.Workload.Queue.Type,
 		Priority:          aid.Properties.Workload.Priority,
 		Submitter:         firstNonEmpty(aid.Properties.Ownership.CreatorName, aid.CreatorID),
-		HostIP:            aid.Properties.HostIP,
+		InternalIP:        aid.Properties.HostIP,
 		SSHEnabled:        boolPointerText(aid.Properties.SSHEnabled),
 		CodeServerEnabled: boolPointerText(aid.Properties.CodeServerEnabled),
 		Image:             aid.Properties.ImagePath,
@@ -415,7 +423,7 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 	imagePullSecrets, pvcRefs := extractPodSpecDetailsFromPods(pods)
 	identity := &jobIdentity{Name: aid.Name, UID: aid.UID, HostNamespace: hostNamespace}
 	result.PersistentVolumeClaims = s.sspBase.resolveSSPVolumeClaimRefs(ctx, hostNamespace, pvcRefs)
-	volumeDescriptors := s.sspBase.resolveSSPVolumeDescriptors(ctx, aidVolumeDescriptors(aid.Properties.VolumeMounts))
+	volumeDescriptors := s.sspBase.resolveSSPVolumeDescriptors(ctx, aid.ProfileName, aidVolumeDescriptors(aid.Properties.VolumeMounts))
 	result.PersistentVolumeClaims = enrichSSPVolumeClaims(result.PersistentVolumeClaims, volumeDescriptors)
 	result.ImagePullSecrets = s.jobHelper.resolveImagePullSecretsFromKube(ctx, hostNamespace, imagePullSecrets)
 	result.VCluster = (<-vcResult).Value
@@ -465,16 +473,46 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 	return result
 }
 
+func (s *SSPAIDService) resolveAIDVClusterName(ctx context.Context, aid platform.SSPAID, queue string, pods []corev1.Pod, hostNamespace string) string {
+	vcName := s.sspBase.resolveSSPVClusterName(ctx, pods, hostNamespace, aid.ProfileName)
+	if vcName != "-" || s.platform == nil || strings.TrimSpace(aid.ProfileName) == "" || strings.TrimSpace(queue) == "" {
+		return vcName
+	}
+	details, err := s.platform.GetSSPQueueResource(ctx, aid.ProfileName, queue)
+	if err != nil {
+		return vcName
+	}
+	return dashIfEmpty(firstNonEmpty(strings.TrimSpace(details.VClusterName), vcName))
+}
+
+func aidWorkspaceNamespace(pods []corev1.Pod, hostNamespace string) string {
+	for _, pod := range pods {
+		if namespace := firstNonEmpty(
+			pod.Annotations["vcluster.loft.sh/object-namespace"],
+			pod.Annotations["vcluster.loft.sh/namespace"],
+		); namespace != "" {
+			return namespace
+		}
+	}
+	return hostNamespace
+}
+
 func appendSSPAIDDNATRules(result *SSPAIDGetResult, rules []platform.SSPAIDDNATRule) {
 	if result == nil {
 		return
 	}
 	for _, rule := range rules {
+		// AID payloads can contain an associated EIP without an actual DNAT
+		// mapping. Only render complete port mappings as DNAT rules.
+		if strings.TrimSpace(rule.ExternalIP) == "" || strings.TrimSpace(rule.ExternalPort) == "" || strings.TrimSpace(rule.InternalPort) == "" {
+			continue
+		}
+		internalIP := firstNonEmpty(strings.TrimSpace(rule.InternalIP), strings.TrimSpace(result.InternalIP))
 		result.DNATRules = append(result.DNATRules, SSPAIDDNATItem{
 			External: endpointText(rule.ExternalIP, rule.ExternalPort),
-			Internal: endpointText(rule.InternalIP, rule.InternalPort),
+			Internal: endpointText(internalIP, rule.InternalPort),
 			Protocol: rule.Protocol,
-			State:    rule.State,
+			State:    firstNonEmpty(strings.TrimSpace(rule.State), "UNKNOWN"),
 		})
 	}
 }
@@ -483,16 +521,16 @@ func formatSSPAIDResourceSummary(resource SSPAIDResourceItem) string {
 	parts := make([]string, 0, 7)
 	appendPart := func(value string, suffix string) {
 		value = strings.TrimSpace(value)
-		if value == "" || value == "-" || value == "0" {
+		if isEmptySSPResourceValue(value) {
 			return
 		}
 		parts = append(parts, value+suffix)
 	}
 	appendPart(resource.CPU, " CPU")
 	appendPart(resource.Memory, " Memory")
-	if value := strings.TrimSpace(resource.Accelerator); value != "" && value != "-" && value != "0" {
+	if value := strings.TrimSpace(resource.Accelerator); !isEmptySSPResourceValue(value) {
 		model := strings.TrimSpace(resource.GPUModel)
-		if model != "" && model != "-" {
+		if !isEmptySSPResourceValue(model) {
 			parts = append(parts, value+" "+model)
 		} else {
 			parts = append(parts, value+" Accelerator")
@@ -502,6 +540,15 @@ func formatSSPAIDResourceSummary(resource SSPAIDResourceItem) string {
 	appendPart(resource.MachineType, " Machine Type")
 	appendPart(resource.RDMA, " RDMA")
 	return dashIfEmpty(strings.Join(parts, " / "))
+}
+
+func isEmptySSPResourceValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "-", "0", "none", "null", "<nil>":
+		return true
+	default:
+		return false
+	}
 }
 
 func boolPointerText(value *bool) string {

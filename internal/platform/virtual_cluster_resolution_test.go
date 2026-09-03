@@ -57,3 +57,29 @@ func TestFindExactVirtualClusterUIDDoesNotCallPlatform(t *testing.T) {
 		t.Fatalf("uid = %q", cluster.UID)
 	}
 }
+
+func TestFindExactVirtualClusterForProfileUsesRequestedProfile(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		wantPath := "/compute/ecp/v1/subscriptions/pt-sub/resourceGroups/default/regions/cn-pj-03/virtualClusters/vc-cpu"
+		if request.URL.Path != wantPath {
+			return nil, fmt.Errorf("path = %q, want %q", request.URL.Path, wantPath)
+		}
+		return jsonHTTPResponse(request, `{"uid":"vc-uid","name":"vc-cpu"}`), nil
+	})}
+	client := &VirtualClusterClient{
+		currentProfile: "d",
+		profiles: map[string]clientProfile{
+			"d":  {Name: "d", Subscription: "d-sub", ResourceGroup: "default", Region: "cn-pj-01"},
+			"pt": {Name: "pt", ResourceGroup: "default"},
+		},
+		httpClient: httpClient,
+	}
+
+	cluster, err := client.FindExactVirtualClusterForProfile(context.Background(), "pt", "pt-sub", "cn-pj-03", "vc-cpu")
+	if err != nil {
+		t.Fatalf("FindExactVirtualClusterForProfile() error = %v", err)
+	}
+	if cluster.ProfileName != "pt" || cluster.TenantID != "pt-sub" || cluster.Region != "cn-pj-03" {
+		t.Fatalf("cluster = %#v", cluster)
+	}
+}

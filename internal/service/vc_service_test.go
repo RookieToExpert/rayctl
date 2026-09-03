@@ -32,6 +32,24 @@ func TestEnrichVCNodeModelsUsesHCNodeLabels(t *testing.T) {
 	}
 }
 
+func TestEnrichVCNodeModelsUsesNVIDIAProductLabel(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "host-10-0-0-1",
+			Labels: map[string]string{
+				"nvidia.com/gpu.product": "NVIDIA-H20",
+			},
+		},
+	})
+	items := []VCNodeListItem{{HostName: "host-10-0-0-1"}}
+
+	(&VCService{clientset: clientset}).enrichVCNodeModels(context.Background(), items)
+
+	if items[0].Model != "NVIDIA-H20" {
+		t.Fatalf("Model = %q, want NVIDIA-H20", items[0].Model)
+	}
+}
+
 func TestResolveVCNodesForRemovalMatchesExactIdentifiersAndDeduplicates(t *testing.T) {
 	nodes := []VCNodeListItem{
 		{UID: "uid-1", Name: "ecp-node-1", HostName: "host-10-0-0-1", HostIP: "10.0.0.1"},
@@ -53,22 +71,38 @@ func TestResolveVCNodesForRemovalRejectsPartialOrForeignNode(t *testing.T) {
 	}
 }
 
-func TestFilterFreeAcceleratorNodes(t *testing.T) {
-	free := platform.VirtualClusterNodeResourceUsage{}
-	free.Usage.Available.Device = "8"
-	full := platform.VirtualClusterNodeResourceUsage{}
-	full.Usage.Available.Device = "0"
-	unknown := platform.VirtualClusterNodeResourceUsage{}
-	unknown.Usage.Available.Device = "-"
+func TestFilterFreeNodes(t *testing.T) {
+	acceleratorFree := platform.VirtualClusterNodeResourceUsage{}
+	acceleratorFree.Usage.Total.Device = "8"
+	acceleratorFree.Usage.Available.Device = "1"
+	acceleratorFull := platform.VirtualClusterNodeResourceUsage{}
+	acceleratorFull.Usage.Total.Device = "8"
+	acceleratorFull.Usage.Available.Device = "0"
+	acceleratorFull.Usage.Available.CPU = "100"
+	acceleratorFull.Usage.Available.Memory = "100GiB"
+	cpuFree := platform.VirtualClusterNodeResourceUsage{}
+	cpuFree.Usage.Available.CPU = "4"
+	cpuFree.Usage.Available.Memory = "16GiB"
+	cpuFull := platform.VirtualClusterNodeResourceUsage{}
+	cpuFull.Usage.Available.CPU = "0"
+	cpuFull.Usage.Available.Memory = "16GiB"
+	cpuDerived := platform.VirtualClusterNodeResourceUsage{}
+	cpuDerived.Usage.Total.CPU = "16"
+	cpuDerived.Usage.Allocated.CPU = "4"
+	cpuDerived.Usage.Total.Memory = "128GiB"
+	cpuDerived.Usage.Allocated.Memory = "32GiB"
 	result := &VCResourceUsageResult{Items: []VCNodeResourceUsageItem{
-		{HostName: "free", Usage: free},
-		{HostName: "full", Usage: full},
-		{HostName: "unknown", Usage: unknown},
+		{HostName: "accelerator-free", Usage: acceleratorFree},
+		{HostName: "accelerator-full", Usage: acceleratorFull},
+		{HostName: "cpu-free", Usage: cpuFree},
+		{HostName: "cpu-full", Usage: cpuFull},
+		{HostName: "cpu-derived", Usage: cpuDerived},
 	}}
 
-	result.FilterFreeAcceleratorNodes()
+	result.FilterFreeNodes()
 
-	if len(result.Items) != 1 || result.Items[0].HostName != "free" {
+	if len(result.Items) != 3 || result.Items[0].HostName != "accelerator-free" ||
+		result.Items[1].HostName != "cpu-free" || result.Items[2].HostName != "cpu-derived" {
 		t.Fatalf("filtered items = %#v", result.Items)
 	}
 }

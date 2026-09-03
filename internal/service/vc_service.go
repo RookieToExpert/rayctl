@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -96,19 +97,63 @@ type VCNodeResourceUsageItem struct {
 	Usage    platform.VirtualClusterNodeResourceUsage
 }
 
-func (r *VCResourceUsageResult) FilterFreeAcceleratorNodes() {
+func (r *VCResourceUsageResult) FilterFreeNodes() {
 	if r == nil {
 		return
 	}
 	filtered := r.Items[:0]
 	for _, item := range r.Items {
-		available := strings.TrimSpace(item.Usage.Usage.Available.Device)
-		value, err := strconv.ParseFloat(available, 64)
-		if err == nil && value > 0 {
+		usage := item.Usage.Usage
+		if hasAcceleratorResource(usage.Total.Device, usage.Allocated.Device, usage.Available.Device) {
+			if resourceAmountAvailable(usage.Available.Device, usage.Total.Device, usage.Allocated.Device) {
+				filtered = append(filtered, item)
+			}
+			continue
+		}
+		if resourceAmountAvailable(usage.Available.CPU, usage.Total.CPU, usage.Allocated.CPU) &&
+			resourceAmountAvailable(usage.Available.Memory, usage.Total.Memory, usage.Allocated.Memory) {
 			filtered = append(filtered, item)
 		}
 	}
 	r.Items = filtered
+}
+
+func hasAcceleratorResource(values ...string) bool {
+	for _, value := range values {
+		if positive, valid := positiveResourceQuantity(value); valid && positive {
+			return true
+		}
+	}
+	return false
+}
+
+func resourceAmountAvailable(available, total, allocated string) bool {
+	if positive, valid := positiveResourceQuantity(available); valid {
+		return positive
+	}
+	totalQuantity, totalValid := parsePlatformResourceQuantity(total)
+	allocatedQuantity, allocatedValid := parsePlatformResourceQuantity(allocated)
+	return totalValid && allocatedValid && totalQuantity.Cmp(allocatedQuantity) > 0
+}
+
+func positiveResourceQuantity(value string) (bool, bool) {
+	quantity, valid := parsePlatformResourceQuantity(value)
+	return valid && quantity.Sign() > 0, valid
+}
+
+func parsePlatformResourceQuantity(value string) (resource.Quantity, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "-" {
+		return resource.Quantity{}, false
+	}
+	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		if strings.HasSuffix(value, suffix) {
+			value = strings.TrimSuffix(value, suffix) + strings.TrimSuffix(suffix, "B")
+			break
+		}
+	}
+	quantity, err := resource.ParseQuantity(value)
+	return quantity, err == nil
 }
 
 func NewVCService(vcClient *platform.VirtualClusterClient) *VCService {
@@ -296,12 +341,7 @@ func (s *VCService) enrichVCNodeModels(ctx context.Context, items []VCNodeListIt
 	}
 	modelByHost := make(map[string]string, len(nodes.Items))
 	for _, node := range nodes.Items {
-		model := firstNonEmpty(
-			strings.TrimSpace(node.Labels["accelerator-type"]),
-			strings.TrimSpace(node.Labels["node.kubernetes.io/npu.chip.name"]),
-			strings.TrimSpace(node.Labels["accelerator"]),
-			strings.TrimSpace(node.Labels["resource.compute.sensecore.cn/accelerator-model"]),
-		)
+		model := nodeAcceleratorModel(node.Labels)
 		if model != "" {
 			modelByHost[strings.ToLower(strings.TrimSpace(node.Name))] = model
 		}
@@ -322,6 +362,25 @@ func (s *VCService) GetResourceUsage(ctx context.Context, clusterIdentifier stri
 	if err != nil {
 		return nil, err
 	}
+	return s.getResourceUsage(ctx, cluster)
+}
+
+func (s *VCService) GetResourceUsageForProfile(ctx context.Context, profileName, subscription, region, clusterName string) (*VCResourceUsageResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required")
+	}
+	platformCluster, err := s.vcClient.FindExactVirtualClusterForProfile(ctx, profileName, subscription, region, clusterName)
+	if err != nil {
+		return nil, err
+	}
+	cluster := vcDetailFromListItem(vcListItemFromPlatform(*platformCluster))
+	cluster.Subscription = firstNonEmpty(strings.TrimSpace(subscription), cluster.Subscription)
+	cluster.Region = firstNonEmpty(strings.TrimSpace(region), cluster.Region)
+	cluster.Tenant = firstNonEmpty(strings.TrimSpace(profileName), cluster.Tenant)
+	return s.getResourceUsage(ctx, cluster)
+}
+
+func (s *VCService) getResourceUsage(ctx context.Context, cluster *VCDetailResult) (*VCResourceUsageResult, error) {
 	nodes, err := s.vcClient.ListVirtualClusterNodes(
 		ctx,
 		cluster.Tenant,

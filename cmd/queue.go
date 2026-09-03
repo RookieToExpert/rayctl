@@ -23,6 +23,7 @@ func newQueueCmd() *cobra.Command {
 		Use:   "queue",
 		Short: "查询 SSP 队列及其节点资源",
 	}
+	cmd.AddCommand(newQueueListCmd())
 	cmd.AddCommand(newQueueGetCmd())
 	cmd.AddCommand(newQueueNodeCmd())
 	cmd.AddCommand(newQueueWorkloadCmd())
@@ -35,16 +36,16 @@ func newQueueWorkloadCmd() *cobra.Command {
 		Aliases: []string{"wl"},
 		Short:   "查询 SSP 队列中的工作负载",
 	}
-	cmd.AddCommand(newQueueWorkloadGetCmd())
+	cmd.AddCommand(newQueueWorkloadListCmd())
 	return cmd
 }
 
-func newQueueWorkloadGetCmd() *cobra.Command {
+func newQueueWorkloadListCmd() *cobra.Command {
 	var workloadType string
 	var state string
 	var priority string
 	cmd := &cobra.Command{
-		Use:   "get <queue-name-or-uid> [queue-name-or-uid...]",
+		Use:   "list <queue-name-or-uid> [queue-name-or-uid...]",
 		Short: "并行列出一个或多个 SSP 队列中的工作负载",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -100,14 +101,12 @@ func normalizeQueueWorkloadType(value string) string {
 	}
 }
 
-func newQueueGetCmd() *cobra.Command {
-	var debugTiming bool
-	var longOutput bool
-	cmd := &cobra.Command{
-		Use:   "get [queue-name-or-uid...]",
-		Short: "列出 SSP 队列，或查询一个或多个队列详情",
-		Args:  cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+func newQueueListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "列出 SSP 队列",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			region, err := selectedSSPRegion()
 			if err != nil {
 				return err
@@ -116,15 +115,29 @@ func newQueueGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if len(args) == 0 {
-				result, err := resourceService.ListQueues(cmd.Context(), region)
-				if err != nil {
-					return err
-				}
-				output.PrintSSPQueueList(result)
-				return nil
+			result, err := resourceService.ListQueues(cmd.Context(), region)
+			if err != nil {
+				return err
 			}
-			region, err = selectedSSPRegionForLookup()
+			output.PrintSSPQueueList(result)
+			return nil
+		},
+	}
+}
+
+func newQueueGetCmd() *cobra.Command {
+	var debugTiming bool
+	var longOutput bool
+	cmd := &cobra.Command{
+		Use:   "get <queue-name-or-uid> [queue-name-or-uid...]",
+		Short: "查询一个或多个 SSP 队列详情",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resourceService, err := newSSPResourceQueryService()
+			if err != nil {
+				return err
+			}
+			region, err := selectedSSPRegionForLookup()
 			if err != nil {
 				return err
 			}
@@ -241,7 +254,7 @@ func newQueueNodeUsageCmd() *cobra.Command {
 					continue
 				}
 				if freeOnly {
-					result.result.FilterFreeAcceleratorNodes()
+					result.result.FilterFreeNodes()
 				}
 				valid = append(valid, result.result)
 			}
@@ -249,7 +262,7 @@ func newQueueNodeUsageCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用加速卡的节点")
+	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用资源的节点；加速节点按卡数，CPU-only 节点按 CPU/内存")
 	return cmd
 }
 

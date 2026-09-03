@@ -21,40 +21,48 @@ func newVCCmd() *cobra.Command {
 		Short: "查询平台 VC 信息",
 	}
 
+	vcCmd.AddCommand(newVCListCmd())
 	vcCmd.AddCommand(newVCGetCmd())
 	vcCmd.AddCommand(newVCNodeCmd())
 	vcCmd.AddCommand(newClusterSetCmd())
 	return vcCmd
 }
 
+func newVCListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "列出平台 VC",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, vcService, err := newVCPlatformService()
+			if err != nil {
+				return err
+			}
+			result, err := vcService.List(cmd.Context())
+			if err != nil {
+				return err
+			}
+			output.PrintVCList(result)
+			return nil
+		},
+	}
+}
+
 func newVCGetCmd() *cobra.Command {
 	var platformOnly bool
 	cmd := &cobra.Command{
-		Use:   "get [vc-name-or-uid...]",
-		Short: "列出 VC，或并行查询一个或多个 VC",
-		Long: "不带参数时列出平台 VC；指定一个 VC 时展示平台信息和 HC namespace 映射；" +
+		Use:   "get <vc-name-or-uid> [vc-name-or-uid...]",
+		Short: "并行查询一个或多个 VC",
+		Long: "指定一个 VC 时展示平台信息和 HC namespace 映射；" +
 			"指定多个 VC 时并行查询并仅展示每个 VC 的概要表。",
 		Example: strings.Join([]string{
-			"  rayctl vc get",
+			"  rayctl vc list",
 			"  rayctl vc get vc-a3-llmit",
 			"  rayctl vc get vc-a3-llmit vc-a3-deeplink vc-c550-jiaofu",
 			"  rayctl vc get vc-a3-llmit --platform-only",
 		}, "\n"),
-		Args: cobra.ArbitraryArgs,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				_, vcService, err := newVCPlatformService()
-				if err != nil {
-					return err
-				}
-				result, err := vcService.List(cmd.Context())
-				if err != nil {
-					return err
-				}
-				output.PrintVCList(result)
-				return nil
-			}
-
 			if len(args) == 1 {
 				return runVCGet(cmd, args[0], platformOnly)
 			}
@@ -195,7 +203,7 @@ func newVCNodeUsageCmd() *cobra.Command {
 					continue
 				}
 				if freeOnly {
-					query.result.FilterFreeAcceleratorNodes()
+					query.result.FilterFreeNodes()
 				}
 				results = append(results, query.result)
 			}
@@ -205,7 +213,7 @@ func newVCNodeUsageCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用加速卡（ACCEL FREE > 0）的节点")
+	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用资源的节点；加速节点按卡数，CPU-only 节点按 CPU/内存")
 	return cmd
 }
 

@@ -17,16 +17,17 @@ func newWorkspaceCmd() *cobra.Command {
 		Aliases: []string{"ws"},
 		Short:   "查询 SSP workspace 及其队列",
 	}
+	cmd.AddCommand(newWorkspaceListCmd())
 	cmd.AddCommand(newWorkspaceGetCmd())
 	return cmd
 }
 
-func newWorkspaceGetCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "get [workspace-name-or-uid...]",
-		Short: "列出 SSP workspace，或查询一个或多个 workspace 详情",
-		Args:  cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+func newWorkspaceListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "列出 SSP workspace",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			region, err := selectedSSPRegion()
 			if err != nil {
 				return err
@@ -35,15 +36,27 @@ func newWorkspaceGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if len(args) == 0 {
-				result, err := resourceService.ListWorkspaces(cmd.Context(), region)
-				if err != nil {
-					return err
-				}
-				output.PrintSSPWorkspaceList(result)
-				return nil
+			result, err := resourceService.ListWorkspaces(cmd.Context(), region)
+			if err != nil {
+				return err
 			}
-			region, err = selectedSSPRegionForLookup()
+			output.PrintSSPWorkspaceList(result)
+			return nil
+		},
+	}
+}
+
+func newWorkspaceGetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get <workspace-name-or-uid> [workspace-name-or-uid...]",
+		Short: "查询一个或多个 SSP workspace 详情",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resourceService, err := newSSPResourceQueryService()
+			if err != nil {
+				return err
+			}
+			region, err := selectedSSPRegionForLookup()
 			if err != nil {
 				return err
 			}

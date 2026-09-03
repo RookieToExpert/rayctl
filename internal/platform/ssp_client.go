@@ -265,6 +265,7 @@ type SSPQueueWorkloadQuery struct {
 	Type     string
 	State    string
 	Priority string
+	Limit    int
 }
 
 type SSPQueueWorkload struct {
@@ -705,9 +706,15 @@ func (c *VirtualClusterClient) ListSSPQueueWorkloads(ctx context.Context, profil
 		}
 	}
 
-	const pageSize = 100
 	result := make([]SSPQueueWorkload, 0)
 	for skip := 0; ; {
+		pageSize := 100
+		if query.Limit > 0 && query.Limit-len(result) < pageSize {
+			pageSize = query.Limit - len(result)
+		}
+		if pageSize <= 0 {
+			break
+		}
 		endpoint, _ := url.Parse(profile.BaseURL)
 		endpoint.Path = fmt.Sprintf(
 			"/compute/ssp/v1/subscriptions/%s/resourceGroups/%s/regions/%s/clusters/%s/queues/%s/workloads",
@@ -728,10 +735,13 @@ func (c *VirtualClusterClient) ListSSPQueueWorkloads(ctx context.Context, profil
 		}
 		result = append(result, payload.Workloads...)
 		count := len(payload.Workloads)
-		if count == 0 || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) || count < pageSize {
+		if count == 0 || (query.Limit > 0 && len(result) >= query.Limit) || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) || count < pageSize {
 			break
 		}
 		skip += count
+	}
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
 	}
 	return result, nil
 }
@@ -1118,6 +1128,67 @@ func (c *VirtualClusterClient) FindSSPTrainingJobs(ctx context.Context, subscrip
 
 func (c *VirtualClusterClient) FindSSPTrainingJobsForProfile(ctx context.Context, profileName string, subscription string, region string, workspace string, identifier string) ([]SSPTrainingJob, error) {
 	return c.findSSPTrainingJobs(ctx, profileName, subscription, region, workspace, identifier)
+}
+
+// ListSSPTrainingJobsInWorkspace returns the newest AIT jobs in one workspace.
+// Region-wide aggregation belongs in the service layer so workspace requests
+// can run concurrently.
+func (c *VirtualClusterClient) ListSSPTrainingJobsInWorkspace(ctx context.Context, workspace SSPWorkspace, state string, limit int) ([]SSPTrainingJob, error) {
+	if limit == 0 {
+		limit = 50
+	}
+	profile, ok := c.clientProfileByName(workspace.ProfileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", workspace.ProfileName)
+	}
+	subscription := firstNonEmpty(strings.TrimSpace(workspace.Subscription), strings.TrimSpace(profile.Subscription))
+	region := firstNonEmpty(strings.TrimSpace(workspace.Region), strings.TrimSpace(profile.Region))
+	endpoint, err := sspTrainingJobsURL(profile, subscription, region, workspace.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	capacity := limit
+	if capacity < 0 {
+		capacity = 100
+	}
+	items := make([]SSPTrainingJob, 0, capacity)
+	for skip := 0; limit < 0 || len(items) < limit; {
+		pageSize := 100
+		if limit > 0 {
+			pageSize = min(pageSize, limit-len(items))
+		}
+		query := endpoint.Query()
+		query.Set("page_size", strconv.Itoa(pageSize))
+		query.Set("skip", strconv.Itoa(skip))
+		query.Set("order_by", "created_at desc")
+		if state = strings.TrimSpace(state); state != "" {
+			query.Set("filter", fmt.Sprintf(`state="%s"`, escapeSSPFilterValue(state)))
+		}
+		endpoint.RawQuery = query.Encode()
+
+		var payload sspTrainingJobListResponse
+		if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
+			return nil, err
+		}
+		for _, item := range payload.TrainingJobs {
+			item.ProfileName = profile.Name
+			item.WorkspaceName = firstNonEmpty(strings.TrimSpace(item.WorkspaceName), strings.TrimSpace(workspace.Name))
+			item.SubscriptionName = firstNonEmpty(strings.TrimSpace(item.SubscriptionName), subscription)
+			item.ResourceGroupName = firstNonEmpty(strings.TrimSpace(item.ResourceGroupName), strings.TrimSpace(workspace.ResourceGroup), strings.TrimSpace(profile.ResourceGroup), defaultResourceGroup)
+			item.Region = firstNonEmpty(strings.TrimSpace(item.Region), region)
+			items = append(items, item)
+		}
+		count := len(payload.TrainingJobs)
+		if count == 0 || count < pageSize || (payload.TotalSize > 0 && skip+count >= payload.TotalSize) {
+			break
+		}
+		skip += count
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
 }
 
 func (c *VirtualClusterClient) ListSSPTrainingJobWorkers(ctx context.Context, job SSPTrainingJob, limit int) ([]SSPTrainingJobWorker, int, error) {

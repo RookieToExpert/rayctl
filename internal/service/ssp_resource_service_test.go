@@ -86,6 +86,45 @@ func TestQueueNodeListItemUsesNodeLabels(t *testing.T) {
 	}
 }
 
+func TestQueueNodeListItemUsesMetaxProductLabel(t *testing.T) {
+	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "host-10-12-144-148",
+		Labels: map[string]string{
+			"metax-tech.com/gpu.product": "MXC550-PL",
+		},
+	}}
+
+	item := queueNodeListItem(node)
+
+	if item.Model != "MXC550-PL" {
+		t.Fatalf("Model = %q, want MXC550-PL", item.Model)
+	}
+}
+
+func TestQueueNodeListItemUsesUnknownVendorProductLabel(t *testing.T) {
+	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+		"future-vendor.example/gpu-model": "FutureGPU-X1",
+	}}}
+
+	if item := queueNodeListItem(node); item.Model != "FutureGPU-X1" {
+		t.Fatalf("Model = %q, want FutureGPU-X1", item.Model)
+	}
+}
+
+func TestFillNodeModelsByMachineType(t *testing.T) {
+	items := []VCNodeListItem{
+		{MachineType: "x2ls.ri.i70", Model: "MXC550-PL"},
+		{MachineType: "x2ls.ri.i70"},
+		{MachineType: "n3ls.ii.i60a"},
+	}
+
+	fillNodeModelsByMachineType(items, map[string]string{"n3ls.ii.i60a": "A800"})
+
+	if items[1].Model != "MXC550-PL" || items[2].Model != "A800" {
+		t.Fatalf("unexpected model propagation: %#v", items)
+	}
+}
+
 func TestQueueNodeListItemsEnrichesHostnameAndModel(t *testing.T) {
 	kubeNode := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
@@ -210,6 +249,44 @@ func TestSSPQueueNodeResource(t *testing.T) {
 	allocated, total, unallocated := sspQueueNodeResource(node, "device")
 	if allocated != "4" || total != "16" || unallocated != "12" {
 		t.Fatalf("resource = %q/%q/%q", allocated, total, unallocated)
+	}
+}
+
+func TestElasticQueueUsesSharedVCNodes(t *testing.T) {
+	if !queueUsesSharedVCNodes(SSPQueueItem{Type: "ELASTIC", VCluster: "vc-cpu"}) {
+		t.Fatal("expected elastic queue to use shared VC nodes")
+	}
+	if queueUsesSharedVCNodes(SSPQueueItem{Type: "EXCLUSIVE", VCluster: "vc-cpu"}) {
+		t.Fatal("exclusive queue must keep using its bound nodes")
+	}
+}
+
+func TestQueueNodeUsageItemsFromVCSupportsCPUOnlyNodes(t *testing.T) {
+	usage := platform.VirtualClusterNodeResourceUsage{}
+	usage.Usage.Allocated.CPU = "8"
+	usage.Usage.Total.CPU = "253.125"
+	usage.Usage.Allocated.Memory = "16GiB"
+	usage.Usage.Total.Memory = "996.512GiB"
+	items := queueNodeUsageItemsFromVC([]VCNodeResourceUsageItem{{
+		HostName: "host-10-0-0-1", HostIP: "10.0.0.1", State: "RUNNING", Usage: usage,
+	}})
+	if len(items) != 1 || items[0].CPUTotal != "253.125" || items[0].MemoryTotal != "996.512GiB" || items[0].AcceleratorTotal != 0 {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestFilterFreeQueueNodesSupportsCPUOnlyNodes(t *testing.T) {
+	result := &SSPQueueNodeUsageResult{Items: []SSPQueueNodeUsageItem{
+		{HostName: "cpu-free", CPUAllocated: "8", CPUTotal: "16", MemoryAllocated: "16GiB", MemoryTotal: "32GiB"},
+		{HostName: "cpu-full", CPUAllocated: "16", CPUTotal: "16", MemoryAllocated: "16GiB", MemoryTotal: "32GiB"},
+		{HostName: "gpu-full", CPUAllocated: "0", CPUTotal: "16", MemoryAllocated: "0", MemoryTotal: "32GiB", AcceleratorTotal: 8},
+		{HostName: "gpu-free", AcceleratorTotal: 8, AcceleratorFree: 1},
+	}}
+
+	result.FilterFreeNodes()
+
+	if len(result.Items) != 2 || result.Items[0].HostName != "cpu-free" || result.Items[1].HostName != "gpu-free" {
+		t.Fatalf("items = %#v", result.Items)
 	}
 }
 

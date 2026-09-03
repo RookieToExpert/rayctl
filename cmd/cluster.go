@@ -19,24 +19,18 @@ func newClusterCmd() *cobra.Command {
 		Use:   "cluster",
 		Short: "查询 SSP Cluster 或切换平台环境",
 	}
+	cmd.AddCommand(newClusterListCmd())
 	cmd.AddCommand(newClusterGetCmd())
 	cmd.AddCommand(newClusterSetCmd())
 	return cmd
 }
 
-func newClusterGetCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "get [cluster-name-or-uid...]",
-		Short: "列出 SSP Cluster，或查询一个或多个 Cluster 详情",
-		Long:  "不带参数时列出 SSP Cluster；指定名称或 UID 时展示绑定 VC、资源水位及关联 Queue。",
-		Example: strings.Join([]string{
-			"  rayctl cluster get",
-			"  rayctl cluster get cluster-a3",
-			"  rayctl cluster get cluster-a3 cluster-muxi",
-			"  rayctl cluster get -e pt",
-		}, "\n"),
-		Args: cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+func newClusterListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "列出 SSP Cluster",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			region, err := selectedSSPRegion()
 			if err != nil {
 				return err
@@ -45,16 +39,35 @@ func newClusterGetCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
 			}
-			resourceService := service.NewSSPResourceService(nil, platformClient)
-			if len(args) == 0 {
-				result, err := resourceService.ListClusters(cmd.Context(), region)
-				if err != nil {
-					return err
-				}
-				output.PrintSSPClusterList(result)
-				return nil
+			result, err := service.NewSSPResourceService(nil, platformClient).ListClusters(cmd.Context(), region)
+			if err != nil {
+				return err
 			}
-			region, err = selectedSSPRegionForLookup()
+			output.PrintSSPClusterList(result)
+			return nil
+		},
+	}
+}
+
+func newClusterGetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get <cluster-name-or-uid> [cluster-name-or-uid...]",
+		Short: "查询一个或多个 SSP Cluster 详情",
+		Long:  "指定名称或 UID，展示绑定 VC、资源水位及关联 Queue。",
+		Example: strings.Join([]string{
+			"  rayctl cluster list",
+			"  rayctl cluster get cluster-a3",
+			"  rayctl cluster get cluster-a3 cluster-muxi",
+			"  rayctl cluster list -e pt",
+		}, "\n"),
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			platformClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			}
+			resourceService := service.NewSSPResourceService(nil, platformClient)
+			region, err := selectedSSPRegionForLookup()
 			if err != nil {
 				return err
 			}

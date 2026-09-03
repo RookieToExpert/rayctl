@@ -20,7 +20,7 @@ func TestVCCommandContainsMergedClusterCommands(t *testing.T) {
 	if err := getCommand.Args(getCommand, []string{"vc-a", "vc-b", "vc-c"}); err != nil {
 		t.Fatalf("vc get should accept multiple identifiers: %v", err)
 	}
-	if getCommand.Use != "get [vc-name-or-uid...]" {
+	if getCommand.Use != "get <vc-name-or-uid> [vc-name-or-uid...]" {
 		t.Fatalf("vc get use = %q", getCommand.Use)
 	}
 }

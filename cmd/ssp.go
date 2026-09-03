@@ -14,28 +14,49 @@ import (
 	"rayctl/pkg/output"
 )
 
-func newSSPCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:        "ssp",
-		Short:      "兼容旧版 SSP 命令",
-		Deprecated: "SSP 已成为默认入口，请直接使用 rayctl job 或 rayctl aid",
-	}
-	cmd.AddCommand(newSSPJobCmd())
-	cmd.AddCommand(newSSPAIDCmd())
-	return cmd
-}
-
-func newSSPAIDCmd() *cobra.Command {
+func newAIDCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "aid",
-		Short: "查询 SSP AID 开发机",
+		Short: "查询 AID 开发机",
 	}
+	cmd.AddCommand(newAIDListCmd())
 	cmd.AddCommand(newSSPAIDGetCmd())
 	return cmd
 }
 
-func newAIDCmd() *cobra.Command {
-	return newSSPAIDCmd()
+func newAIDListCmd() *cobra.Command {
+	var workspace string
+	var queue string
+	var state string
+	var limit int
+	var all bool
+	var longOutput bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出当前环境中的 AID 开发机",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			region, err := selectedSSPRegion()
+			if err != nil {
+				return err
+			}
+			catalog, err := newSSPCatalogQueryService()
+			if err != nil {
+				return err
+			}
+			result, err := catalog.ListAID(cmd.Context(), service.SSPCatalogListOptions{
+				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: all,
+			})
+			if err != nil {
+				return err
+			}
+			output.PrintSSPAIDList(result, longOutput)
+			return nil
+		},
+	}
+	addSSPCatalogListFlags(cmd, &workspace, &queue, &state, &limit, &all)
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示资源规格和创建时间")
+	return cmd
 }
 
 func newSSPAIDGetCmd() *cobra.Command {
@@ -44,7 +65,7 @@ func newSSPAIDGetCmd() *cobra.Command {
 	var debugTiming bool
 	cmd := &cobra.Command{
 		Use:   "get <aid-name-or-uid> [aid-name-or-uid...]",
-		Short: "并行查询一个或多个 SSP AID 开发机并诊断 Pod 状态",
+		Short: "并行查询一个或多个 AID 开发机并诊断 Pod 状态",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			region, err := selectedSSPRegionForLookup()
@@ -94,13 +115,63 @@ func newSSPAIDGetCmd() *cobra.Command {
 	return cmd
 }
 
-func newSSPJobCmd() *cobra.Command {
+func newAITCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "job",
-		Short: "查询 SSP TrainingJob",
+		Use:   "ait",
+		Short: "查询 AIT 训练任务",
 	}
+	cmd.AddCommand(newAITListCmd())
 	cmd.AddCommand(newSSPJobGetCmd())
 	return cmd
+}
+
+func newAITListCmd() *cobra.Command {
+	var workspace string
+	var queue string
+	var state string
+	var limit int
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出当前环境中的 AIT 训练任务",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			region, err := selectedSSPRegion()
+			if err != nil {
+				return err
+			}
+			catalog, err := newSSPCatalogQueryService()
+			if err != nil {
+				return err
+			}
+			result, err := catalog.ListAIT(cmd.Context(), service.SSPCatalogListOptions{
+				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: all,
+			})
+			if err != nil {
+				return err
+			}
+			output.PrintSSPAITList(result)
+			return nil
+		},
+	}
+	addSSPCatalogListFlags(cmd, &workspace, &queue, &state, &limit, &all)
+	return cmd
+}
+
+func addSSPCatalogListFlags(cmd *cobra.Command, workspace *string, queue *string, state *string, limit *int, all *bool) {
+	cmd.Flags().StringVarP(workspace, "workspace", "w", "", "只查询指定 workspace")
+	cmd.Flags().StringVarP(queue, "queue", "q", "", "只查询指定 queue；会自动定位所属 workspace")
+	cmd.Flags().StringVarP(state, "state", "s", "", "按状态筛选，例如 Running、Pending")
+	cmd.Flags().IntVarP(limit, "limit", "n", 50, "最多显示的最新记录数，范围 1-1000")
+	cmd.Flags().BoolVarP(all, "all", "A", false, "显示全部记录，忽略 --limit")
+}
+
+func newSSPCatalogQueryService() (*service.SSPCatalogService, error) {
+	platformClient, ok := platform.NewVirtualClusterClientFromEnv()
+	if !ok {
+		return nil, fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+	}
+	return service.NewSSPCatalogService(platformClient), nil
 }
 
 func newSSPJobGetCmd() *cobra.Command {
@@ -109,7 +180,7 @@ func newSSPJobGetCmd() *cobra.Command {
 	var queryTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "get <job-name-or-uid> [job-name-or-uid...]",
-		Short: "并行查询一个或多个 SSP TrainingJob 并诊断 Pending 原因",
+		Short: "并行查询一个或多个 AIT 训练任务并诊断 Pending 原因",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			region, err := selectedSSPRegionForLookup()
@@ -146,7 +217,7 @@ func newSSPJobGetCmd() *cobra.Command {
 				case detectErr == nil && detection != nil && detection.Type == service.SSPWorkloadTypeTrainingJob:
 					result, err = jobService.GetJobWithDetectionInRegion(queryCtx, queryIdentifier, workspace, region, longOutput, detection)
 				case detectErr == nil && detection != nil && detection.Type == service.SSPWorkloadTypeAID:
-					err = fmt.Errorf("%q 是 SSP AID 开发机，请使用 rayctl aid get %s", identifier, queryIdentifier)
+					err = fmt.Errorf("%q 是 AID 开发机，请使用 rayctl aid get %s", identifier, queryIdentifier)
 				default:
 					result, err = jobService.GetJobInRegion(queryCtx, queryIdentifier, workspace, region, longOutput)
 				}
@@ -166,7 +237,7 @@ func newSSPJobGetCmd() *cobra.Command {
 					fmt.Fprintln(cmd.OutOrStdout())
 				}
 				if len(args) > 1 {
-					fmt.Fprintf(cmd.OutOrStdout(), "===== SSP JOB [%d/%d]: %s =====\n\n", index+1, len(args), result.identifier)
+					fmt.Fprintf(cmd.OutOrStdout(), "===== AIT JOB [%d/%d]: %s =====\n\n", index+1, len(args), result.identifier)
 				}
 				output.PrintSSPJobDetail(result.result, longOutput)
 				printed = true

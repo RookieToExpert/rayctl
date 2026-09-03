@@ -13,27 +13,40 @@ import (
 
 func newVPCCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "vpc", Short: "查询 VPC 资源"}
+	cmd.AddCommand(newVPCListCmd())
 	cmd.AddCommand(newVPCGetCmd())
 	return cmd
 }
 
-func newVPCGetCmd() *cobra.Command {
+func newVPCListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get [vpc-name-or-uid...]",
-		Short: "列出 VPC，或批量查询一个或多个 VPC",
-		Args:  cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:   "list",
+		Short: "列出 VPC 资源",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			networkService, err := newNetworkResourceService()
 			if err != nil {
 				return err
 			}
-			if len(args) == 0 {
-				result, err := networkService.ListVPCs(cmd.Context())
-				if err != nil {
-					return err
-				}
-				output.PrintVPCList(result)
-				return nil
+			result, err := networkService.ListVPCs(cmd.Context())
+			if err != nil {
+				return err
+			}
+			output.PrintVPCList(result)
+			return nil
+		},
+	}
+}
+
+func newVPCGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <vpc-name-or-uid> [vpc-name-or-uid...]",
+		Short: "批量查询一个或多个 VPC",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			networkService, err := newNetworkResourceService()
+			if err != nil {
+				return err
 			}
 			results := networkService.GetVPCMany(cmd.Context(), args)
 			items := make([]service.VPCListItem, 0, len(results))
@@ -57,27 +70,40 @@ func newVPCGetCmd() *cobra.Command {
 
 func newSubnetCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "subnet", Short: "查询 Subnet 资源"}
+	cmd.AddCommand(newSubnetListCmd())
 	cmd.AddCommand(newSubnetGetCmd())
 	return cmd
 }
 
-func newSubnetGetCmd() *cobra.Command {
+func newSubnetListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get [subnet-name-or-uid...]",
-		Short: "列出 Subnet，或批量查询一个或多个 Subnet",
-		Args:  cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:   "list",
+		Short: "列出 Subnet 资源",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			networkService, err := newNetworkResourceService()
 			if err != nil {
 				return err
 			}
-			if len(args) == 0 {
-				result, err := networkService.ListSubnets(cmd.Context())
-				if err != nil {
-					return err
-				}
-				output.PrintSubnetList(result)
-				return nil
+			result, err := networkService.ListSubnets(cmd.Context())
+			if err != nil {
+				return err
+			}
+			output.PrintSubnetList(result)
+			return nil
+		},
+	}
+}
+
+func newSubnetGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <subnet-name-or-uid> [subnet-name-or-uid...]",
+		Short: "批量查询一个或多个 Subnet",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			networkService, err := newNetworkResourceService()
+			if err != nil {
+				return err
 			}
 			results := networkService.GetSubnetMany(cmd.Context(), args)
 			items := make([]service.SubnetListItem, 0, len(results))
@@ -101,27 +127,40 @@ func newSubnetGetCmd() *cobra.Command {
 
 func newNATGatewayCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "natgw", Short: "查询 NAT Gateway 资源"}
+	cmd.AddCommand(newNATGatewayListCmd())
 	cmd.AddCommand(newNATGatewayGetCmd())
 	return cmd
 }
 
-func newNATGatewayGetCmd() *cobra.Command {
+func newNATGatewayListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get [natgw-name-or-uid...]",
-		Short: "列出 NAT Gateway，或批量查询一个或多个 NAT Gateway",
-		Args:  cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:   "list",
+		Short: "列出 NAT Gateway 资源",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			networkService, err := newNetworkResourceService()
 			if err != nil {
 				return err
 			}
-			if len(args) == 0 {
-				result, err := networkService.ListNATGateways(cmd.Context())
-				if err != nil {
-					return err
-				}
-				output.PrintNATGatewayList(result)
-				return nil
+			result, err := networkService.ListNATGateways(cmd.Context())
+			if err != nil {
+				return err
+			}
+			output.PrintNATGatewayList(result)
+			return nil
+		},
+	}
+}
+
+func newNATGatewayGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <natgw-name-or-uid> [natgw-name-or-uid...]",
+		Short: "批量查询一个或多个 NAT Gateway",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			networkService, err := newNetworkResourceService()
+			if err != nil {
+				return err
 			}
 			results := networkService.GetNATGatewayMany(cmd.Context(), args)
 			items := make([]service.NATGatewayListItem, 0, len(results))

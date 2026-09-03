@@ -19,14 +19,26 @@ func newPVCmd() *cobra.Command {
 		Short: "查询 host PV 与 AFS/host PVC 的映射关系",
 	}
 
+	pvCmd.AddCommand(newPVGetCmd())
 	pvCmd.AddCommand(newPVCheckCmd())
 	return pvCmd
 }
 
+func newPVGetCmd() *cobra.Command {
+	return newPVQueryCmd("get <host-pv-name-or-uid> [host-pv-name-or-uid...]", "根据 host PV 名称或 UID 反查对应的 AFS 和 host PVC")
+}
+
 func newPVCheckCmd() *cobra.Command {
+	cmd := newPVQueryCmd("check <host-pv-name-or-uid> [host-pv-name-or-uid...]", "兼容旧版：根据 host PV 名称或 UID 查询")
+	cmd.Hidden = true
+	cmd.Deprecated = "请使用 rayctl pv get"
+	return cmd
+}
+
+func newPVQueryCmd(use string, short string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "check <host-pv-name-or-uid> [host-pv-name-or-uid...]",
-		Short: "根据 host PV 名称或 UID 反查对应的 AFS 和 host PVC",
+		Use:   use,
+		Short: short,
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientset, err := kube.NewClientset(kubeconfig)

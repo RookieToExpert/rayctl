@@ -21,16 +21,28 @@ func newPVCCmd() *cobra.Command {
 		Short: "查询 PVC 与 AFS 的映射关系",
 	}
 
+	pvcCmd.AddCommand(newPVCGetCmd())
 	pvcCmd.AddCommand(newPVCCheckCmd())
 	pvcCmd.AddCommand(newPVCCreateCmd())
 	return pvcCmd
 }
 
+func newPVCGetCmd() *cobra.Command {
+	return newPVCQueryCmd("get <pvc-name> [pvc-name...]", "根据 PVC 名称查询对应的 AFS 前端名称")
+}
+
 func newPVCCheckCmd() *cobra.Command {
+	cmd := newPVCQueryCmd("check <pvc-name> [pvc-name...]", "兼容旧版：根据 PVC 名称查询")
+	cmd.Hidden = true
+	cmd.Deprecated = "请使用 rayctl pvc get"
+	return cmd
+}
+
+func newPVCQueryCmd(use string, short string) *cobra.Command {
 	var longOutput bool
 	cmd := &cobra.Command{
-		Use:   "check <pvc-name> [pvc-name...]",
-		Short: "根据 PVC 名称查询对应的 AFS 前端名称",
+		Use:   use,
+		Short: short,
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientset, err := kube.NewClientset(kubeconfig)
