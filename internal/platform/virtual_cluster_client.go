@@ -2662,6 +2662,54 @@ func (c *VirtualClusterClient) ListVolcanoJobsForProfile(ctx context.Context, pr
 	return c.listVolcanoJobsWithProfile(ctx, profile, vclusterName, namespace, "")
 }
 
+// ListVolcanoJobsPageForProfile uses the ECP cached Job endpoint so callers can
+// apply server-side filtering and pagination without downloading Pods first.
+// A limit of zero reads every matching page.
+func (c *VirtualClusterClient) ListVolcanoJobsPageForProfile(ctx context.Context, profileName string, vclusterName string, filter string, limit int) ([]unstructured.Unstructured, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	if limit < 0 {
+		return nil, fmt.Errorf("volcano job limit must not be negative")
+	}
+
+	const maxPageSize = 100
+	items := make([]unstructured.Unstructured, 0)
+	for skip := 0; ; {
+		pageSize := maxPageSize
+		if limit > 0 && limit-len(items) < pageSize {
+			pageSize = limit - len(items)
+		}
+		if pageSize <= 0 {
+			break
+		}
+
+		query := url.Values{}
+		query.Set("page_size", strconv.Itoa(pageSize))
+		query.Set("skip", strconv.Itoa(skip))
+		query.Set("filter", strings.TrimSpace(filter))
+		query.Set("order", "created_at desc")
+		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/apis/batch.volcano.sh/v1alpha1/jobs", query)
+
+		var page unstructured.UnstructuredList
+		if err := c.getJSONWithProfile(ctx, profile, reqURL, &page); err != nil {
+			return nil, err
+		}
+		items = append(items, page.Items...)
+		count := len(page.Items)
+		remaining := page.GetRemainingItemCount()
+		if count == 0 || count < pageSize || (remaining != nil && *remaining <= 0) || (limit > 0 && len(items) >= limit) {
+			break
+		}
+		skip += count
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
 func (c *VirtualClusterClient) ListVolcanoJobMetadataForProfile(ctx context.Context, profileName string, vclusterName string, namespace string) ([]metav1.PartialObjectMetadata, error) {
 	profile, ok := c.clientProfileByName(profileName)
 	if !ok {

@@ -740,6 +740,36 @@ func PrintJobClusterList(result *service.JobClusterListResult) {
 	)
 }
 
+func PrintECPJobList(result *service.JobClusterListResult) {
+	rows := make([][]string, 0)
+	total := 0
+	if result != nil {
+		total = len(result.Items)
+		for _, item := range result.Items {
+			rows = append(rows, []string{
+				emptyDash(item.JobName),
+				emptyDash(item.Status),
+				emptyDash(item.ClusterName),
+				emptyDash(item.Submitter),
+				emptyDash(item.CreatedAt),
+			})
+		}
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{"-", "-", "-", "-", "-"})
+	}
+	printBoxTableWithOptions(
+		[]string{"NAME", "STATE", "VC", "CREATOR", "CREATED"},
+		rows,
+		[]int{56, 16, 28, 22, 20},
+		tableOptions{
+			noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), 0, 1, 2, 3, 4)...),
+			minWidths:   []int{28, 12, 18, 14, 19},
+		},
+	)
+	fmt.Fprintf(os.Stdout, "\n本次筛选共 %d 条。\n", total)
+}
+
 func PrintUserDetail(result *service.UserGetResult) {
 	if result == nil {
 		return

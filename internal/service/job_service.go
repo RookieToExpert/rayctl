@@ -999,6 +999,116 @@ func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeIna
 	}, nil
 }
 
+// ListCurrentTenantVolcanoJobs queries the ECP cached Job endpoint for each VC.
+// Unlike GetCurrentTenantClusterJobs, this path does not infer jobs from Pods.
+func (s *JobService) ListCurrentTenantVolcanoJobs(ctx context.Context, includeInactive bool, statusFilter string, limit int) (*JobClusterListResult, error) {
+	if s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for cluster job listing")
+	}
+	if limit < 0 {
+		return nil, fmt.Errorf("job list limit must not be negative")
+	}
+
+	vclusters, err := s.vcClient.ListCurrentProfileVirtualClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list current tenant virtual clusters: %w", err)
+	}
+	filter := volcanoJobAPIFilter(includeInactive, statusFilter)
+
+	type clusterResult struct {
+		name string
+		jobs []unstructured.Unstructured
+		err  error
+	}
+	results := boundedMap(ctx, vclusters, 32, func(ctx context.Context, vc platform.VirtualCluster) clusterResult {
+		clusterName := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
+		vcRef := firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID))
+		jobs, queryErr := s.vcClient.ListVolcanoJobsPageForProfile(ctx, vc.ProfileName, vcRef, filter, limit)
+		return clusterResult{name: clusterName, jobs: jobs, err: queryErr}
+	})
+
+	items := make([]JobClusterItem, 0)
+	for _, result := range results {
+		if result.err != nil {
+			return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", result.name, result.err)
+		}
+		for index := range result.jobs {
+			job := &result.jobs[index]
+			createdAt := job.GetCreationTimestamp().Time
+			items = append(items, JobClusterItem{
+				ClusterName: result.name,
+				JobName: firstNonEmpty(
+					getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"),
+					job.GetName(),
+				),
+				Submitter: firstNonEmpty(
+					getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
+					getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"),
+					getNestedString(job.Object, "metadata", "annotations", "identity.compute.sensecore.cn/user-name"),
+					getNestedString(job.Object, "metadata", "labels", "identity.compute.sensecore.cn/user-id"),
+					"-",
+				),
+				Status:         extractVolcanoJobPhase(job),
+				CreatedAt:      createdAt.In(utcPlus8).Format("2006-01-02 15:04:05"),
+				CreatedAtShort: createdAt.In(utcPlus8).Format("01-02 15:04"),
+				CreatedAtTime:  createdAt,
+			})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
+			return items[i].CreatedAtTime.After(items[j].CreatedAtTime)
+		}
+		if items[i].ClusterName != items[j].ClusterName {
+			return items[i].ClusterName < items[j].ClusterName
+		}
+		return items[i].JobName < items[j].JobName
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return &JobClusterListResult{
+		ClusterName:     "当前租户全部分区",
+		Items:           items,
+		ShowClusterName: true,
+		StatusFilter:    normalizeClusterStatusFilter(statusFilter),
+		TotalJobCount:   -1,
+		TotalPodCount:   -1,
+	}, nil
+}
+
+func volcanoJobAPIStateFilter(includeInactive bool, statusFilter string) string {
+	filter := normalizeClusterStatusFilter(statusFilter)
+	if includeInactive || strings.EqualFold(strings.TrimSpace(statusFilter), "all") {
+		return ""
+	}
+	switch filter {
+	case "pending":
+		return `state="Pending"`
+	case "running":
+		return `state="Running"`
+	default:
+		return `(state="Running" OR state="Pending")`
+	}
+}
+
+func volcanoJobAPIFilter(includeInactive bool, statusFilter string) string {
+	stateFilter := volcanoJobAPIStateFilter(includeInactive, statusFilter)
+	return joinVolcanoJobAPIFilter(`(namespace="default" OR submitter!="")`, stateFilter)
+}
+
+func joinVolcanoJobAPIFilter(left string, right string) string {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" {
+		return right
+	}
+	if right == "" {
+		return left
+	}
+	return left + " AND " + right
+}
+
 func (s *JobService) getCurrentTenantActiveClusterJobs(ctx context.Context, vclusters []platform.VirtualCluster, statusFilter string) (*JobClusterListResult, error) {
 	type clusterResult struct {
 		name   string

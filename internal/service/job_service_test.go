@@ -93,6 +93,41 @@ func TestChooseMasterLogPodPrefersMaster(t *testing.T) {
 	}
 }
 
+func TestVolcanoJobAPIStateFilter(t *testing.T) {
+	tests := []struct {
+		name            string
+		includeInactive bool
+		status          string
+		want            string
+	}{
+		{name: "default active", want: `(state="Running" OR state="Pending")`},
+		{name: "pending", status: "pending", want: `state="Pending"`},
+		{name: "running", status: "running", want: `state="Running"`},
+		{name: "active", status: "active", want: `(state="Running" OR state="Pending")`},
+		{name: "all status flag", includeInactive: true, want: ""},
+		{name: "all filter", status: "all", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := volcanoJobAPIStateFilter(test.includeInactive, test.status); got != test.want {
+				t.Fatalf("volcanoJobAPIStateFilter() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestVolcanoJobAPIFilterUsesDefaultNamespaceAndSubmitterUnion(t *testing.T) {
+	want := `(namespace="default" OR submitter!="") AND (state="Running" OR state="Pending")`
+	if got := volcanoJobAPIFilter(false, ""); got != want {
+		t.Fatalf("volcanoJobAPIFilter() = %q, want %q", got, want)
+	}
+
+	wantAll := `(namespace="default" OR submitter!="")`
+	if got := volcanoJobAPIFilter(true, ""); got != wantAll {
+		t.Fatalf("volcanoJobAPIFilter(all) = %q, want %q", got, wantAll)
+	}
+}
+
 func TestMatchingVirtualClustersPrefersExactName(t *testing.T) {
 	clusters := []platform.VirtualCluster{
 		{Name: "vc-a3-241ceshi-old", UID: "old"},

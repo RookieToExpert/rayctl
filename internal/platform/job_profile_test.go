@@ -13,11 +13,15 @@ func TestJobRequestsForProfileDoNotProbeOtherProfiles(t *testing.T) {
 	requestedPaths := make([]string, 0, 9)
 	requestedAccepts := make([]string, 0, 9)
 	requestedFieldSelectors := make([]string, 0, 10)
+	requestedFilters := make([]string, 0, 11)
+	requestedPageSizes := make([]string, 0, 11)
 	clientHTTP := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requestCount++
 		requestedPaths = append(requestedPaths, r.URL.Path)
 		requestedAccepts = append(requestedAccepts, r.Header.Get("Accept"))
 		requestedFieldSelectors = append(requestedFieldSelectors, r.URL.Query().Get("fieldSelector"))
+		requestedFilters = append(requestedFilters, r.URL.Query().Get("filter"))
+		requestedPageSizes = append(requestedPageSizes, r.URL.Query().Get("page_size"))
 		if r.URL.Host != "pt-compute.example.test" {
 			t.Fatalf("request host = %q, want pt-compute.example.test", r.URL.Host)
 		}
@@ -92,8 +96,11 @@ func TestJobRequestsForProfileDoNotProbeOtherProfiles(t *testing.T) {
 	if count != 9548 {
 		t.Fatalf("CountVolcanoJobsForProfile() = %d, want 9548", count)
 	}
-	if requestCount != 10 {
-		t.Fatalf("request count = %d, want 10", requestCount)
+	if _, err := client.ListVolcanoJobsPageForProfile(context.Background(), "pt", "vc-example", `(state="Running" OR state="Pending")`, 5); err != nil {
+		t.Fatalf("ListVolcanoJobsPageForProfile() error = %v", err)
+	}
+	if requestCount != 11 {
+		t.Fatalf("request count = %d, want 11", requestCount)
 	}
 	if got := requestedPaths[3]; !strings.HasSuffix(got, "/api/v1/namespaces/default/pods") {
 		t.Fatalf("cluster pod list path = %q, want namespace-scoped pod path", got)
@@ -106,5 +113,11 @@ func TestJobRequestsForProfileDoNotProbeOtherProfiles(t *testing.T) {
 	}
 	if got := requestedAccepts[9]; !strings.Contains(got, "PartialObjectMetadataList") {
 		t.Fatalf("job count Accept = %q, want PartialObjectMetadataList", got)
+	}
+	if got := requestedFilters[10]; got != `(state="Running" OR state="Pending")` {
+		t.Fatalf("paged job filter = %q", got)
+	}
+	if got := requestedPageSizes[10]; got != "5" {
+		t.Fatalf("paged job page_size = %q, want 5", got)
 	}
 }

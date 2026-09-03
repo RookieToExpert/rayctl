@@ -114,14 +114,18 @@ func newECPJobListCmd() *cobra.Command {
 				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
 			}
 			jobService := service.NewJobService(nil, nil, vcClient)
-			result, err := jobService.GetCurrentTenantClusterJobs(cmd.Context(), includeInactive, state)
+			queryLimit := limit
+			if all {
+				queryLimit = 0
+			}
+			result, err := jobService.ListCurrentTenantVolcanoJobs(cmd.Context(), includeInactive, state, queryLimit)
 			if err != nil {
 				return err
 			}
 			if !all && len(result.Items) > limit {
 				result.Items = result.Items[:limit]
 			}
-			output.PrintJobClusterList(result)
+			output.PrintECPJobList(result)
 			return nil
 		},
 	}
