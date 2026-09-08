@@ -22,6 +22,9 @@ func TestPrintSSPQueueListKeepsLongQueueOnOneLine(t *testing.T) {
 	if !strings.Contains(text, "queue-d-reserved-muxi-h3c") {
 		t.Fatalf("queue name is missing from output:\n%s", text)
 	}
+	if !strings.Contains(text, "本次共 1 条。") {
+		t.Fatalf("queue total is missing from output:\n%s", text)
+	}
 	dataLines := 0
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, "│ ") && !strings.Contains(line, "QUEUE") {
@@ -30,6 +33,34 @@ func TestPrintSSPQueueListKeepsLongQueueOnOneLine(t *testing.T) {
 	}
 	if dataLines != 1 {
 		t.Fatalf("queue row used %d lines, want one:\n%s", dataLines, text)
+	}
+}
+
+func TestPrintSSPWorkspaceDetailShowsQueueRuntimeAndLongUID(t *testing.T) {
+	result := &service.SSPWorkspaceItem{
+		Name: "ws-demo", UID: "misleading-workspace-runtime", State: "RUNNING", VCluster: "misleading-vc",
+		Queues: []service.SSPQueueItem{{
+			Name: "queue-demo", UID: "queue-uid", State: "RUNNING", Type: "EXCLUSIVE", Cluster: "cluster-demo", VCluster: "vc-demo", Namespace: "namespace-demo",
+		}},
+	}
+
+	shortText := captureTableOutput(t, func() { PrintSSPWorkspaceDetail(result, false) })
+	for _, expected := range []string{"WORKSPACE", "ws-demo", "QUEUE", "CLUSTER", "cluster-demo", "VC", "NAMESPACE", "vc-demo", "namespace-demo"} {
+		if !strings.Contains(shortText, expected) {
+			t.Fatalf("short workspace output does not contain %q:\n%s", expected, shortText)
+		}
+	}
+	for _, omitted := range []string{"misleading-workspace-runtime", "misleading-vc", "queue-uid"} {
+		if strings.Contains(shortText, omitted) {
+			t.Fatalf("short workspace output unexpectedly contains %q:\n%s", omitted, shortText)
+		}
+	}
+	longText := captureTableOutput(t, func() { PrintSSPWorkspaceDetail(result, true) })
+	if !strings.Contains(longText, "queue-uid") {
+		t.Fatalf("long workspace output does not contain queue UID:\n%s", longText)
+	}
+	if strings.Contains(longText, "misleading-workspace-runtime") || strings.Contains(longText, "misleading-vc") {
+		t.Fatalf("long workspace output contains misleading main runtime fields:\n%s", longText)
 	}
 }
 
@@ -48,14 +79,14 @@ func TestPrintSSPCatalogListColumns(t *testing.T) {
 func TestPrintSSPAIDListOnlyShowsResourceAndCreatedInLongMode(t *testing.T) {
 	result := &service.SSPCatalogListResult{Items: []service.SSPCatalogListItem{{
 		Name: "dev-demo", State: "Running", Workspace: "ws-demo", Queue: "queue-demo",
-		Creator: "test-user", Resource: "8C/32GiB", CreatedAt: "2026-09-02 12:00:00",
+		Node: "host-a", Creator: "test-user", Resource: "8C/32GiB", CreatedAt: "2026-09-02 12:00:00",
 	}}}
 	shortText := captureTableOutput(t, func() { PrintSSPAIDList(result, false) })
-	if strings.Contains(shortText, "RESOURCE") || strings.Contains(shortText, "CREATED") || strings.Contains(shortText, "8C/32GiB") {
+	if strings.Contains(shortText, "NODE") || strings.Contains(shortText, "RESOURCE") || strings.Contains(shortText, "CREATED") || strings.Contains(shortText, "8C/32GiB") {
 		t.Fatalf("short AID list contains long columns:\n%s", shortText)
 	}
 	longText := captureTableOutput(t, func() { PrintSSPAIDList(result, true) })
-	for _, expected := range []string{"RESOURCE", "CREATED", "8C/32GiB", "2026-09-02 12:00:00"} {
+	for _, expected := range []string{"NODE", "host-a", "RESOURCE", "CREATED", "8C/32GiB", "2026-09-02 12:00:00"} {
 		if !strings.Contains(longText, expected) {
 			t.Fatalf("long AID list does not contain %q:\n%s", expected, longText)
 		}
@@ -83,6 +114,19 @@ func TestPrintSSPQueueDetailIncludesPolicies(t *testing.T) {
 	for _, expected := range []string{"空闲资源借出", "开启", "排队策略", "均衡"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("output does not contain %q:\n%s", expected, text)
+		}
+	}
+}
+
+func TestPrintSSPQueueDetailLongIncludesRuntimeLimits(t *testing.T) {
+	text := captureTableOutput(t, func() {
+		PrintSSPQueueDetail(&service.SSPQueueItem{
+			Name: "queue-demo", MachineTypes: "acn.g1k.60xlarge", MaxNodes: "acn.g1k.60xlarge=1", Capability: "CPU=240, MEMORY=960Gi",
+		}, true)
+	})
+	for _, expected := range []string{"MACHINE TYPES", "acn.g1k.60xlarge", "MAX NODES", "CAPABILITY", "CPU=240, MEMORY=960Gi"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("long queue output does not contain %q:\n%s", expected, text)
 		}
 	}
 }

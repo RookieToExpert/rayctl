@@ -12,4 +12,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if code := cmd.RequestedProcessExitCode(); code != 0 {
+		os.Exit(code)
+	}
 }

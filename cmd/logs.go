@@ -50,7 +50,7 @@ func newLogsCloudAuditCmd() *cobra.Command {
 		Short: "查询全平台云审计日志",
 		Example: strings.Join([]string{
 			"rayctl logs audit --service ECP --resource-type vcjob --since 2h",
-			"rayctl logs audit -s ECP -r vcjob -n huawei-8node1 -o deletevcjobs -u wangwenxuan.p",
+			"rayctl logs audit -s ECP -r vcjob -n huawei-8node1 --operation-type deletevcjobs -u wangwenxuan.p",
 			"rayctl logs audit --service ECP --resource-type vcluster --start '2026-07-12 00:00:00' --end '2026-07-13 00:00:00'",
 			"rayctl logs audit --service IAM --since 24h",
 		}, "\n"),
@@ -95,7 +95,7 @@ func newLogsCloudAuditCmd() *cobra.Command {
 	auditCmd.Flags().StringVarP(&serviceType, "service", "s", "", "云服务类型，例如 ECP、IAM、ECS")
 	auditCmd.Flags().StringVarP(&resourceType, "resource-type", "r", "", "资源类型，例如 vcjob、vcluster、node；支持完整资源类型")
 	auditCmd.Flags().StringVarP(&resourceName, "resource-name", "n", "", "资源名称，例如 VCJob 名称")
-	auditCmd.Flags().StringVarP(&operationType, "operation-type", "o", "", "操作类型，例如 createVCJobs、updateVCJobs、deleteVCJobs")
+	auditCmd.Flags().StringVar(&operationType, "operation-type", "", "操作类型，例如 createVCJobs、updateVCJobs、deleteVCJobs")
 	auditCmd.Flags().StringVarP(&userName, "user", "u", "", "操作用户 username")
 	auditCmd.Flags().IntVar(&limit, "limit", 40, "返回审计日志条数")
 	auditCmd.Flags().StringVar(&bearerToken, "bearer-token", "", "控制台 Bearer token；默认读取 rayctl auth login 缓存")

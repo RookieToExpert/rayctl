@@ -47,6 +47,7 @@ func newWorkspaceListCmd() *cobra.Command {
 }
 
 func newWorkspaceGetCmd() *cobra.Command {
+	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "get <workspace-name-or-uid> [workspace-name-or-uid...]",
 		Short: "查询一个或多个 SSP workspace 详情",
@@ -75,10 +76,11 @@ func newWorkspaceGetCmd() *cobra.Command {
 					queryErrors = append(queryErrors, fmt.Errorf("workspace %q: %w", result.identifier, result.err))
 					continue
 				}
-				output.PrintSSPWorkspaceDetail(result.result)
+				output.PrintSSPWorkspaceDetail(result.result, longOutput)
 			}
 			return errors.Join(queryErrors...)
 		},
 	}
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 Queue UID")
 	return cmd
 }

@@ -28,6 +28,58 @@ func TestDescribeIncludesNodeReadyStatus(t *testing.T) {
 	}
 }
 
+func TestDescribeIncludesRDMAExtendedResource(t *testing.T) {
+	clientset := fake.NewSimpleClientset(
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "host-rdma", Labels: map[string]string{nodeVClusterNamespaceLabelKey: "vc-demo"}},
+			Status: corev1.NodeStatus{
+				Capacity:    corev1.ResourceList{corev1.ResourceName("rdma/hca"): resource.MustParse("8")},
+				Allocatable: corev1.ResourceList{corev1.ResourceName("rdma/hca"): resource.MustParse("7")},
+			},
+		},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "user-ns", Labels: map[string]string{
+			nsVClusterNamespaceLabelKey: "vc-demo", nsVirtualNameLabelKey: "default",
+		}}},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "job-worker", Namespace: "user-ns"},
+			Spec: corev1.PodSpec{NodeName: "host-rdma", Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceName("rdma/hca"): resource.MustParse("1")},
+			}}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	)
+
+	result, err := NewNodeService(clientset).Describe(context.Background(), "host-rdma")
+	if err != nil {
+		t.Fatalf("Describe returned error: %v", err)
+	}
+	if len(result.RDMAResources) != 1 {
+		t.Fatalf("RDMAResources = %#v", result.RDMAResources)
+	}
+	got := result.RDMAResources[0]
+	if got.Name != "rdma/hca" || got.Capacity != "8" || got.Allocatable != "7" || got.Requested != "1" {
+		t.Fatalf("RDMA resource = %#v", got)
+	}
+}
+
+func TestDescribeIgnoresZeroValuedRDMAResource(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "host-no-rdma"},
+		Status: corev1.NodeStatus{
+			Capacity:    corev1.ResourceList{corev1.ResourceName("rdma/hca"): resource.MustParse("0")},
+			Allocatable: corev1.ResourceList{corev1.ResourceName("rdma/hca"): resource.MustParse("0")},
+		},
+	})
+
+	result, err := NewNodeService(clientset).Describe(context.Background(), "host-no-rdma")
+	if err != nil {
+		t.Fatalf("Describe returned error: %v", err)
+	}
+	if len(result.RDMAResources) != 0 {
+		t.Fatalf("RDMAResources = %#v, want no usable RDMA resources", result.RDMAResources)
+	}
+}
+
 func TestNodeReadyStatusReturnsNotReady(t *testing.T) {
 	conditions := []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}
 	if got := nodeReadyStatus(conditions); got != "NotReady" {

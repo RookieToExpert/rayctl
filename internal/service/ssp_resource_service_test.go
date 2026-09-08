@@ -47,6 +47,17 @@ func TestWorkspaceItemUsesWorkspaceQueueUID(t *testing.T) {
 	}
 }
 
+func TestFindWorkspaceNamespacePrefersRequestedWorkspace(t *testing.T) {
+	namespaces := []corev1.Namespace{
+		{ObjectMeta: metav1.ObjectMeta{Name: "namespace-other", Labels: map[string]string{sspWorkspaceNameLabel: "ws-other"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "namespace-medisco", Labels: map[string]string{sspWorkspaceNameLabel: "ws-d-a3-medisco"}}},
+	}
+
+	if got := findWorkspaceNamespace(namespaces, "ws-d-a3-medisco", "ws-d-cpu-medisco"); got != "namespace-medisco" {
+		t.Fatalf("findWorkspaceNamespace() = %q, want namespace-medisco", got)
+	}
+}
+
 func TestMatchSSPClusterByNameUIDAndFragment(t *testing.T) {
 	items := []platform.SSPCluster{{Name: "cluster-a3", UID: "cluster-uid"}}
 	for _, identifier := range []string{"cluster-a3", "cluster-uid", "a3"} {
@@ -204,6 +215,7 @@ func TestQueueDetailReasons(t *testing.T) {
 		{name: "fast path", details: platform.SSPQueueResourceDetails{SpotLending: &enabled, NodeCountKnown: true}},
 		{name: "default fills missing lending", details: platform.SSPQueueResourceDetails{NodeCountKnown: true}, want: "spot-lending"},
 		{name: "default ignores missing node count", details: platform.SSPQueueResourceDetails{SpotLending: &enabled}},
+		{name: "long loads runtime detail", details: platform.SSPQueueResourceDetails{SpotLending: &enabled, NodeCountKnown: true}, includeDetails: true, want: "full-details"},
 		{name: "long fills missing node count", details: platform.SSPQueueResourceDetails{SpotLending: &enabled}, includeDetails: true, want: "node-count"},
 		{name: "long fills both", details: platform.SSPQueueResourceDetails{}, includeDetails: true, want: "spot-lending,node-count"},
 	} {
@@ -212,6 +224,19 @@ func TestQueueDetailReasons(t *testing.T) {
 				t.Fatalf("queueDetailReasons() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestParseQueueMaxNodes(t *testing.T) {
+	machineTypes, maxNodes := parseQueueMaxNodes(`{"acn.g1k.60xlarge":1,"h2ls.ru.k10":2}`)
+	if machineTypes != "acn.g1k.60xlarge, h2ls.ru.k10" || maxNodes != "acn.g1k.60xlarge=1, h2ls.ru.k10=2" {
+		t.Fatalf("parseQueueMaxNodes() = %q, %q", machineTypes, maxNodes)
+	}
+}
+
+func TestFormatQueueCapability(t *testing.T) {
+	if got := formatQueueCapability(map[string]string{"memory": "960Gi", "cpu": "240"}); got != "CPU=240, MEMORY=960Gi" {
+		t.Fatalf("formatQueueCapability() = %q", got)
 	}
 }
 

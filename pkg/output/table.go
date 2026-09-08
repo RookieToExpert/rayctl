@@ -55,6 +55,9 @@ func noWrapCellsForColumns(rowCount int, columns ...int) [][2]int {
 }
 
 func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total int, start int, end int, limit int, showProdRole bool, longOutput bool) {
+	if captureJSON(map[string]any{"items": nodes, "total": total, "start": start, "end": end, "limit": limit, "selector": resolvedSelector}) {
+		return
+	}
 	if resolvedSelector == "" {
 		fmt.Fprintln(os.Stdout, "Selector: <all nodes>")
 	} else {
@@ -147,21 +150,33 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 }
 
 func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}) {
+	if captureJSON(details) {
+		return
+	}
+	headers := []string{"HOST", "VC", "QUEUE", "RDY", "UNSCH", "RPR", "ACCEL"}
+	row := []string{
+		details.Hostname,
+		emptyDash(details.VClusterName),
+		emptyDash(details.QueueName),
+		yesNoFromReady(details.Ready),
+		fmt.Sprintf("%t", details.Unschedulable),
+		fmt.Sprintf("%t", details.Repair),
+		details.GPUUsage,
+	}
+	maxWidths := []int{24, 20, 40, 3, 5, 5, 8}
+	if len(details.RDMAResources) > 0 {
+		headers = append(headers, "RDMA")
+		row = append(row, formatNodeRDMAUsage(details.RDMAResources))
+		maxWidths = append(maxWidths, 18)
+	}
+	headers = append(headers, "CPU", "MEM", "PODS")
+	row = append(row, details.CPUUsage, details.MemoryUsage, fmt.Sprintf("%d", details.MatchedPodCount))
+	maxWidths = append(maxWidths, 12, 12, 5)
+
 	printBoxTableWithOptions(
-		[]string{"HOST", "VC", "QUEUE", "RDY", "UNSCH", "RPR", "ACCEL", "CPU", "MEM", "PODS"},
-		[][]string{{
-			details.Hostname,
-			emptyDash(details.VClusterName),
-			emptyDash(details.QueueName),
-			yesNoFromReady(details.Ready),
-			fmt.Sprintf("%t", details.Unschedulable),
-			fmt.Sprintf("%t", details.Repair),
-			details.GPUUsage,
-			details.CPUUsage,
-			details.MemoryUsage,
-			fmt.Sprintf("%d", details.MatchedPodCount),
-		}},
-		[]int{24, 20, 40, 3, 5, 5, 8, 12, 12, 5},
+		headers,
+		[][]string{row},
+		maxWidths,
 		tableOptions{
 			noWrapCells: makeNoWrapCells(
 				[2]int{0, 0},
@@ -204,6 +219,21 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 	}
 }
 
+func formatNodeRDMAUsage(resources []service.NodeExtendedResource) string {
+	values := make([]string, 0, len(resources))
+	for _, item := range resources {
+		usage := fmt.Sprintf("%s/%s", emptyDash(item.Requested), emptyDash(item.Allocatable))
+		if item.Capacity != "" && item.Capacity != "0" && item.Capacity != item.Allocatable {
+			usage += " cap=" + item.Capacity
+		}
+		values = append(values, usage)
+	}
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ", ")
+}
+
 func PrintNodeMutationResult(result *service.NodeMutationResult) {
 	PrintNodeMutationResults([]*service.NodeMutationResult{result})
 }
@@ -223,6 +253,9 @@ func PrintNodeMutationResults(results []*service.NodeMutationResult) {
 }
 
 func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming bool) {
+	if captureJSON(result) {
+		return
+	}
 	summaryRows := [][]string{
 		{"TYPE", "ECP VCJob"},
 		{"JOB", result.Name},
@@ -350,6 +383,12 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 }
 
 func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
+	if result != nil && longOutput {
+		defer func() { printPodEvidence(result.PodEvidence) }()
+	}
 	if result == nil {
 		return
 	}
@@ -474,7 +513,8 @@ func jobResourceSpecRows(specs []service.JobResourceSpecItem) [][]string {
 	for _, spec := range specs {
 		key := strings.Join([]string{
 			strings.TrimSpace(spec.CPU), strings.TrimSpace(spec.Memory), strings.TrimSpace(spec.Accelerator),
-			strings.TrimSpace(spec.AcceleratorResource), strings.TrimSpace(spec.Model), strings.TrimSpace(spec.MachineType),
+			strings.TrimSpace(spec.AcceleratorResource), strings.TrimSpace(spec.RDMA), strings.TrimSpace(spec.RDMAResource),
+			strings.TrimSpace(spec.Model), strings.TrimSpace(spec.MachineType),
 		}, "\x00")
 		if strings.Trim(key, "\x00") == "" {
 			continue
@@ -524,10 +564,29 @@ func formatJobResourceSpec(spec service.JobResourceSpecItem) string {
 	} else if model != "" {
 		parts = append(parts, model)
 	}
+	if rdma := formatRDMAResource(spec.RDMA, spec.RDMAResource); rdma != "" {
+		parts = append(parts, rdma)
+	}
 	if value := strings.TrimSpace(spec.MachineType); value != "" {
 		parts = append(parts, value+" Machine Type")
 	}
 	return emptyDash(strings.Join(parts, " / "))
+}
+
+func formatRDMAResource(quantity, resourceName string) string {
+	quantity = strings.TrimSpace(quantity)
+	resourceName = shortAcceleratorResource(resourceName)
+	if quantity == "" && resourceName == "" {
+		return ""
+	}
+	value := "RDMA"
+	if quantity != "" {
+		value = quantity + " " + value
+	}
+	if resourceName != "" {
+		value += " (" + resourceName + ")"
+	}
+	return value
 }
 
 func shortAcceleratorResource(value string) string {
@@ -541,6 +600,12 @@ func shortAcceleratorResource(value string) string {
 }
 
 func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool, debugTiming bool) {
+	if captureJSON(result) {
+		return
+	}
+	if result != nil && longOutput {
+		defer func() { printPodEvidence(result.PodEvidence) }()
+	}
 	if result == nil {
 		return
 	}
@@ -657,6 +722,9 @@ func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool, debugTi
 }
 
 func PrintJobClusterList(result *service.JobClusterListResult) {
+	if captureJSON(result) {
+		return
+	}
 	totalJobs := fmt.Sprintf("%d", result.TotalJobCount)
 	if result.TotalJobCount < 0 {
 		totalJobs = "-（全局快速模式未统计）"
@@ -741,6 +809,9 @@ func PrintJobClusterList(result *service.JobClusterListResult) {
 }
 
 func PrintECPJobList(result *service.JobClusterListResult) {
+	if captureJSON(result) {
+		return
+	}
 	rows := make([][]string, 0)
 	total := 0
 	if result != nil {
@@ -771,6 +842,9 @@ func PrintECPJobList(result *service.JobClusterListResult) {
 }
 
 func PrintUserDetail(result *service.UserGetResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -838,6 +912,9 @@ func userGroupNames(groups []service.AuthGroupItem) string {
 }
 
 func PrintUserSummary(results []*service.UserGetResult, includeJobs bool) {
+	if captureJSON(results) {
+		return
+	}
 	rows := make([][]string, 0, len(results))
 	for _, result := range results {
 		rows = append(rows, []string{emptyDash(result.Username), emptyDash(result.ID), emptyDash(result.Name), emptyDash(result.TenantCode), userGroupNames(result.Groups)})
@@ -863,6 +940,9 @@ func PrintUserSummary(results []*service.UserGetResult, includeJobs bool) {
 }
 
 func PrintAuthAFSResult(result *service.AuthAFSResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -922,6 +1002,9 @@ func PrintAuthAFSResult(result *service.AuthAFSResult) {
 }
 
 func PrintAuthResourceSummary(results []*service.AuthAFSResult, includeResource bool) {
+	if captureJSON(results) {
+		return
+	}
 	rows := make([][]string, 0)
 	for _, result := range results {
 		resource := firstNonEmptyOutput(result.ResourceName, result.AFSName)
@@ -953,6 +1036,9 @@ func PrintAuthResourceSummary(results []*service.AuthAFSResult, includeResource 
 }
 
 func PrintAuthUserSummary(results []*service.AuthUserResult) {
+	if captureJSON(results) {
+		return
+	}
 	if len(results) == 0 {
 		printAuthUserIdentityTable(nil)
 		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, [][]string{{"-", "-"}}, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
@@ -994,6 +1080,9 @@ func printAuthUserIdentityTable(result *service.AuthUserResult) {
 }
 
 func PrintAuthGroupSummary(results []*service.AuthGroupResult) {
+	if captureJSON(results) {
+		return
+	}
 	if len(results) == 0 {
 		printAuthIdentityTable("GROUP", "-", "-")
 		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, [][]string{{"-", "-"}}, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
@@ -1044,6 +1133,9 @@ func formatAuthScopeForUserDisplay(scope string, groups []service.AuthGroupItem)
 }
 
 func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1270,6 +1362,9 @@ func normalizedAuthRoles(value string) string {
 }
 
 func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1415,6 +1510,9 @@ func PrintAuthGrantAFSResult(result *service.AuthGrantAFSResult) {
 }
 
 func PrintAuthRolesResult(result *service.AuthRolesResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1445,6 +1543,9 @@ func PrintAuthRolesResult(result *service.AuthRolesResult) {
 }
 
 func PrintAuthSSPResult(result *service.AuthSSPResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1495,6 +1596,9 @@ func PrintAuthSSPGrantResult(result *service.AuthSSPGrantResult) {
 }
 
 func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1586,6 +1690,9 @@ func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
 }
 
 func PrintRBACGetSummary(results []*service.RBACGetResult, includeVC bool, long bool) {
+	if captureJSON(results) {
+		return
+	}
 	rows := make([][]string, 0)
 	for _, result := range results {
 		for _, item := range result.Items {
@@ -1697,6 +1804,9 @@ func PrintRBACGrantResult(result *service.RBACGrantResult) {
 }
 
 func PrintVCList(result *service.VCListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1731,10 +1841,16 @@ func PrintVCList(result *service.VCListResult) {
 }
 
 func PrintVCDetail(result *service.VCDetailResult) {
+	if captureJSON(result) {
+		return
+	}
 	PrintVCOverview(result, nil)
 }
 
 func PrintVCOverview(result *service.VCDetailResult, mapping *service.ClusterGetResult) {
+	if captureJSON(map[string]any{"resource": result, "mapping": mapping}) {
+		return
+	}
 	printVCOverviewTable(result, mapping)
 	if mapping != nil {
 		printClusterNamespaceMappings(mapping.ResourceNamespaces)
@@ -1742,6 +1858,9 @@ func PrintVCOverview(result *service.VCDetailResult, mapping *service.ClusterGet
 }
 
 func PrintVCOverviewSummary(result *service.VCDetailResult, mapping *service.ClusterGetResult) {
+	if captureJSON(map[string]any{"resource": result, "mapping": mapping}) {
+		return
+	}
 	printVCOverviewTable(result, mapping)
 }
 
@@ -1776,6 +1895,9 @@ func printVCOverviewTable(result *service.VCDetailResult, mapping *service.Clust
 }
 
 func PrintVCNodeList(result *service.VCNodeListResult, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1795,6 +1917,9 @@ func PrintVCNodeList(result *service.VCNodeListResult, longOutput bool) {
 }
 
 func PrintVCNodeListMany(results []*service.VCNodeListResult, longOutput bool) {
+	if captureJSON(results) {
+		return
+	}
 	rows := make([][]string, 0)
 	for _, result := range results {
 		for _, item := range result.Items {
@@ -1965,6 +2090,9 @@ func printVCNodeItems(items []service.VCNodeListItem, longOutput bool, includeAC
 }
 
 func PrintVPCList(result *service.VPCListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -1987,6 +2115,9 @@ func PrintVPCList(result *service.VPCListResult) {
 }
 
 func PrintVPCDetail(result *service.VPCListItem) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2006,6 +2137,9 @@ func PrintVPCDetail(result *service.VPCListItem) {
 }
 
 func PrintSubnetList(result *service.SubnetListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2028,6 +2162,9 @@ func PrintSubnetList(result *service.SubnetListResult) {
 }
 
 func PrintSubnetDetail(result *service.SubnetListItem) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2049,6 +2186,9 @@ func PrintSubnetDetail(result *service.SubnetListItem) {
 }
 
 func PrintNATGatewayList(result *service.NATGatewayListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2071,6 +2211,9 @@ func PrintNATGatewayList(result *service.NATGatewayListResult) {
 }
 
 func PrintNATGatewayDetail(result *service.NATGatewayListItem) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2091,6 +2234,9 @@ func PrintNATGatewayDetail(result *service.NATGatewayListItem) {
 }
 
 func PrintAFSList(result *service.AFSListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2113,6 +2259,9 @@ func PrintAFSList(result *service.AFSListResult) {
 }
 
 func PrintAFSDetail(result *service.AFSListItem) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2140,6 +2289,9 @@ func printResourceDetail(rows [][]string) {
 }
 
 func PrintClusterDetail(result *service.ClusterGetResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2231,6 +2383,9 @@ func PrintPolicyUpdateResult(result *service.PolicyUpdateResult) {
 }
 
 func PrintSupportedClusterPolicies(items []service.SupportedPolicyItem) {
+	if captureJSON(items) {
+		return
+	}
 	rows := make([][]string, 0, maxInt(1, len(items)))
 	if len(items) == 0 {
 		rows = append(rows, []string{"-", "-"})
@@ -2255,6 +2410,9 @@ func PrintSupportedClusterPolicies(items []service.SupportedPolicyItem) {
 }
 
 func PrintECPWorkloadLogs(result *service.ECPWorkloadLogResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2317,6 +2475,9 @@ func PrintECPWorkloadLogs(result *service.ECPWorkloadLogResult) {
 }
 
 func PrintCloudAuditLogs(result *service.CloudAuditLogResult, long bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2389,6 +2550,9 @@ func cloudAuditUserName(value string, long bool) string {
 }
 
 func PrintPolicyGetResult(result *service.PolicyGetResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2476,6 +2640,9 @@ func PrintPolicyGetResult(result *service.PolicyGetResult) {
 }
 
 func PrintPolicyGetSummary(results []*service.PolicyGetResult) {
+	if captureJSON(results) {
+		return
+	}
 	rows := make([][]string, 0, len(results))
 	for _, result := range results {
 		match := "no"
@@ -2503,6 +2670,9 @@ func policySelectorText(item service.PolicyWhitelistItem) string {
 }
 
 func PrintPVCheckDetail(result *service.PVCheckResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -2597,6 +2767,9 @@ func PrintRBACRemoveResult(result *service.RBACRemoveResult) {
 }
 
 func PrintPodGroupDetail(result *service.PodGroupGetResult) {
+	if captureJSON(result) {
+		return
+	}
 	summaryRows := [][]string{
 		{"PODGROUP", result.Name},
 		{"NAMESPACE", result.Namespace},
@@ -2634,6 +2807,9 @@ func PrintPodGroupDetail(result *service.PodGroupGetResult) {
 }
 
 func PrintJobCheckDetail(result *service.JobCheckResult) {
+	if captureJSON(result) {
+		return
+	}
 	rows := [][]string{
 		{"任务", result.Name},
 	}
@@ -2710,6 +2886,9 @@ func PrintJobCheckDetail(result *service.JobCheckResult) {
 }
 
 func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
 	rows := [][]string{
 		{"AFS", emptyDash(result.AFSName)},
 		{"UID", emptyDash(result.UID)},
@@ -2758,6 +2937,9 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
 }
 
 func PrintAFSCheckSummary(results []*service.AFSCheckResult) {
+	if captureJSON(results) {
+		return
+	}
 	rows := make([][]string, 0, len(results))
 	for _, result := range results {
 		rows = append(rows, []string{
@@ -2774,6 +2956,9 @@ func PrintAFSCheckSummary(results []*service.AFSCheckResult) {
 }
 
 func PrintPVCCheckDetail(result *service.PVCCheckResult, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
 	if len(result.Items) == 0 {
 		rows := [][]string{
 			{"PVC", "-"},
@@ -2822,6 +3007,9 @@ func PrintPVCCheckDetail(result *service.PVCCheckResult, longOutput bool) {
 }
 
 func PrintECSCheckDetail(result *service.ECSCheckResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil || len(result.Items) == 0 {
 		printBoxTableWithOptions(
 			[]string{"FIELD", "VALUE"},

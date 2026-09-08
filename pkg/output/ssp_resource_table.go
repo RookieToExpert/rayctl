@@ -10,6 +10,9 @@ import (
 )
 
 func PrintSSPClusterList(result *service.SSPClusterListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -32,6 +35,9 @@ func PrintSSPClusterList(result *service.SSPClusterListResult) {
 }
 
 func PrintSSPClusterDetail(result *service.SSPClusterItem) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -102,6 +108,9 @@ func PrintSSPClusterDetail(result *service.SSPClusterItem) {
 }
 
 func PrintSSPWorkspaceList(result *service.SSPWorkspaceListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -127,7 +136,10 @@ func PrintSSPWorkspaceList(result *service.SSPWorkspaceListResult) {
 	)
 }
 
-func PrintSSPWorkspaceDetail(result *service.SSPWorkspaceItem) {
+func PrintSSPWorkspaceDetail(result *service.SSPWorkspaceItem, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -135,9 +147,7 @@ func PrintSSPWorkspaceDetail(result *service.SSPWorkspaceItem) {
 		[]string{"FIELD", "VALUE"},
 		[][]string{
 			{"WORKSPACE", emptyDash(result.Name)},
-			{"UID", emptyDash(result.UID)},
 			{"STATE", emptyDash(result.State)},
-			{"VC", emptyDash(result.VCluster)},
 			{"QUEUE COUNT", strconv.Itoa(len(result.Queues))},
 			{"SUBSCRIPTION", emptyDash(result.Subscription)},
 			{"RESOURCE GROUP", emptyDash(result.ResourceGroup)},
@@ -152,25 +162,46 @@ func PrintSSPWorkspaceDetail(result *service.SSPWorkspaceItem) {
 	fmt.Fprintln(os.Stdout)
 	rows := make([][]string, 0, maxInt(1, len(result.Queues)))
 	for _, queue := range result.Queues {
-		rows = append(rows, []string{
-			emptyDash(queue.Name),
-			emptyDash(queue.UID),
-			emptyDash(queue.State),
-			emptyDash(queue.Type),
-		})
+		row := []string{emptyDash(queue.Name)}
+		if longOutput {
+			row = append(row, emptyDash(queue.UID))
+		}
+		row = append(row, emptyDash(queue.State), emptyDash(queue.Type), emptyDash(queue.Cluster), emptyDash(queue.VCluster), emptyDash(queue.Namespace))
+		rows = append(rows, row)
 	}
+	headers := []string{"QUEUE"}
+	widths := []int{38}
+	minWidths := []int{20}
+	if longOutput {
+		headers = append(headers, "UID")
+		widths = append(widths, 36)
+		minWidths = append(minWidths, 36)
+	}
+	headers = append(headers, "STATE", "TYPE", "CLUSTER", "VC", "NAMESPACE")
+	widths = append(widths, 12, 20, 30, 30, 38)
+	minWidths = append(minWidths, 8, 10, 16, 16, 20)
 	if len(rows) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-"})
+		row := make([]string, len(headers))
+		for index := range row {
+			row[index] = "-"
+		}
+		rows = append(rows, row)
 	}
 	printBoxTableWithOptions(
-		[]string{"QUEUE", "UID", "STATE", "TYPE"},
+		headers,
 		rows,
-		[]int{38, 36, 12, 20},
-		tableOptions{minWidths: []int{20, 36, 8, 10}},
+		widths,
+		tableOptions{
+			minWidths:   minWidths,
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 0)...),
+		},
 	)
 }
 
 func PrintSSPQueueList(result *service.SSPQueueListResult) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -197,9 +228,13 @@ func PrintSSPQueueList(result *service.SSPQueueListResult) {
 			minWidths:   []int{28, 8, 10, 24, 18, 10},
 		},
 	)
+	fmt.Fprintf(os.Stdout, "\n本次共 %d 条。\n", len(result.Items))
 }
 
 func PrintSSPQueueDetail(result *service.SSPQueueItem, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -223,6 +258,9 @@ func PrintSSPQueueDetail(result *service.SSPQueueItem, longOutput bool) {
 		rows = append(rows,
 			[]string{"WORKSPACE UID", emptyDash(result.WorkspaceUID)},
 			[]string{"NODE COUNT", strconv.Itoa(result.NodeCount)},
+			[]string{"MACHINE TYPES", emptyDash(result.MachineTypes)},
+			[]string{"MAX NODES", emptyDash(result.MaxNodes)},
+			[]string{"CAPABILITY", emptyDash(result.Capability)},
 		)
 	}
 	printBoxTableWithOptions(
@@ -234,6 +272,9 @@ func PrintSSPQueueDetail(result *service.SSPQueueItem, longOutput bool) {
 }
 
 func PrintSSPQueueWorkloads(results []*service.SSPQueueWorkloadResult) {
+	if captureJSON(results) {
+		return
+	}
 	multipleQueues := len(results) > 1
 	rows := make([][]string, 0)
 	for _, result := range results {
@@ -294,14 +335,20 @@ func formatSSPWorkloadType(value string) string {
 }
 
 func PrintSSPAITList(result *service.SSPCatalogListResult) {
-	printSSPCatalogList(result, false, true)
+	if captureJSON(result) {
+		return
+	}
+	printSSPCatalogList(result, false, false, true)
 }
 
 func PrintSSPAIDList(result *service.SSPCatalogListResult, longOutput bool) {
-	printSSPCatalogList(result, longOutput, longOutput)
+	if captureJSON(result) {
+		return
+	}
+	printSSPCatalogList(result, longOutput, longOutput, longOutput)
 }
 
-func printSSPCatalogList(result *service.SSPCatalogListResult, includeResource bool, includeCreated bool) {
+func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool, includeResource bool, includeCreated bool) {
 	rows := make([][]string, 0)
 	total := 0
 	if result != nil {
@@ -310,6 +357,16 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeResource b
 			row := []string{
 				emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Workspace),
 				emptyDash(item.Queue), emptyDash(item.Creator),
+			}
+			if result.AID {
+				count := "-"
+				if item.Restarts != nil {
+					count = fmt.Sprint(*item.Restarts)
+				}
+				row = append(row, count)
+			}
+			if includeNode {
+				row = append(row, emptyDash(item.Node))
 			}
 			if includeResource {
 				row = append(row, emptyDash(item.Resource))
@@ -323,6 +380,16 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeResource b
 	headers := []string{"NAME", "STATE", "WORKSPACE", "QUEUE", "CREATOR"}
 	maxWidths := []int{48, 16, 38, 48, 22}
 	minWidths := []int{28, 12, 22, 26, 14}
+	if result != nil && result.AID {
+		headers = append(headers, "RESTARTS")
+		maxWidths = append(maxWidths, 8)
+		minWidths = append(minWidths, 8)
+	}
+	if includeNode {
+		headers = append(headers, "NODE")
+		maxWidths = append(maxWidths, 30)
+		minWidths = append(minWidths, 20)
+	}
 	if includeResource {
 		headers = append(headers, "RESOURCE")
 		maxWidths = append(maxWidths, 58)
@@ -352,6 +419,9 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeResource b
 }
 
 func PrintSSPAIRJobList(result *service.SSPAIRJobListResult) {
+	if captureJSON(result) {
+		return
+	}
 	rows := make([][]string, 0)
 	if result != nil {
 		for _, item := range result.Items {
@@ -372,6 +442,12 @@ func PrintSSPAIRJobList(result *service.SSPAIRJobListResult) {
 }
 
 func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
+	if result != nil && longOutput {
+		defer func() { printPodEvidence(result.PodEvidence) }()
+	}
 	if result == nil {
 		return
 	}
@@ -428,6 +504,9 @@ func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {
 }
 
 func PrintSSPAIRGatewayList(result *service.SSPAIRGatewayListResult) {
+	if captureJSON(result) {
+		return
+	}
 	rows := make([][]string, 0)
 	if result != nil {
 		for _, item := range result.Items {
@@ -448,6 +527,9 @@ func PrintSSPAIRGatewayList(result *service.SSPAIRGatewayListResult) {
 }
 
 func PrintSSPAIRGatewayDetail(result *service.SSPAIRGatewayItem, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -493,6 +575,9 @@ func formatAIRResource(resource service.SSPAIRResourceItem) string {
 }
 
 func PrintSSPQueueNodeList(result *service.SSPQueueNodeListResult, longOutput bool) {
+	if captureJSON(result) {
+		return
+	}
 	if result == nil {
 		return
 	}
@@ -521,8 +606,12 @@ func PrintSSPQueueNodeList(result *service.SSPQueueNodeListResult, longOutput bo
 }
 
 func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
+	if captureJSON(results) {
+		return
+	}
 	multipleQueues := len(results) > 1
 	showAccelerator := sspQueueUsageHasAccelerator(results)
+	showRDMA := sspQueueUsageHasRDMA(results)
 	rows := make([][]string, 0)
 	for _, result := range results {
 		if result != nil && result.SharedVCPool {
@@ -558,6 +647,9 @@ func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 			if showAccelerator {
 				row = append(row, emptyDash(accelerator))
 			}
+			if showRDMA {
+				row = append(row, formatPlatformResourcePair(item.RDMAAllocated, item.RDMATotal))
+			}
 			row = append(row, emptyDash(cpu), emptyDash(memory))
 			if multipleQueues {
 				row = append([]string{emptyDash(result.Queue.Name)}, row...)
@@ -575,6 +667,12 @@ func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 		minimums = append(minimums, 17)
 		emptyRow = append(emptyRow, "-")
 	}
+	if showRDMA {
+		headers = append(headers, "RDMA ALLOC/TOTAL")
+		widths = append(widths, 17)
+		minimums = append(minimums, 16)
+		emptyRow = append(emptyRow, "-")
+	}
 	headers = append(headers, "CPU ALLOC/TOTAL", "MEMORY ALLOC/TOTAL")
 	widths = append(widths, 18, 22)
 	minimums = append(minimums, 15, 20)
@@ -589,6 +687,20 @@ func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 		rows = append(rows, emptyRow)
 	}
 	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
+}
+
+func sspQueueUsageHasRDMA(results []*service.SSPQueueNodeUsageResult) bool {
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		for _, item := range result.Items {
+			if platformResourceAmountIsPositive(item.RDMATotal) || platformResourceAmountIsPositive(item.RDMAAllocated) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func sspQueueUsageHasAccelerator(results []*service.SSPQueueNodeUsageResult) bool {

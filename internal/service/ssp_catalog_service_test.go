@@ -1,6 +1,12 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+)
 
 func TestFilterAndSortSSPCatalogItems(t *testing.T) {
 	items := []SSPCatalogListItem{
@@ -29,5 +35,35 @@ func TestValidateSSPCatalogLimit(t *testing.T) {
 func TestNormalizeSSPCatalogAPIState(t *testing.T) {
 	if got := normalizeSSPCatalogAPIState(" Running "); got != "RUNNING" {
 		t.Fatalf("normalizeSSPCatalogAPIState() = %q", got)
+	}
+}
+
+func TestEnrichAIDCatalogNodesMatchesWorkloadUIDAndName(t *testing.T) {
+	clientset := fake.NewSimpleClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "dev-by-uid-0",
+			Labels: map[string]string{
+				sspWorkloadTypeLabel: sspAIDWorkloadTypeValue,
+				sspWorkloadUIDLabel:  "aid-uid",
+			},
+		}, Spec: corev1.PodSpec{NodeName: "host-a"}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "dev-by-name-0",
+			Labels: map[string]string{
+				sspWorkloadTypeLabel: sspAIDWorkloadTypeValue,
+				sspWorkloadNameLabel: "dev-by-name",
+			},
+		}, Spec: corev1.PodSpec{NodeName: "host-b"}},
+	)
+	result := &SSPCatalogListResult{Items: []SSPCatalogListItem{
+		{UID: "aid-uid", Name: "dev-by-uid"},
+		{Name: "dev-by-name"},
+	}}
+	service := &SSPCatalogService{clientset: clientset}
+
+	service.enrichAIDCatalogNodes(t.Context(), result)
+
+	if result.Items[0].Node != "host-a" || result.Items[1].Node != "host-b" {
+		t.Fatalf("items = %#v", result.Items)
 	}
 }

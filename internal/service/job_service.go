@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2504,21 +2505,27 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 				return
 			}
 			for _, vcRef := range platformVCRefs(vc) {
-				job, getErr := s.vcClient.GetVolcanoJobForProfile(scanCtx, vc.ProfileName, vcRef, "default", identifier)
+				// Names are not confined to default; preserve every namespace match.
+				jobs, getErr := s.vcClient.ListVolcanoJobsPageForProfile(scanCtx, vc.ProfileName, vcRef, "name="+strconv.Quote(identifier), 0)
 				if getErr != nil {
 					continue
 				}
-
-				results <- searchResult{
-					identity: &jobIdentity{
-						Name:         job.GetName(),
-						Namespace:    job.GetNamespace(),
-						UID:          string(job.GetUID()),
-						Submitter:    firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), "-"),
-						PodGroupName: fmt.Sprintf("%s-%s", job.GetName(), string(job.GetUID())),
-						VClusterName: vcRef,
-						ProfileName:  vc.ProfileName,
-					},
+				for i := range jobs {
+					job := &jobs[i]
+					if job.GetName() != identifier {
+						continue
+					}
+					results <- searchResult{
+						identity: &jobIdentity{
+							Name:         job.GetName(),
+							Namespace:    job.GetNamespace(),
+							UID:          string(job.GetUID()),
+							Submitter:    firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), "-"),
+							PodGroupName: fmt.Sprintf("%s-%s", job.GetName(), string(job.GetUID())),
+							VClusterName: vcRef,
+							ProfileName:  vc.ProfileName,
+						},
+					}
 				}
 				return
 			}

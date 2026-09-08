@@ -31,6 +31,8 @@ func newNodeCmd() *cobra.Command {
 	nodeCmd.AddCommand(newNodeListCmd())
 	// 注册子命令：查看节点详情 (包含资源与运行中的 Pod)
 	nodeCmd.AddCommand(newNodeDescribeCmd())
+	// 注册子命令：执行固定的节点健康检查。
+	nodeCmd.AddCommand(newNodeHealthCmd())
 	// 注册子命令：封锁节点 (标记不可调度并添加维修标签)
 	nodeCmd.AddCommand(newNodeCordonCmd())
 	// 注册子命令：解封节点 (恢复可调度并移除维修标签)

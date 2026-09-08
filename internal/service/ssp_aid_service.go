@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/platform"
+	"rayctl/internal/podevidence"
 )
 
 const sspAIDWorkloadType = sspAIDWorkloadTypeValue
@@ -28,6 +29,7 @@ type SSPAIDService struct {
 }
 
 type SSPAIDGetResult struct {
+	PodEvidence            *podevidence.Result
 	Name                   string
 	UID                    string
 	State                  string
@@ -399,6 +401,23 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 		},
 	}
 	result.ResourceSummary = formatSSPAIDResourceSummary(result.Resource)
+	if !includeLogs {
+		defer func() {
+			count, _ := podevidence.RestartSummary(pods)
+			if result.Stage == "running" && count > 0 {
+				result.PodEvidence = enrichRestartHistory(ctx, s.platform, pods, aid.Name, "aid", result.Workspace, &podevidence.Result{Restarts: count, Total: len(pods), Warnings: []string{}})
+				result.Diagnosis = []string{aidRestartDiagnosis(pods, result.PodEvidence)}
+			}
+		}()
+	}
+	if includeLogs {
+		defer func() {
+			result.PodEvidence = collectWorkloadEvidence(ctx, s.clientset, s.platform, pods, aid.Name, "aid", result.Workspace)
+			if result.Stage == "running" {
+				result.Diagnosis = []string{aidRestartDiagnosis(pods, result.PodEvidence)}
+			}
+		}()
+	}
 	for _, volume := range aid.Properties.VolumeMounts {
 		result.Volumes = append(result.Volumes, SSPAIDVolumeItem{
 			Type:      volume.Type,
@@ -459,15 +478,7 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 		}
 	default:
 		result.Stage = "running"
-		result.Diagnosis = []string{"开发机 Pod 已 Ready，可以正常使用。"}
-		if includeLogs && inspectPod != nil && podHasRunnableLogs(*inspectPod) {
-			lines, err := s.jobHelper.tailPodLogs(ctx, inspectPod.Namespace, inspectPod.Name, defaultTailLogLines)
-			if err != nil {
-				result.RecentLogLines = []string{fmt.Sprintf("log unavailable: %v", err)}
-			} else {
-				result.RecentLogLines = lines
-			}
-		}
+		result.Diagnosis = []string{aidRestartDiagnosis(pods, nil)}
 	}
 	result.Stage, result.Diagnosis = ensurePVCGetDiagnosis(state, terminal, result.Stage, result.Diagnosis, result.PersistentVolumeClaims)
 	return result

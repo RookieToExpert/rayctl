@@ -16,6 +16,8 @@ type JobResourceSpecItem struct {
 	Memory              string
 	Accelerator         string
 	AcceleratorResource string
+	RDMA                string
+	RDMAResource        string
 	Model               string
 	MachineType         string
 }
@@ -42,28 +44,29 @@ func jobResourceSpecsFromVolcanoJob(job *unstructured.Unstructured) []JobResourc
 		if err != nil || !found {
 			continue
 		}
-		item.CPU, item.Memory, item.Accelerator, item.AcceleratorResource = summarizeContainerRequests(podSpec)
+		item.CPU, item.Memory, item.Accelerator, item.AcceleratorResource, item.RDMA, item.RDMAResource = summarizeContainerRequests(podSpec)
 		selectors := nestedStringMap(podSpec, "nodeSelector")
 		item.Model = nodeAcceleratorModel(selectors)
 		item.MachineType = firstNonEmpty(
 			strings.TrimSpace(selectors[sspMachineTypeLabel]),
 			machineTypeFromNodeAffinity(podSpec),
 		)
-		if item.CPU != "" || item.Memory != "" || item.Accelerator != "" || item.Model != "" || item.MachineType != "" {
+		if item.CPU != "" || item.Memory != "" || item.Accelerator != "" || item.RDMA != "" || item.Model != "" || item.MachineType != "" {
 			result = append(result, item)
 		}
 	}
 	return result
 }
 
-func summarizeContainerRequests(podSpec map[string]any) (string, string, string, string) {
+func summarizeContainerRequests(podSpec map[string]any) (string, string, string, string, string, string) {
 	containers, found, err := unstructured.NestedSlice(podSpec, "containers")
 	if err != nil || !found {
-		return "", "", "", ""
+		return "", "", "", "", "", ""
 	}
 	cpu := resource.MustParse("0")
 	memory := resource.MustParse("0")
 	accelerators := make(map[string]resource.Quantity)
+	rdmaResources := make(map[string]resource.Quantity)
 	for _, rawContainer := range containers {
 		container, ok := rawContainer.(map[string]any)
 		if !ok {
@@ -85,7 +88,11 @@ func summarizeContainerRequests(podSpec map[string]any) (string, string, string,
 			case "memory":
 				memory.Add(quantity)
 			default:
-				if isAcceleratorResourceName(name) {
+				if isRDMAResourceName(name) {
+					current := rdmaResources[name]
+					current.Add(quantity)
+					rdmaResources[name] = current
+				} else if isAcceleratorResourceName(name) {
 					current := accelerators[name]
 					current.Add(quantity)
 					accelerators[name] = current
@@ -93,17 +100,23 @@ func summarizeContainerRequests(podSpec map[string]any) (string, string, string,
 			}
 		}
 	}
-	acceleratorNames := make([]string, 0, len(accelerators))
-	for name := range accelerators {
-		acceleratorNames = append(acceleratorNames, name)
+	acceleratorValues, acceleratorNames := summarizeNamedResourceRequests(accelerators)
+	rdmaValues, rdmaNames := summarizeNamedResourceRequests(rdmaResources)
+	return nonZeroQuantity(cpu), nonZeroQuantity(memory), acceleratorValues, acceleratorNames, rdmaValues, rdmaNames
+}
+
+func summarizeNamedResourceRequests(resources map[string]resource.Quantity) (string, string) {
+	names := make([]string, 0, len(resources))
+	for name := range resources {
+		names = append(names, name)
 	}
-	sort.Strings(acceleratorNames)
-	acceleratorValues := make([]string, 0, len(acceleratorNames))
-	for _, name := range acceleratorNames {
-		quantity := accelerators[name]
-		acceleratorValues = append(acceleratorValues, quantity.String())
+	sort.Strings(names)
+	values := make([]string, 0, len(names))
+	for _, name := range names {
+		quantity := resources[name]
+		values = append(values, quantity.String())
 	}
-	return nonZeroQuantity(cpu), nonZeroQuantity(memory), strings.Join(acceleratorValues, "+"), strings.Join(acceleratorNames, "+")
+	return strings.Join(values, "+"), strings.Join(names, "+")
 }
 
 func nonZeroQuantity(value resource.Quantity) string {
@@ -121,6 +134,11 @@ func isAcceleratorResourceName(name string) bool {
 		}
 	}
 	return false
+}
+
+func isRDMAResourceName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(name, "rdma") || strings.Contains(name, "roce")
 }
 
 func machineTypeFromNodeAffinity(podSpec map[string]any) string {

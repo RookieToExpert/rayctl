@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+func TestJobNameLookupAcrossNamespaces(t *testing.T) {
+	client := &VirtualClusterClient{
+		profiles: map[string]clientProfile{"d": {Name: "d", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.example.test"}},
+		httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/namespaces/") || r.URL.Query().Get("filter") != `name="vllm-23-beta"` {
+				t.Fatalf("unexpected lookup: %s", r.URL)
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"kind":"JobList","items":[{"metadata":{"name":"vllm-23-beta","namespace":"wj","uid":"one"}},{"metadata":{"name":"vllm-23-beta","namespace":"other","uid":"two"}}]}`)), Request: r}, nil
+		})},
+	}
+	jobs, err := client.ListVolcanoJobsPageForProfile(context.Background(), "d", "vc-example", `name="vllm-23-beta"`, 0)
+	if err != nil || len(jobs) != 2 {
+		t.Fatalf("jobs=%v err=%v", jobs, err)
+	}
+	if jobs[0].GetNamespace() != "wj" || jobs[1].GetNamespace() != "other" {
+		t.Fatal("namespace matches lost")
+	}
+}
+
 func TestJobRequestsForProfileDoNotProbeOtherProfiles(t *testing.T) {
 	requestCount := 0
 	requestedPaths := make([]string, 0, 9)

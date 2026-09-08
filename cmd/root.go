@@ -14,6 +14,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.PersistentFlags().StringVarP(&globalOutput, "output", "o", "table", "输出格式: table、json；metrics 另支持 csv")
 	rootCmd.PersistentFlags().StringVarP(&kubeconfig, "kubeconfig", "k", "", "Path to the kubeconfig file (defaults to KUBECONFIG or $HOME/kubeconfig)")
 	rootCmd.PersistentFlags().StringVarP(&targetEnvironment, "environment", "e", "auto", "平台环境: auto、d、pt、dcloud 或 all；默认根据当前 kubeconfig 自动识别")
 	rootCmd.AddCommand(newAFSCmd())
@@ -25,6 +26,7 @@ func init() {
 	rootCmd.AddCommand(newECSCmd())
 	rootCmd.AddCommand(newECPCmd())
 	rootCmd.AddCommand(newLogsCmd())
+	rootCmd.AddCommand(newMetricsCmd())
 	rootCmd.AddCommand(newNATGatewayCmd())
 	rootCmd.AddCommand(newNodeCmd())
 	rootCmd.AddCommand(newPolicyCmd())
@@ -38,8 +40,10 @@ func init() {
 	rootCmd.AddCommand(newVPCCmd())
 	rootCmd.AddCommand(newWorkspaceCmd())
 	rootCmd.AddCommand(newSubnetCmd())
+	installJSONCommands(rootCmd)
 }
 
 func Execute() error {
+	resetRequestedProcessExitCode()
 	return rootCmd.Execute()
 }

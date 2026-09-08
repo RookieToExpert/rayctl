@@ -9,11 +9,11 @@ import (
 
 func TestJobResourceSpecRowsMergesEqualTaskSpecs(t *testing.T) {
 	rows := jobResourceSpecRows([]service.JobResourceSpecItem{
-		{Task: "master", Replicas: 1, CPU: "224", Memory: "640Gi", Accelerator: "8", Model: "C550", MachineType: "x2ls.ri.i70"},
-		{Task: "worker", Replicas: 3, CPU: "224", Memory: "640Gi", Accelerator: "8", Model: "C550", MachineType: "x2ls.ri.i70"},
+		{Task: "master", Replicas: 1, CPU: "224", Memory: "640Gi", Accelerator: "8", RDMA: "1", RDMAResource: "rdma-training/roce", Model: "C550", MachineType: "x2ls.ri.i70"},
+		{Task: "worker", Replicas: 3, CPU: "224", Memory: "640Gi", Accelerator: "8", RDMA: "1", RDMAResource: "rdma-training/roce", Model: "C550", MachineType: "x2ls.ri.i70"},
 	})
 
-	if len(rows) != 1 || rows[0][0] != "SPEC / NODE" || !strings.Contains(rows[0][1], "8 C550") {
+	if len(rows) != 1 || rows[0][0] != "SPEC / NODE" || !strings.Contains(rows[0][1], "8 C550") || !strings.Contains(rows[0][1], "1 RDMA (roce)") {
 		t.Fatalf("rows = %#v", rows)
 	}
 }

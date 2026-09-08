@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"rayctl/internal/kube"
 	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
@@ -53,6 +54,7 @@ func newAIRJobListCmd() *cobra.Command {
 }
 
 func newAIRJobGetCmd() *cobra.Command {
+	var noImage bool
 	var workspace string
 	var longOutput bool
 	var workerLimit int
@@ -69,7 +71,12 @@ func newAIRJobGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			results, queryErrors := airService.GetJobs(cmd.Context(), args, region, workspace, longOutput, workerLimit)
+			if longOutput {
+				if client, err := kube.NewClientset(kubeconfig); err == nil {
+					airService.SetKubeClient(client)
+				}
+			}
+			results, queryErrors := airService.GetJobs(service.WithPodEvidenceOptions(cmd.Context(), noImage, kubeconfig), args, region, workspace, longOutput, workerLimit)
 			printed := false
 			for index, result := range results {
 				if result == nil {
@@ -90,6 +97,7 @@ func newAIRJobGetCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace，可显著加快精确查询")
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 worker、卷、镜像和详细资源")
 	cmd.Flags().IntVarP(&workerLimit, "worker-limit", "c", 20, "-l 时最多展示的 worker 数量")
+	cmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	return cmd
 }
 

@@ -9,8 +9,12 @@ import (
 )
 
 func PrintVCResourceUsage(results []*service.VCResourceUsageResult) {
+	if captureJSON(results) {
+		return
+	}
 	multipleVCs := len(results) > 1
 	showAccelerator := vcUsageHasAccelerator(results)
+	showRDMA := vcUsageHasRDMA(results)
 	rows := make([][]string, 0)
 	for _, result := range results {
 		if result == nil {
@@ -25,6 +29,9 @@ func PrintVCResourceUsage(results []*service.VCResourceUsageResult) {
 			}
 			if showAccelerator {
 				row = append(row, formatPlatformResourcePair(usage.Allocated.Device, usage.Total.Device))
+			}
+			if showRDMA {
+				row = append(row, formatPlatformResourcePair(item.RDMAAllocated, item.RDMATotal))
 			}
 			row = append(row,
 				formatPlatformResourcePair(usage.Allocated.CPU, usage.Total.CPU),
@@ -46,6 +53,12 @@ func PrintVCResourceUsage(results []*service.VCResourceUsageResult) {
 		minWidths = append(minWidths, 17)
 		emptyRow = append(emptyRow, "-")
 	}
+	if showRDMA {
+		headers = append(headers, "RDMA ALLOC/TOTAL")
+		maxWidths = append(maxWidths, 17)
+		minWidths = append(minWidths, 16)
+		emptyRow = append(emptyRow, "-")
+	}
 	headers = append(headers, "CPU ALLOC/TOTAL", "MEMORY ALLOC/TOTAL")
 	maxWidths = append(maxWidths, 18, 22)
 	minWidths = append(minWidths, 15, 20)
@@ -60,6 +73,20 @@ func PrintVCResourceUsage(results []*service.VCResourceUsageResult) {
 		rows = append(rows, emptyRow)
 	}
 	printBoxTableWithOptions(headers, rows, maxWidths, tableOptions{minWidths: minWidths})
+}
+
+func vcUsageHasRDMA(results []*service.VCResourceUsageResult) bool {
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		for _, item := range result.Items {
+			if platformResourceAmountIsPositive(item.RDMATotal) || platformResourceAmountIsPositive(item.RDMAAllocated) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func vcUsageHasAccelerator(results []*service.VCResourceUsageResult) bool {

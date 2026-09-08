@@ -3,41 +3,59 @@ package service
 import (
 	"context"
 	"fmt"
+	corev1 "k8s.io/api/core/v1"
 	"sort"
 	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/platform"
+	"rayctl/internal/podevidence"
 )
 
 type SSPCatalogListOptions struct {
-	Region    string
-	Workspace string
-	Queue     string
-	State     string
-	Limit     int
-	All       bool
+	Region       string
+	Workspace    string
+	Queue        string
+	State        string
+	Limit        int
+	All          bool
+	IncludeNodes bool
 }
 
 type SSPCatalogListItem struct {
+	Restarts  *int64
+	UID       string
 	Name      string
 	State     string
 	Workspace string
 	Queue     string
+	Node      string
 	Creator   string
 	Resource  string
 	CreatedAt string
 }
 
 type SSPCatalogListResult struct {
-	Items []SSPCatalogListItem
+	Items    []SSPCatalogListItem
+	Warnings []string
+	AID      bool `json:"-"`
 }
 
 type SSPCatalogService struct {
-	platform *platform.VirtualClusterClient
+	platform  *platform.VirtualClusterClient
+	clientset kubernetes.Interface
 }
 
 func NewSSPCatalogService(platformClient *platform.VirtualClusterClient) *SSPCatalogService {
 	return &SSPCatalogService{platform: platformClient}
+}
+
+func (s *SSPCatalogService) SetKubeClient(clientset kubernetes.Interface) {
+	s.clientset = clientset
 }
 
 func (s *SSPCatalogService) ListAIT(ctx context.Context, options SSPCatalogListOptions) (*SSPCatalogListResult, error) {
@@ -66,36 +84,104 @@ func (s *SSPCatalogService) ListAIT(ctx context.Context, options SSPCatalogListO
 }
 
 func (s *SSPCatalogService) ListAID(ctx context.Context, options SSPCatalogListOptions) (*SSPCatalogListResult, error) {
+	var result *SSPCatalogListResult
+	var err error
 	if queue := strings.TrimSpace(options.Queue); queue != "" {
-		return s.listQueueWorkloads(ctx, queue, "aid", options)
+		result, err = s.listQueueWorkloads(ctx, queue, "aid", options)
+	} else {
+		result, err = s.listWorkspaceCatalog(ctx, options, func(ctx context.Context, workspace platform.SSPWorkspace, state string, limit int) ([]SSPCatalogListItem, error) {
+			aids, listErr := s.platform.ListSSPAIDsInWorkspace(ctx, workspace, state, limit)
+			if listErr != nil {
+				return nil, listErr
+			}
+			items := make([]SSPCatalogListItem, 0, len(aids))
+			for _, aid := range aids {
+				items = append(items, SSPCatalogListItem{
+					UID:       aid.UID,
+					Name:      firstNonEmpty(aid.Name, aid.DisplayName),
+					State:     aid.State,
+					Workspace: aid.Properties.Workload.WorkspaceName,
+					Queue:     firstNonEmpty(aid.Properties.Workload.Queue.Name, lastResourceSegment(aid.Properties.Workload.Queue.ID)),
+					Creator:   firstNonEmpty(aid.Properties.Ownership.CreatorName, aid.Properties.Ownership.CreatorID, aid.CreatorID),
+					Resource: formatSSPAIDResourceSummary(SSPAIDResourceItem{
+						CPU:         formatSSPResource(aid.Properties.Workload.BaseSpec.CPU, ""),
+						Memory:      formatSSPResource(aid.Properties.Workload.BaseSpec.Memory, ""),
+						Accelerator: formatSSPResource(aid.Properties.Workload.BaseSpec.AccelerateDeviceCount, ""),
+						GPUModel:    aid.Properties.Workload.BaseSpec.GPUModel,
+						GPUMemory:   formatSSPResource(aid.Properties.Workload.BaseSpec.GPUMemorySize, "Gi"),
+						MachineType: strings.Join(aid.Properties.Workload.BaseSpec.MachineTypes, ", "),
+						RDMA:        aid.Properties.Workload.BaseSpec.RDMAName,
+					}),
+					CreatedAt: formatSSPTime(aid.CreateTime),
+				})
+			}
+			return items, nil
+		})
 	}
-	return s.listWorkspaceCatalog(ctx, options, func(ctx context.Context, workspace platform.SSPWorkspace, state string, limit int) ([]SSPCatalogListItem, error) {
-		aids, err := s.platform.ListSSPAIDsInWorkspace(ctx, workspace, state, limit)
-		if err != nil {
-			return nil, err
-		}
-		items := make([]SSPCatalogListItem, 0, len(aids))
-		for _, aid := range aids {
-			items = append(items, SSPCatalogListItem{
-				Name:      firstNonEmpty(aid.Name, aid.DisplayName),
-				State:     aid.State,
-				Workspace: aid.Properties.Workload.WorkspaceName,
-				Queue:     firstNonEmpty(aid.Properties.Workload.Queue.Name, lastResourceSegment(aid.Properties.Workload.Queue.ID)),
-				Creator:   firstNonEmpty(aid.Properties.Ownership.CreatorName, aid.Properties.Ownership.CreatorID, aid.CreatorID),
-				Resource: formatSSPAIDResourceSummary(SSPAIDResourceItem{
-					CPU:         formatSSPResource(aid.Properties.Workload.BaseSpec.CPU, ""),
-					Memory:      formatSSPResource(aid.Properties.Workload.BaseSpec.Memory, ""),
-					Accelerator: formatSSPResource(aid.Properties.Workload.BaseSpec.AccelerateDeviceCount, ""),
-					GPUModel:    aid.Properties.Workload.BaseSpec.GPUModel,
-					GPUMemory:   formatSSPResource(aid.Properties.Workload.BaseSpec.GPUMemorySize, "Gi"),
-					MachineType: strings.Join(aid.Properties.Workload.BaseSpec.MachineTypes, ", "),
-					RDMA:        aid.Properties.Workload.BaseSpec.RDMAName,
-				}),
-				CreatedAt: formatSSPTime(aid.CreateTime),
-			})
-		}
-		return items, nil
+	if err != nil {
+		return nil, err
+	}
+	result.AID = true
+	s.enrichAIDCatalogNodes(ctx, result)
+	return result, nil
+}
+
+func (s *SSPCatalogService) enrichAIDCatalogNodes(ctx context.Context, result *SSPCatalogListResult) {
+	if s == nil || s.clientset == nil || result == nil || len(result.Items) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	selector := labels.Set(map[string]string{sspWorkloadTypeLabel: sspAIDWorkloadTypeValue}).AsSelector().String()
+	pods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+		LabelSelector: selector, ResourceVersion: "0",
 	})
+	if err != nil {
+		return
+	}
+	nodesByWorkload := make(map[string]map[string]struct{}, len(result.Items)*2)
+	restartsByUID := map[string]int64{}
+	restartsByName := map[string]int64{}
+	for index := range pods.Items {
+		pod := &pods.Items[index]
+		count, _ := podevidence.RestartSummary([]corev1.Pod{*pod})
+		restartsByUID[pod.Labels[sspWorkloadUIDLabel]] += count
+		restartsByName[pod.Labels[sspWorkspaceNameLabel]+"/"+pod.Labels[sspWorkloadNameLabel]] += count
+		node := strings.TrimSpace(pod.Spec.NodeName)
+		if node == "" {
+			continue
+		}
+		for _, key := range []string{pod.Labels[sspWorkloadUIDLabel], pod.Labels[sspWorkloadNameLabel]} {
+			key = strings.ToLower(strings.TrimSpace(key))
+			if key == "" {
+				continue
+			}
+			if nodesByWorkload[key] == nil {
+				nodesByWorkload[key] = make(map[string]struct{})
+			}
+			nodesByWorkload[key][node] = struct{}{}
+		}
+	}
+	for index := range result.Items {
+		nodeSet := nodesByWorkload[strings.ToLower(strings.TrimSpace(result.Items[index].UID))]
+		item := &result.Items[index]
+		count, found := restartsByUID[item.UID]
+		if !found {
+			count, found = restartsByName[item.Workspace+"/"+item.Name]
+		}
+		if found {
+			item.Restarts = &count
+		}
+		if len(nodeSet) == 0 {
+			nodeSet = nodesByWorkload[strings.ToLower(strings.TrimSpace(result.Items[index].Name))]
+		}
+		nodes := make([]string, 0, len(nodeSet))
+		for node := range nodeSet {
+			nodes = append(nodes, node)
+		}
+		sort.Strings(nodes)
+		result.Items[index].Node = strings.Join(nodes, ", ")
+	}
 }
 
 type sspCatalogWorkspaceLoader func(context.Context, platform.SSPWorkspace, string, int) ([]SSPCatalogListItem, error)
@@ -184,6 +270,7 @@ func (s *SSPCatalogService) listQueueWorkloads(ctx context.Context, queueName st
 			continue
 		}
 		items = append(items, SSPCatalogListItem{
+			UID:       firstNonEmpty(workload.UID, workload.ID),
 			Name:      firstNonEmpty(workload.Name, workload.DisplayName),
 			State:     workload.State,
 			Workspace: workspace,

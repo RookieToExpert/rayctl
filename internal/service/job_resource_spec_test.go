@@ -13,7 +13,7 @@ func TestJobResourceSpecsFromVolcanoJob(t *testing.T) {
 		"spec":{"tasks":[{
 			"name":"worker","replicas":2,
 			"template":{"spec":{
-				"containers":[{"resources":{"requests":{"cpu":"144","memory":"1920Gi","huawei.com/Ascend910":"8"}}}],
+				"containers":[{"resources":{"requests":{"cpu":"144","memory":"1920Gi","huawei.com/Ascend910":"8","rdma-training/roce":"1"}}}],
 				"nodeSelector":{"accelerator-type":"module-910b-8"},
 				"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[
 					{"matchExpressions":[{"key":"resource.compute.sensecore.cn/machine-type","operator":"In","values":["h1ls.rp.k60a"]}]}
@@ -30,7 +30,7 @@ func TestJobResourceSpecsFromVolcanoJob(t *testing.T) {
 		t.Fatalf("specs = %#v", specs)
 	}
 	got := specs[0]
-	if got.Task != "worker" || got.Replicas != 2 || got.CPU != "144" || got.Memory != "1920Gi" || got.Accelerator != "8" || got.Model != "module-910b-8" || got.MachineType != "h1ls.rp.k60a" {
+	if got.Task != "worker" || got.Replicas != 2 || got.CPU != "144" || got.Memory != "1920Gi" || got.Accelerator != "8" || got.RDMA != "1" || got.RDMAResource != "rdma-training/roce" || got.Model != "module-910b-8" || got.MachineType != "h1ls.rp.k60a" {
 		t.Fatalf("unexpected spec: %#v", got)
 	}
 }

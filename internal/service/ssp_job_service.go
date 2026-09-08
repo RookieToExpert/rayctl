@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/platform"
+	"rayctl/internal/podevidence"
 )
 
 const (
@@ -75,6 +76,7 @@ func (e *SSPKubeconfigMismatchError) Error() string {
 }
 
 type SSPJobGetResult struct {
+	PodEvidence            *podevidence.Result
 	Name                   string
 	UID                    string
 	Status                 string
@@ -810,7 +812,11 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 	}
 	result.PodResources = s.enrichSSPPodMachineTypes(ctx, result.PodResources)
 	inspectPod := chooseInspectPod(append([]corev1.Pod(nil), pods...))
-	logPod := chooseMasterLogPod(pods)
+	if includeLogs {
+		defer func() {
+			result.PodEvidence = collectWorkloadEvidence(ctx, s.clientset, s.platform, pods, job.Name, "ait", result.Workspace)
+		}()
+	}
 	if inspectPod != nil {
 		result.InspectPod = inspectPod.Name
 	} else if len(workers) > 0 {
@@ -874,14 +880,6 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 	default:
 		result.Stage = "running"
 		result.Diagnosis = []string{fmt.Sprintf("任务已有 %d/%d 个 Pod Ready。", ready, len(pods))}
-		if includeLogs && logPod != nil && podHasRunnableLogs(*logPod) {
-			lines, err := s.jobHelper.tailPodLogs(ctx, logPod.Namespace, logPod.Name, defaultTailLogLines)
-			if err != nil {
-				result.RecentLogLines = []string{fmt.Sprintf("log unavailable: %v", err)}
-			} else {
-				result.RecentLogLines = lines
-			}
-		}
 	}
 	result.Stage, result.Diagnosis = ensurePVCGetDiagnosis(status, terminal, result.Stage, result.Diagnosis, result.PersistentVolumeClaims)
 	return result
@@ -890,14 +888,22 @@ func (s *SSPJobService) buildResult(ctx context.Context, job platform.SSPTrainin
 func sspJobResourceSpecs(tasks []platform.SSPTrainingJobTask) []JobResourceSpecItem {
 	result := make([]JobResourceSpecItem, 0, len(tasks))
 	for _, task := range tasks {
+		rdmaName := strings.TrimSpace(task.ResourceSpec.RDMAName)
+		rdmaCount := ""
+		if rdmaName != "" {
+			// SSP binds one HCA resource to each Pod when an RDMA network is selected.
+			rdmaCount = "1"
+		}
 		result = append(result, JobResourceSpecItem{
-			Task:        firstNonEmpty(strings.TrimSpace(task.Name), strings.TrimSpace(task.Role)),
-			Replicas:    task.Replicas,
-			CPU:         formatSSPResource(task.ResourceSpec.CPUCount, ""),
-			Memory:      formatSSPResource(task.ResourceSpec.MemoryGiB, "Gi"),
-			Accelerator: formatSSPResource(task.ResourceSpec.AccelerateDeviceCount, ""),
-			Model:       strings.TrimSpace(task.ResourceSpec.AccelerateDeviceModel),
-			MachineType: strings.Join(task.ResourceSpec.MachineTypes, ", "),
+			Task:         firstNonEmpty(strings.TrimSpace(task.Name), strings.TrimSpace(task.Role)),
+			Replicas:     task.Replicas,
+			CPU:          formatSSPResource(task.ResourceSpec.CPUCount, ""),
+			Memory:       formatSSPResource(task.ResourceSpec.MemoryGiB, "Gi"),
+			Accelerator:  formatSSPResource(task.ResourceSpec.AccelerateDeviceCount, ""),
+			RDMA:         rdmaCount,
+			RDMAResource: rdmaName,
+			Model:        strings.TrimSpace(task.ResourceSpec.AccelerateDeviceModel),
+			MachineType:  strings.Join(task.ResourceSpec.MachineTypes, ", "),
 		})
 	}
 	return result

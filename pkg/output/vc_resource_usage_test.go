@@ -37,3 +37,17 @@ func TestPrintVCResourceUsageKeepsAcceleratorForMixedNodes(t *testing.T) {
 		t.Fatalf("accelerator output is missing ACCEL column:\n%s", text)
 	}
 }
+
+func TestPrintVCResourceUsageShowsRDMA(t *testing.T) {
+	result := &service.VCResourceUsageResult{Items: []service.VCNodeResourceUsageItem{{
+		HostName:      "rdma-node",
+		RDMAAllocated: "1",
+		RDMATotal:     "8",
+	}}}
+
+	text := captureTableOutput(t, func() { PrintVCResourceUsage([]*service.VCResourceUsageResult{result}) })
+
+	if !strings.Contains(text, "RDMA ALLOC/TOTAL") || !strings.Contains(text, "1/8") {
+		t.Fatalf("RDMA output is missing usage:\n%s", text)
+	}
+}

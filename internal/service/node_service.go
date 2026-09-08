@@ -76,9 +76,17 @@ type NodeDescribe struct {
 	GPUUsage        string
 	CPUUsage        string
 	MemoryUsage     string
+	RDMAResources   []NodeExtendedResource
 	Pods            []string
 	MatchedPodCount int
 	Timings         DescribeTimings
+}
+
+type NodeExtendedResource struct {
+	Name        string
+	Capacity    string
+	Allocatable string
+	Requested   string
 }
 
 type NodeDescribeQueryResult struct {
@@ -236,6 +244,7 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 		GPUUsage:        formatGPUUsage(allocatedGPU, totalGPU),
 		CPUUsage:        formatCPUUsage(allocatedCPU, totalCPU),
 		MemoryUsage:     formatMemoryUsage(allocatedMemory, totalMemory),
+		RDMAResources:   nodeRDMAExtendedResources(node, pods),
 		Pods:            podNames,
 		MatchedPodCount: len(podNames),
 		Timings: DescribeTimings{
@@ -246,6 +255,74 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 			Total:          time.Since(startedAt),
 		},
 	}, nil
+}
+
+func nodeRDMAExtendedResources(node *corev1.Node, pods []corev1.Pod) []NodeExtendedResource {
+	names := make(map[corev1.ResourceName]struct{})
+	for name := range node.Status.Capacity {
+		if isRDMAResourceName(string(name)) {
+			names[name] = struct{}{}
+		}
+	}
+	for name := range node.Status.Allocatable {
+		if isRDMAResourceName(string(name)) {
+			names[name] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(names))
+	for name := range names {
+		ordered = append(ordered, string(name))
+	}
+	sort.Strings(ordered)
+
+	result := make([]NodeExtendedResource, 0, len(ordered))
+	for _, value := range ordered {
+		name := corev1.ResourceName(value)
+		capacity := node.Status.Capacity[name]
+		allocatable := node.Status.Allocatable[name]
+		// Some device plugins leave zero-valued resource keys behind. They do
+		// not represent a usable RDMA device and should not appear as hardware.
+		if capacity.IsZero() && allocatable.IsZero() {
+			continue
+		}
+		requested := resource.MustParse("0")
+		for index := range pods {
+			requested.Add(podNamedResourceRequest(pods[index].Spec, name))
+		}
+		result = append(result, NodeExtendedResource{
+			Name:        value,
+			Capacity:    resourceQuantityString(capacity),
+			Allocatable: resourceQuantityString(allocatable),
+			Requested:   requested.String(),
+		})
+	}
+	return result
+}
+
+func podNamedResourceRequest(spec corev1.PodSpec, name corev1.ResourceName) resource.Quantity {
+	regular := resource.MustParse("0")
+	for index := range spec.Containers {
+		regular.Add(spec.Containers[index].Resources.Requests[name])
+	}
+	initMaximum := resource.MustParse("0")
+	for index := range spec.InitContainers {
+		quantity := spec.InitContainers[index].Resources.Requests[name]
+		if quantity.Cmp(initMaximum) > 0 {
+			initMaximum = quantity
+		}
+	}
+	if initMaximum.Cmp(regular) > 0 {
+		regular = initMaximum
+	}
+	regular.Add(spec.Overhead[name])
+	return regular
+}
+
+func resourceQuantityString(quantity resource.Quantity) string {
+	if quantity.IsZero() {
+		return "0"
+	}
+	return quantity.String()
 }
 
 func nodeQueueDisplayName(nodeLabels map[string]string, pods []corev1.Pod) string {

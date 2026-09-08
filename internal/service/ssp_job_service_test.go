@@ -79,6 +79,17 @@ func TestNormalizeSSPJobState(t *testing.T) {
 	}
 }
 
+func TestSSPJobResourceSpecsIncludesRDMA(t *testing.T) {
+	task := platform.SSPTrainingJobTask{Name: "worker", Replicas: 2}
+	task.ResourceSpec.RDMAName = "rdma-training/roce"
+
+	specs := sspJobResourceSpecs([]platform.SSPTrainingJobTask{task})
+
+	if len(specs) != 1 || specs[0].RDMA != "1" || specs[0].RDMAResource != "rdma-training/roce" {
+		t.Fatalf("specs = %#v", specs)
+	}
+}
+
 func TestPlatformConditionEvidenceUsesStatusAndLatestTransition(t *testing.T) {
 	conditions := []map[string]any{
 		{"last_transition_time": "2026-08-27T07:09:21Z", "status": "PENDING", "message": nil},

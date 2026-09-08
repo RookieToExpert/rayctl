@@ -44,8 +44,11 @@ func newAIDListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if clientset, clientErr := kube.NewClientset(kubeconfig); clientErr == nil {
+				catalog.SetKubeClient(clientset)
+			}
 			result, err := catalog.ListAID(cmd.Context(), service.SSPCatalogListOptions{
-				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: all,
+				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: all, IncludeNodes: longOutput,
 			})
 			if err != nil {
 				return err
@@ -60,6 +63,7 @@ func newAIDListCmd() *cobra.Command {
 }
 
 func newSSPAIDGetCmd() *cobra.Command {
+	var noImage bool
 	var workspace string
 	var longOutput bool
 	var debugTiming bool
@@ -87,7 +91,7 @@ func newSSPAIDGetCmd() *cobra.Command {
 				err        error
 			}
 			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
-				result, err := aidService.GetAIDInRegion(ctx, identifier, workspace, region, longOutput)
+				result, err := aidService.GetAIDInRegion(service.WithPodEvidenceOptions(ctx, noImage, kubeconfig), identifier, workspace, region, longOutput)
 				return queryResult{identifier, result, err}
 			})
 			queryErrors := make([]error, 0)
@@ -110,8 +114,9 @@ func newSSPAIDGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免已停止开发机跨 workspace 查询")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示首个 Pod 的最新日志")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 Pod 容器状态、当前/上次日志、架构和挂载详情")
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "打印 AID 查询各阶段耗时")
+	cmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	return cmd
 }
 
@@ -175,6 +180,7 @@ func newSSPCatalogQueryService() (*service.SSPCatalogService, error) {
 }
 
 func newSSPJobGetCmd() *cobra.Command {
+	var noImage bool
 	var workspace string
 	var longOutput bool
 	var queryTimeout time.Duration
@@ -203,6 +209,7 @@ func newSSPJobGetCmd() *cobra.Command {
 				err        error
 			}
 			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				ctx = service.WithPodEvidenceOptions(ctx, noImage, kubeconfig)
 				queryCtx := ctx
 				cancel := func() {}
 				if queryTimeout > 0 {
@@ -246,7 +253,8 @@ func newSSPJobGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免历史任务跨 workspace 查询")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示首个 Pod 的最新日志")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示前 3 个可疑 Pod 的容器状态、当前/上次日志、架构和挂载详情")
 	cmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
+	cmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	return cmd
 }

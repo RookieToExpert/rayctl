@@ -5,8 +5,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/platform"
+	"rayctl/internal/podevidence"
 )
 
 type SSPAIRResourceItem struct {
@@ -44,6 +50,7 @@ type SSPAIRWorkerItem struct {
 }
 
 type SSPAIRJobItem struct {
+	PodEvidence   *podevidence.Result
 	Name          string
 	UID           string
 	State         string
@@ -92,8 +99,11 @@ type SSPAIRJobListResult struct{ Items []SSPAIRJobItem }
 type SSPAIRGatewayListResult struct{ Items []SSPAIRGatewayItem }
 
 type SSPAIRService struct {
-	platform *platform.VirtualClusterClient
+	platform  *platform.VirtualClusterClient
+	clientset kubernetes.Interface
 }
+
+func (s *SSPAIRService) SetKubeClient(client kubernetes.Interface) { s.clientset = client }
 
 func NewSSPAIRService(platformClient *platform.VirtualClusterClient) *SSPAIRService {
 	return &SSPAIRService{platform: platformClient}
@@ -208,6 +218,21 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 					Name: worker.Name, Phase: worker.Phase, HostIP: worker.HostIP, PodIP: worker.IP,
 					Restarts: worker.RestartCount, StartedAt: formatSSPTime(worker.StartTime), LastStarted: formatSSPTime(worker.LastStartedTime),
 				})
+			}
+			if s.clientset != nil {
+				podCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+				pods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(podCtx, metav1.ListOptions{LabelSelector: labels.Set(map[string]string{sspWorkloadUIDLabel: item.UID}).AsSelector().String(), ResourceVersion: "0"})
+				cancel()
+				if err != nil {
+					item.PodEvidence = &podevidence.Result{Warnings: []string{"AIR Pod discovery: " + err.Error()}}
+				} else {
+					item.PodEvidence = collectWorkloadEvidence(ctx, s.clientset, s.platform, pods.Items, item.Name, "air", item.Workspace)
+					if len(pods.Items) == 0 {
+						item.PodEvidence.Warnings = append(item.PodEvidence.Warnings, "No matching Pods in current kubeconfig; verify HC environment")
+					}
+				}
+			} else {
+				item.PodEvidence = &podevidence.Result{Warnings: []string{"Kubernetes client unavailable; platform worker data retained"}}
 			}
 		}
 		return detailResult{item: &item}

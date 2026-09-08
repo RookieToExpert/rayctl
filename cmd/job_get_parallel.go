@@ -62,7 +62,7 @@ func runParallelECPJobGet(
 		if printed {
 			fmt.Fprintln(os.Stdout)
 		}
-		if len(results) > 1 {
+		if len(results) > 1 && !output.IsJSON() {
 			fmt.Fprintf(os.Stdout, "===== ECP 任务查询 [%d/%d]: %s =====\n\n", index+1, len(results), result.identifier)
 		}
 		for jobIndex, job := range result.ecpJobs {

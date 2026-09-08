@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/kube"
@@ -277,17 +280,40 @@ func newSSPResourceQueryService() (*service.SSPResourceService, error) {
 	}
 	resourceService := service.NewSSPResourceService(clientset, platformClient)
 	resourceService.SetQueueNodeClientResolver(localQueueVClusterClient)
+	resourceService.SetQueueRuntimeResolver(localQueueRuntimeObject)
 	return resourceService, nil
 }
 
 func localQueueVClusterClient(queue service.SSPQueueItem) (kubernetes.Interface, error) {
+	path, err := localQueueKubeconfigPath(queue)
+	if err != nil {
+		return nil, err
+	}
+	return kube.NewClientset(path)
+}
+
+func localQueueRuntimeObject(ctx context.Context, queue service.SSPQueueItem, queueName string) (*unstructured.Unstructured, error) {
+	path, err := localQueueKubeconfigPath(queue)
+	if err != nil {
+		return nil, err
+	}
+	client, err := kube.NewDynamicClient(path)
+	if err != nil {
+		return nil, err
+	}
+	return client.Resource(schema.GroupVersionResource{
+		Group: "scheduling.volcano.sh", Version: "v1beta1", Resource: "queues",
+	}).Get(ctx, queueName, metav1.GetOptions{})
+}
+
+func localQueueKubeconfigPath(queue service.SSPQueueItem) (string, error) {
 	vcName := strings.TrimSpace(queue.VCluster)
 	if vcName == "" || vcName == "-" {
-		return nil, fmt.Errorf("queue has no vcluster name")
+		return "", fmt.Errorf("queue has no vcluster name")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	directories := []string{"D", "PT"}
 	if strings.EqualFold(strings.TrimSpace(queue.Region), "cn-pj-03") {
@@ -296,8 +322,8 @@ func localQueueVClusterClient(queue service.SSPQueueItem) (kubernetes.Interface,
 	for _, directory := range directories {
 		path := filepath.Join(home, directory, vcName)
 		if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
-			return kube.NewClientset(path)
+			return path, nil
 		}
 	}
-	return nil, fmt.Errorf("local vcluster kubeconfig for %s not found", vcName)
+	return "", fmt.Errorf("local vcluster kubeconfig for %s not found", vcName)
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/kube"
 	"rayctl/internal/platform"
@@ -22,6 +23,7 @@ func newVCCmd() *cobra.Command {
 	}
 
 	vcCmd.AddCommand(newVCListCmd())
+	vcCmd.AddCommand(newVCRenewCmd())
 	vcCmd.AddCommand(newVCGetCmd())
 	vcCmd.AddCommand(newVCNodeCmd())
 	vcCmd.AddCommand(newClusterSetCmd())
@@ -185,6 +187,13 @@ func newVCNodeUsageCmd() *cobra.Command {
 				return err
 			}
 			vcService := service.NewVCServiceWithKubeClient(vcClient, clientset)
+			vcService.SetNodeClientResolver(func(profileName, region, vclusterName string) (kubernetes.Interface, error) {
+				return localQueueVClusterClient(service.SSPQueueItem{
+					Profile:  profileName,
+					Region:   region,
+					VCluster: vclusterName,
+				})
+			})
 			type queryResult struct {
 				identifier string
 				result     *service.VCResourceUsageResult

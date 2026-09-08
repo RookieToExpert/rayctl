@@ -21,6 +21,7 @@ import (
 type VCService struct {
 	vcClient           *platform.VirtualClusterClient
 	clientset          kubernetes.Interface
+	nodeClientResolver func(profileName, region, vclusterName string) (kubernetes.Interface, error)
 	allocatableOnce    sync.Once
 	allocatableByNode  map[string]corev1.ResourceList
 	allocatableListErr error
@@ -90,11 +91,13 @@ type VCResourceUsageResult struct {
 }
 
 type VCNodeResourceUsageItem struct {
-	UID      string
-	HostName string
-	HostIP   string
-	State    string
-	Usage    platform.VirtualClusterNodeResourceUsage
+	UID           string
+	HostName      string
+	HostIP        string
+	State         string
+	RDMAAllocated string
+	RDMATotal     string
+	Usage         platform.VirtualClusterNodeResourceUsage
 }
 
 func (r *VCResourceUsageResult) FilterFreeNodes() {
@@ -162,6 +165,10 @@ func NewVCService(vcClient *platform.VirtualClusterClient) *VCService {
 
 func NewVCServiceWithKubeClient(vcClient *platform.VirtualClusterClient, clientset kubernetes.Interface) *VCService {
 	return &VCService{vcClient: vcClient, clientset: clientset}
+}
+
+func (s *VCService) SetNodeClientResolver(resolver func(profileName, region, vclusterName string) (kubernetes.Interface, error)) {
+	s.nodeClientResolver = resolver
 }
 
 func (s *VCService) List(ctx context.Context) (*VCListResult, error) {
@@ -381,6 +388,33 @@ func (s *VCService) GetResourceUsageForProfile(ctx context.Context, profileName,
 }
 
 func (s *VCService) getResourceUsage(ctx context.Context, cluster *VCDetailResult) (*VCResourceUsageResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var nodeClient kubernetes.Interface
+	if s.nodeClientResolver != nil {
+		nodeClient, _ = s.nodeClientResolver(cluster.Tenant, cluster.Region, cluster.Name)
+	}
+	var kubernetesNodesResult <-chan asyncResult[[]corev1.Node]
+	var kubernetesPodsResult <-chan asyncResult[[]corev1.Pod]
+	if nodeClient != nil {
+		kubernetesNodesResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Node, error) {
+			list, err := nodeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{ResourceVersion: "0"})
+			return list.Items, err
+		})
+		kubernetesPodsResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Pod, error) {
+			list, err := nodeClient.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+				FieldSelector: "status.phase!=Succeeded,status.phase!=Failed",
+			})
+			return list.Items, err
+		})
+	} else {
+		kubernetesNodesResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Node, error) {
+			return s.vcClient.ListKubernetesNodesForProfile(ctx, cluster.Tenant, cluster.Name)
+		})
+		kubernetesPodsResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Pod, error) {
+			return s.vcClient.ListActivePodsForProfile(ctx, cluster.Tenant, cluster.Name, "")
+		})
+	}
 	nodes, err := s.vcClient.ListVirtualClusterNodes(
 		ctx,
 		cluster.Tenant,
@@ -442,8 +476,13 @@ func (s *VCService) getResourceUsage(ctx context.Context, cluster *VCDetailResul
 			Usage:    usageByUID[strings.TrimSpace(node.UID)],
 		})
 	}
-	if kubernetesNodes, nodeErr := s.vcClient.ListKubernetesNodesForProfile(ctx, cluster.Tenant, cluster.Name); nodeErr == nil {
-		applyKubernetesNodeAllocatable(items, kubernetesNodes)
+	kubernetesNodes := <-kubernetesNodesResult
+	kubernetesPods := <-kubernetesPodsResult
+	if kubernetesNodes.Err == nil {
+		applyKubernetesNodeAllocatable(items, kubernetesNodes.Value)
+		if kubernetesPods.Err == nil {
+			applyKubernetesNodeRDMAUsage(items, kubernetesNodes.Value, kubernetesPods.Value)
+		}
 	} else {
 		s.applyLocalNodeAllocatable(ctx, items)
 	}
@@ -457,6 +496,17 @@ func (s *VCService) getResourceUsage(ctx context.Context, cluster *VCDetailResul
 		ProfileName: cluster.Tenant,
 		Items:       items,
 	}, nil
+}
+
+func applyKubernetesNodeRDMAUsage(items []VCNodeResourceUsageItem, nodes []corev1.Node, pods []corev1.Pod) {
+	usages := kubernetesNodeRDMAUsage(nodes, pods)
+	for index := range items {
+		usage, ok := lookupNodeRDMAUsage(usages, items[index].HostName, items[index].HostIP)
+		if !ok {
+			continue
+		}
+		items[index].RDMAAllocated, items[index].RDMATotal = rdmaUsageStrings(usage)
+	}
 }
 
 func (s *VCService) applyLocalNodeAllocatable(ctx context.Context, items []VCNodeResourceUsageItem) {

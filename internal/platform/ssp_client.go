@@ -975,6 +975,50 @@ func (c *VirtualClusterClient) ListSSPQueueResources(ctx context.Context, profil
 	return result, nil
 }
 
+func (c *VirtualClusterClient) ListSSPQueueResourcesForRegion(ctx context.Context, region string) ([]SSPQueueResourceDetails, error) {
+	profiles := c.sspProfilesForRegion(region)
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("no platform profile configured for region %q", region)
+	}
+	type profileQueues struct {
+		items []SSPQueueResourceDetails
+		err   error
+	}
+	loads := make(chan profileQueues, len(profiles))
+	for _, profile := range profiles {
+		profile := profile
+		go func() {
+			items, err := c.ListSSPQueueResources(ctx, profile.Name, region)
+			loads <- profileQueues{items: items, err: err}
+		}()
+	}
+
+	result := make([]SSPQueueResourceDetails, 0)
+	seen := make(map[string]struct{})
+	var firstErr error
+	for range profiles {
+		load := <-loads
+		if load.err != nil {
+			if firstErr == nil {
+				firstErr = load.err
+			}
+			continue
+		}
+		for _, item := range load.items {
+			key := strings.ToLower(item.ProfileName + "|" + firstNonEmpty(item.UID, item.Name))
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, item)
+		}
+	}
+	if len(result) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return result, nil
+}
+
 func appendSSPQueueResource(result *[]SSPQueueResourceDetails, seen map[string]struct{}, queue StorageVolumeResource, cluster StorageVolumeResource, profileName string, region string) {
 	details := sspQueueResourceDetails(queue, cluster, profileName)
 	if requested := strings.TrimSpace(region); requested != "" && !strings.EqualFold(details.Region, requested) {

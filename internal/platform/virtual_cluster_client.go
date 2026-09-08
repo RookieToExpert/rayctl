@@ -68,6 +68,9 @@ type clientProfile struct {
 	KubernetesBaseURL string
 	IAMBaseURL        string
 	MonitorBaseURL    string
+	MetricsBaseURL    string
+	MetricsUsername   string
+	MetricsPassword   string
 	Subscription      string
 	ResourceGroup     string
 	Region            string
@@ -563,6 +566,9 @@ type config struct {
 	KubernetesBaseURL string `json:"kubernetes_base_url"`
 	IAMBaseURL        string `json:"iam_base_url"`
 	MonitorBaseURL    string `json:"monitor_base_url"`
+	MetricsBaseURL    string `json:"metrics_base_url"`
+	MetricsUsername   string `json:"metrics_username"`
+	MetricsPassword   string `json:"metrics_password"`
 	ResourceGroup     string `json:"resource_group"`
 	Region            string `json:"region"`
 }
@@ -583,6 +589,9 @@ type ConfigProfile struct {
 	KubernetesBaseURL string `json:"kubernetes_base_url"`
 	IAMBaseURL        string `json:"iam_base_url"`
 	MonitorBaseURL    string `json:"monitor_base_url"`
+	MetricsBaseURL    string `json:"metrics_base_url"`
+	MetricsUsername   string `json:"metrics_username"`
+	MetricsPassword   string `json:"metrics_password"`
 	ResourceGroup     string `json:"resource_group"`
 	Region            string `json:"region"`
 }
@@ -600,6 +609,9 @@ type ConfigSnapshot struct {
 	KubernetesBaseURL string                   `json:"kubernetes_base_url"`
 	IAMBaseURL        string                   `json:"iam_base_url"`
 	MonitorBaseURL    string                   `json:"monitor_base_url"`
+	MetricsBaseURL    string                   `json:"metrics_base_url"`
+	MetricsUsername   string                   `json:"metrics_username"`
+	MetricsPassword   string                   `json:"metrics_password"`
 	ResourceGroup     string                   `json:"resource_group"`
 	Region            string                   `json:"region"`
 }
@@ -668,6 +680,9 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 				KubernetesBaseURL: kubernetesBaseURL,
 				IAMBaseURL:        iamBaseURL,
 				MonitorBaseURL:    monitorBaseURL,
+				MetricsBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_METRICS_BASE_URL")), "/"),
+				MetricsUsername:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_USERNAME")),
+				MetricsPassword:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_PASSWORD")),
 				Subscription:      subscription,
 				ResourceGroup:     resourceGroup,
 				Region:            region,
@@ -961,6 +976,57 @@ func (c *VirtualClusterClient) CurrentIAMBaseURL() string {
 	return strings.TrimRight(strings.TrimSpace(profile.IAMBaseURL), "/")
 }
 
+type MetricsEndpointConfig struct {
+	Profile     string
+	Environment string
+	BaseURL     string
+	Username    string
+	Password    string
+}
+
+// CurrentMetricsConfig returns the VictoriaMetrics connection for the active
+// platform profile. Environment variables intentionally override file values
+// so credentials can be injected without persisting them to platform.json.
+func (c *VirtualClusterClient) CurrentMetricsConfig() (MetricsEndpointConfig, error) {
+	if c == nil {
+		return MetricsEndpointConfig{}, fmt.Errorf("platform client is unavailable")
+	}
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return MetricsEndpointConfig{}, fmt.Errorf("current platform profile is unavailable")
+	}
+	environment := profileEnvironment(profile)
+	baseURL := strings.TrimRight(strings.TrimSpace(profile.MetricsBaseURL), "/")
+	if baseURL == "" {
+		switch environment {
+		case "pt":
+			baseURL = "k8s://prod-datalake/vmauth-datalake-vm-cms:8427"
+		case "dcloud":
+			baseURL = "k8s://prod-datalake/vmauth-victoria-metrics-datalake-vm:8427"
+		default:
+			baseURL = "https://vm-cms.d.pjlab.org.cn"
+		}
+	}
+	username := strings.TrimSpace(profile.MetricsUsername)
+	password := strings.TrimSpace(profile.MetricsPassword)
+	if value := strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_METRICS_BASE_URL")), "/"); value != "" {
+		baseURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("RAYCTL_METRICS_USERNAME")); value != "" {
+		username = value
+	}
+	if value := strings.TrimSpace(os.Getenv("RAYCTL_METRICS_PASSWORD")); value != "" {
+		password = value
+	}
+	return MetricsEndpointConfig{
+		Profile:     profile.Name,
+		Environment: environment,
+		BaseURL:     baseURL,
+		Username:    username,
+		Password:    password,
+	}, nil
+}
+
 func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 	content, err := os.ReadFile(filepath.Clean(configPath))
 	if err != nil {
@@ -986,6 +1052,9 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 				KubernetesBaseURL: strings.TrimRight(strings.TrimSpace(raw.KubernetesBaseURL), "/"),
 				IAMBaseURL:        strings.TrimRight(strings.TrimSpace(raw.IAMBaseURL), "/"),
 				MonitorBaseURL:    strings.TrimRight(strings.TrimSpace(raw.MonitorBaseURL), "/"),
+				MetricsBaseURL:    strings.TrimRight(strings.TrimSpace(raw.MetricsBaseURL), "/"),
+				MetricsUsername:   strings.TrimSpace(raw.MetricsUsername),
+				MetricsPassword:   strings.TrimSpace(raw.MetricsPassword),
 				ResourceGroup:     strings.TrimSpace(raw.ResourceGroup),
 				Region:            strings.TrimSpace(raw.Region),
 			}
@@ -1003,6 +1072,9 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 			snapshot.KubernetesBaseURL = current.KubernetesBaseURL
 			snapshot.IAMBaseURL = current.IAMBaseURL
 			snapshot.MonitorBaseURL = current.MonitorBaseURL
+			snapshot.MetricsBaseURL = current.MetricsBaseURL
+			snapshot.MetricsUsername = current.MetricsUsername
+			snapshot.MetricsPassword = current.MetricsPassword
 			snapshot.ResourceGroup = current.ResourceGroup
 			snapshot.Region = current.Region
 		}
@@ -1076,6 +1148,15 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 		if strings.TrimSpace(cfg.MonitorBaseURL) != "" || strings.TrimSpace(cfg.Cluster) != "" {
 			current.MonitorBaseURL = cfg.MonitorBaseURL
 		}
+		if strings.TrimSpace(cfg.MetricsBaseURL) != "" {
+			current.MetricsBaseURL = cfg.MetricsBaseURL
+		}
+		if strings.TrimSpace(cfg.MetricsUsername) != "" {
+			current.MetricsUsername = cfg.MetricsUsername
+		}
+		if strings.TrimSpace(cfg.MetricsPassword) != "" {
+			current.MetricsPassword = cfg.MetricsPassword
+		}
 		if strings.TrimSpace(cfg.ResourceGroup) != "" {
 			current.ResourceGroup = cfg.ResourceGroup
 		}
@@ -1101,6 +1182,9 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 				KubernetesBaseURL: profile.KubernetesBaseURL,
 				IAMBaseURL:        profile.IAMBaseURL,
 				MonitorBaseURL:    profile.MonitorBaseURL,
+				MetricsBaseURL:    profile.MetricsBaseURL,
+				MetricsUsername:   profile.MetricsUsername,
+				MetricsPassword:   profile.MetricsPassword,
 				ResourceGroup:     profile.ResourceGroup,
 				Region:            profile.Region,
 			}
@@ -1286,6 +1370,9 @@ func makeClientProfile(name string, cfg config) (clientProfile, bool) {
 		KubernetesBaseURL: kubernetesBaseURL,
 		IAMBaseURL:        iamBaseURL,
 		MonitorBaseURL:    monitorBaseURL,
+		MetricsBaseURL:    strings.TrimRight(strings.TrimSpace(cfg.MetricsBaseURL), "/"),
+		MetricsUsername:   strings.TrimSpace(cfg.MetricsUsername),
+		MetricsPassword:   strings.TrimSpace(cfg.MetricsPassword),
 		Subscription:      subscription,
 		ResourceGroup:     resourceGroup,
 		Region:            region,
@@ -1327,6 +1414,9 @@ func configProfileMapToConfig(values map[string]ConfigProfile) map[string]config
 			KubernetesBaseURL: value.KubernetesBaseURL,
 			IAMBaseURL:        value.IAMBaseURL,
 			MonitorBaseURL:    value.MonitorBaseURL,
+			MetricsBaseURL:    value.MetricsBaseURL,
+			MetricsUsername:   value.MetricsUsername,
+			MetricsPassword:   value.MetricsPassword,
 			ResourceGroup:     value.ResourceGroup,
 			Region:            value.Region,
 		}
@@ -1384,6 +1474,9 @@ func (c *VirtualClusterClient) orderedProfiles() []clientProfile {
 			BaseURL:           c.baseURL,
 			KubernetesBaseURL: c.kubernetesBaseURL,
 			IAMBaseURL:        c.iamBaseURL,
+			MetricsBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_METRICS_BASE_URL")), "/"),
+			MetricsUsername:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_USERNAME")),
+			MetricsPassword:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_PASSWORD")),
 			Subscription:      c.subscription,
 			ResourceGroup:     c.resourceGroup,
 			Region:            c.region,
@@ -1444,6 +1537,9 @@ func (c *VirtualClusterClient) currentClientProfile() (clientProfile, bool) {
 			BaseURL:           c.baseURL,
 			KubernetesBaseURL: c.kubernetesBaseURL,
 			IAMBaseURL:        c.iamBaseURL,
+			MetricsBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_METRICS_BASE_URL")), "/"),
+			MetricsUsername:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_USERNAME")),
+			MetricsPassword:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_PASSWORD")),
 			Subscription:      c.subscription,
 			ResourceGroup:     c.resourceGroup,
 			Region:            c.region,
@@ -2857,7 +2953,10 @@ func (c *VirtualClusterClient) ListActivePodsForProfile(ctx context.Context, pro
 }
 
 func (c *VirtualClusterClient) listPodsWithProfile(ctx context.Context, profile clientProfile, vclusterName string, namespace string, fieldSelector string) ([]corev1.Pod, error) {
-	path := fmt.Sprintf("/api/v1/namespaces/%s/pods", url.PathEscape(strings.TrimSpace(namespace)))
+	path := "/api/v1/pods"
+	if namespace = strings.TrimSpace(namespace); namespace != "" {
+		path = fmt.Sprintf("/api/v1/namespaces/%s/pods", url.PathEscape(namespace))
+	}
 	query := url.Values{}
 	if strings.TrimSpace(fieldSelector) != "" {
 		query.Set("fieldSelector", strings.TrimSpace(fieldSelector))
@@ -2881,6 +2980,41 @@ func (c *VirtualClusterClient) ListKubernetesNodesForProfile(ctx context.Context
 		return nil, err
 	}
 	return nodeList.Items, nil
+}
+
+func (c *VirtualClusterClient) ListKubernetesNamespacesForProfile(ctx context.Context, profileName string, vclusterName string) ([]corev1.Namespace, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/api/v1/namespaces", nil)
+	var namespaceList corev1.NamespaceList
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &namespaceList); err != nil {
+		return nil, err
+	}
+	return namespaceList.Items, nil
+}
+
+func (c *VirtualClusterClient) GetVolcanoQueueForProfile(ctx context.Context, profileName string, vclusterName string, queueName string) (*unstructured.Unstructured, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	queueName = strings.TrimSpace(queueName)
+	if queueName == "" {
+		return nil, fmt.Errorf("volcano queue name is required")
+	}
+	reqURL := c.kubernetesResourceURLForProfile(
+		profile,
+		vclusterName,
+		fmt.Sprintf("/apis/scheduling.volcano.sh/v1beta1/queues/%s", url.PathEscape(queueName)),
+		nil,
+	)
+	var queue unstructured.Unstructured
+	if err := c.getJSONWithProfile(ctx, profile, reqURL, &queue); err != nil {
+		return nil, err
+	}
+	return &queue, nil
 }
 
 func (c *VirtualClusterClient) GetPodGroup(ctx context.Context, vclusterName string, namespace string, podGroupName string) (*unstructured.Unstructured, error) {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 
@@ -28,6 +30,7 @@ type SSPResourceService struct {
 	platform                *platform.VirtualClusterClient
 	sspBase                 *SSPJobService
 	queueNodeClientResolver func(SSPQueueItem) (kubernetes.Interface, error)
+	queueRuntimeResolver    func(context.Context, SSPQueueItem, string) (*unstructured.Unstructured, error)
 }
 
 type SSPClusterResourceItem struct {
@@ -96,6 +99,7 @@ type SSPQueueItem struct {
 	Cluster       string
 	ClusterUID    string
 	VCluster      string
+	Namespace     string
 	Subscription  string
 	ResourceGroup string
 	Region        string
@@ -105,6 +109,9 @@ type SSPQueueItem struct {
 	NodeCount     int
 	SpotLending   string
 	DequeuePolicy string
+	MachineTypes  string
+	MaxNodes      string
+	Capability    string
 	Timings       SSPQueueGetTimings
 }
 
@@ -165,6 +172,8 @@ type SSPQueueNodeUsageItem struct {
 	MemoryTotal          string
 	AcceleratorAllocated string
 	AcceleratorTotalText string
+	RDMAAllocated        string
+	RDMATotal            string
 	AcceleratorFree      int64
 	AcceleratorTotal     int64
 }
@@ -205,6 +214,10 @@ func NewSSPResourceService(clientset kubernetes.Interface, platformClient *platf
 
 func (s *SSPResourceService) SetQueueNodeClientResolver(resolver func(SSPQueueItem) (kubernetes.Interface, error)) {
 	s.queueNodeClientResolver = resolver
+}
+
+func (s *SSPResourceService) SetQueueRuntimeResolver(resolver func(context.Context, SSPQueueItem, string) (*unstructured.Unstructured, error)) {
+	s.queueRuntimeResolver = resolver
 }
 
 func (s *SSPResourceService) ListClusters(ctx context.Context, region string) (*SSPClusterListResult, error) {
@@ -390,23 +403,56 @@ func (s *SSPResourceService) GetWorkspace(ctx context.Context, identifier string
 	if err != nil {
 		return nil, err
 	}
-	item := s.workspaceItem(ctx, workspace)
-	queues, err := s.platform.ListSSPQueues(ctx, workspace)
-	if err != nil {
-		return nil, fmt.Errorf("list queues for workspace %s: %w", workspace.Name, err)
+	item := workspacePlatformItem(workspace)
+	queuesResult := asyncCall(ctx, func(ctx context.Context) ([]platform.SSPQueue, error) {
+		return s.platform.ListSSPQueues(ctx, workspace)
+	})
+	detailsResult := asyncCall(ctx, func(ctx context.Context) ([]platform.SSPQueueResourceDetails, error) {
+		return s.platform.ListSSPQueueResourcesForRegion(ctx, workspace.Region)
+	})
+	queues := <-queuesResult
+	if queues.Err != nil {
+		return nil, fmt.Errorf("list queues for workspace %s: %w", workspace.Name, queues.Err)
 	}
-	item.Queues = make([]SSPQueueItem, 0, len(queues))
-	for _, queue := range queues {
-		item.Queues = append(item.Queues, s.queueItem(ctx, workspace, queue, item.VCluster, false))
+	details := <-detailsResult
+	detailByIdentifier := make(map[string]platform.SSPQueueResourceDetails)
+	if details.Err == nil {
+		for _, detail := range details.Value {
+			if !strings.EqualFold(strings.TrimSpace(detail.ProfileName), strings.TrimSpace(workspace.ProfileName)) {
+				continue
+			}
+			for _, value := range []string{detail.Name, detail.UID} {
+				if value != "" {
+					detailByIdentifier[strings.ToLower(strings.TrimSpace(value))] = detail
+				}
+			}
+		}
 	}
+	item.Queues = make([]SSPQueueItem, 0, len(queues.Value))
+	for _, queue := range queues.Value {
+		queueItem := s.queueItem(ctx, workspace, queue, "-", false)
+		detail, ok := detailByIdentifier[strings.ToLower(firstNonEmpty(queue.UID, queue.Name))]
+		if !ok {
+			detail, ok = detailByIdentifier[strings.ToLower(queue.Name)]
+		}
+		if ok {
+			queueItem.Cluster = firstNonEmpty(detail.ClusterName, queueItem.Cluster)
+			queueItem.ClusterUID = firstNonEmpty(detail.ClusterUID, queueItem.ClusterUID)
+			queueItem.VCluster = firstNonEmpty(detail.VClusterName, queueItem.VCluster)
+			queueItem.WorkspaceUID = firstNonEmpty(detail.WorkspaceUID, queueItem.WorkspaceUID)
+			queueItem.Profile = firstNonEmpty(detail.ProfileName, queueItem.Profile)
+		}
+		item.Queues = append(item.Queues, queueItem)
+	}
+	s.resolveWorkspaceQueueNamespaces(ctx, workspace.Name, item.Queues)
 	sortSSPQueueItems(item.Queues)
 	return &item, nil
 }
 
-func (s *SSPResourceService) workspaceItem(ctx context.Context, workspace platform.SSPWorkspace) SSPWorkspaceItem {
-	item := SSPWorkspaceItem{
+func workspacePlatformItem(workspace platform.SSPWorkspace) SSPWorkspaceItem {
+	return SSPWorkspaceItem{
 		Name:          workspace.Name,
-		UID:           "-",
+		UID:           workspace.UID,
 		State:         workspace.State,
 		VCluster:      firstNonEmpty(workspace.ClusterName, workspace.ClusterUID),
 		Subscription:  workspace.Subscription,
@@ -416,6 +462,11 @@ func (s *SSPResourceService) workspaceItem(ctx context.Context, workspace platfo
 		CreatedAt:     formatSSPTime(workspace.CreateTime),
 		UpdatedAt:     formatSSPTime(workspace.UpdateTime),
 	}
+}
+
+func (s *SSPResourceService) workspaceItem(ctx context.Context, workspace platform.SSPWorkspace) SSPWorkspaceItem {
+	item := workspacePlatformItem(workspace)
+	item.UID = "-"
 	workspaceQueueUID, resolvedVC := s.resolveWorkspaceRuntime(ctx, workspace)
 	item.UID = workspaceQueueUID
 	if item.VCluster == "" {
@@ -424,100 +475,79 @@ func (s *SSPResourceService) workspaceItem(ctx context.Context, workspace platfo
 	return item
 }
 
-func (s *SSPResourceService) ListQueues(ctx context.Context, region string) (*SSPQueueListResult, error) {
-	resolvedRegion := s.resolveRegion(region)
-	workspaces, err := s.platform.ListSSPWorkspaces(ctx, resolvedRegion)
-	if err != nil {
-		return nil, fmt.Errorf("list SSP workspaces: %w", err)
+func (s *SSPResourceService) resolveWorkspaceQueueNamespaces(ctx context.Context, workspaceName string, queues []SSPQueueItem) {
+	type runtimeKey struct {
+		profile string
+		vc      string
+		region  string
 	}
-
-	profileNames := make([]string, 0)
-	seenProfiles := make(map[string]struct{})
-	for _, workspace := range workspaces {
-		name := strings.TrimSpace(workspace.ProfileName)
-		if name == "" {
+	keys := make([]runtimeKey, 0)
+	seen := make(map[runtimeKey]struct{})
+	for _, queue := range queues {
+		key := runtimeKey{profile: strings.TrimSpace(queue.Profile), vc: strings.TrimSpace(queue.VCluster), region: strings.TrimSpace(queue.Region)}
+		if key.profile == "" || key.vc == "" || key.vc == "-" {
 			continue
 		}
-		if _, exists := seenProfiles[name]; !exists {
-			seenProfiles[name] = struct{}{}
-			profileNames = append(profileNames, name)
-		}
-	}
-	type resourceLoad struct {
-		items []platform.SSPQueueResourceDetails
-		err   error
-	}
-	loads := boundedMap(ctx, profileNames, 4, func(ctx context.Context, profileName string) resourceLoad {
-		items, queryErr := s.platform.ListSSPQueueResources(ctx, profileName, resolvedRegion)
-		return resourceLoad{items: items, err: queryErr}
-	})
-
-	items := make([]SSPQueueItem, 0)
-	mappedWorkspaces := make(map[string]struct{})
-	for _, load := range loads {
-		if load.err != nil {
+		if _, exists := seen[key]; exists {
 			continue
 		}
-		for _, details := range load.items {
-			candidates := likelyQueueWorkspaces(details.Name, workspaces)
-			matched := candidates[:0]
-			for _, workspace := range candidates {
-				if strings.EqualFold(workspace.ProfileName, details.ProfileName) {
-					matched = append(matched, workspace)
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	type namespaceLoad struct {
+		key        runtimeKey
+		namespaces []corev1.Namespace
+	}
+	loads := boundedMap(ctx, keys, 6, func(ctx context.Context, key runtimeKey) namespaceLoad {
+		namespaces, err := s.platform.ListKubernetesNamespacesForProfile(ctx, key.profile, key.vc)
+		if err != nil && s.queueNodeClientResolver != nil {
+			client, clientErr := s.queueNodeClientResolver(SSPQueueItem{Profile: key.profile, VCluster: key.vc, Region: key.region})
+			if clientErr == nil {
+				if list, listErr := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{ResourceVersion: "0"}); listErr == nil {
+					namespaces = list.Items
 				}
 			}
-			if len(matched) != 1 {
-				continue
-			}
-			workspace := matched[0]
-			items = append(items, queueItemFromResource(workspace, details))
-			mappedWorkspaces[sspWorkspaceKey(workspace)] = struct{}{}
 		}
+		return namespaceLoad{key: key, namespaces: namespaces}
+	})
+	namespacesByRuntime := make(map[runtimeKey][]corev1.Namespace, len(loads))
+	for _, load := range loads {
+		namespacesByRuntime[load.key] = load.namespaces
 	}
+	for index := range queues {
+		key := runtimeKey{profile: strings.TrimSpace(queues[index].Profile), vc: strings.TrimSpace(queues[index].VCluster), region: strings.TrimSpace(queues[index].Region)}
+		queues[index].Namespace = findWorkspaceNamespace(namespacesByRuntime[key], workspaceName, queues[index].Workspace)
+	}
+}
 
-	remaining := make([]platform.SSPWorkspace, 0, len(workspaces))
-	for _, workspace := range workspaces {
-		if _, mapped := mappedWorkspaces[sspWorkspaceKey(workspace)]; !mapped {
-			remaining = append(remaining, workspace)
+func findWorkspaceNamespace(namespaces []corev1.Namespace, names ...string) string {
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || name == "-" {
+			continue
+		}
+		for _, namespace := range namespaces {
+			if strings.EqualFold(strings.TrimSpace(namespace.Labels[sspWorkspaceNameLabel]), name) {
+				return namespace.Name
+			}
 		}
 	}
-	if len(remaining) > 0 {
-		fallback, fallbackErr := s.listQueuesForWorkspaces(ctx, remaining)
-		if fallbackErr != nil && len(items) == 0 {
-			return nil, fallbackErr
-		}
-		if fallback != nil {
-			items = append(items, fallback.Items...)
-		}
+	return "-"
+}
+
+func (s *SSPResourceService) ListQueues(ctx context.Context, region string) (*SSPQueueListResult, error) {
+	resolvedRegion := s.resolveRegion(region)
+	details, err := s.platform.ListSSPQueueResourcesForRegion(ctx, resolvedRegion)
+	if err != nil {
+		return nil, fmt.Errorf("list SSP queue resources: %w", err)
+	}
+	items := make([]SSPQueueItem, 0, len(details))
+	for _, detail := range details {
+		items = append(items, queueItemFromResourceDetails(detail))
 	}
 	items = deduplicateSSPQueueItems(items)
 	sortSSPQueueItems(items)
 	return &SSPQueueListResult{Items: items}, nil
-}
-
-func queueItemFromResource(workspace platform.SSPWorkspace, details platform.SSPQueueResourceDetails) SSPQueueItem {
-	return SSPQueueItem{
-		Name:          details.Name,
-		UID:           details.UID,
-		State:         details.State,
-		Type:          details.Type,
-		Workspace:     workspace.Name,
-		WorkspaceUID:  workspace.UID,
-		Cluster:       details.ClusterName,
-		ClusterUID:    details.ClusterUID,
-		VCluster:      firstNonEmpty(details.VClusterName, workspace.ClusterName, workspace.ClusterUID),
-		Subscription:  firstNonEmpty(details.Subscription, workspace.Subscription),
-		ResourceGroup: firstNonEmpty(details.ResourceGroup, workspace.ResourceGroup),
-		Region:        firstNonEmpty(details.Region, workspace.Region),
-		Profile:       firstNonEmpty(details.ProfileName, workspace.ProfileName),
-		CreatedAt:     formatSSPTime(details.CreateTime),
-		UpdatedAt:     formatSSPTime(details.UpdateTime),
-		NodeCount:     len(details.NodeNames),
-	}
-}
-
-func sspWorkspaceKey(workspace platform.SSPWorkspace) string {
-	return strings.ToLower(strings.Join([]string{workspace.ProfileName, workspace.Subscription, workspace.Name}, "|"))
 }
 
 func deduplicateSSPQueueItems(items []SSPQueueItem) []SSPQueueItem {
@@ -593,6 +623,9 @@ func (s *SSPResourceService) GetQueue(ctx context.Context, identifier string, re
 			}
 			item.Timings.DetailLookup = time.Since(detailStartedAt)
 		}
+		if includeDetails {
+			s.enrichQueueRuntimeDetails(ctx, &item)
+		}
 		item.Timings.Total = time.Since(startedAt)
 		return &item, nil
 	}
@@ -617,6 +650,9 @@ func (s *SSPResourceService) GetQueue(ctx context.Context, identifier string, re
 		}
 		item.Timings.DetailLookup = time.Since(detailStartedAt)
 	}
+	if includeDetails {
+		s.enrichQueueRuntimeDetails(ctx, item)
+	}
 	item.Timings.Total = time.Since(startedAt)
 	return item, nil
 }
@@ -626,10 +662,92 @@ func queueDetailReasons(details platform.SSPQueueResourceDetails, includeDetails
 	if details.SpotLending == nil {
 		reasons = append(reasons, "spot-lending")
 	}
-	if includeDetails && !details.NodeCountKnown {
-		reasons = append(reasons, "node-count")
+	if includeDetails {
+		if details.NodeCountKnown {
+			reasons = append(reasons, "full-details")
+		} else {
+			reasons = append(reasons, "node-count")
+		}
 	}
 	return reasons
+}
+
+func (s *SSPResourceService) enrichQueueRuntimeDetails(ctx context.Context, item *SSPQueueItem) {
+	if err := s.ensureQueuePlatformLocation(ctx, item); err != nil || item.VCluster == "" || item.VCluster == "-" {
+		return
+	}
+	queueNames := []string{item.Name}
+	if item.UID != "" && item.UID != "-" {
+		queueNames = append([]string{"ssp-" + strings.TrimPrefix(item.UID, "ssp-")}, queueNames...)
+	}
+	for _, queueName := range queueNames {
+		queue, err := s.platform.GetVolcanoQueueForProfile(ctx, item.Profile, item.VCluster, queueName)
+		if err != nil && s.queueRuntimeResolver != nil {
+			queue, err = s.queueRuntimeResolver(ctx, *item, queueName)
+		}
+		if err != nil {
+			continue
+		}
+		item.Capability = formatQueueCapability(nestedStringMap(queue.Object, "spec", "capability"))
+		item.MachineTypes, item.MaxNodes = parseQueueMaxNodes(queue.GetAnnotations()["resource.compute.sensecore.cn/queue-max-node-num"])
+		break
+	}
+	if item.MachineTypes != "" {
+		return
+	}
+	nodes, err := s.platformQueueNodes(ctx, item)
+	if err != nil {
+		return
+	}
+	machineTypes := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, node := range nodes {
+		machineType := strings.TrimSpace(node.MachineType)
+		key := strings.ToLower(machineType)
+		if machineType == "" || key == "-" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		machineTypes = append(machineTypes, machineType)
+	}
+	sort.Strings(machineTypes)
+	item.MachineTypes = strings.Join(machineTypes, ", ")
+}
+
+func formatQueueCapability(capability map[string]string) string {
+	if len(capability) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(capability))
+	for key := range capability {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", strings.ToUpper(key), capability[key]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func parseQueueMaxNodes(value string) (string, string) {
+	var limits map[string]any
+	if json.Unmarshal([]byte(strings.TrimSpace(value)), &limits) != nil || len(limits) == 0 {
+		return "-", "-"
+	}
+	keys := make([]string, 0, len(limits))
+	for key := range limits {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", key, limits[key]))
+	}
+	return strings.Join(keys, ", "), strings.Join(parts, ", ")
 }
 
 func queueItemFromResourceDetails(details platform.SSPQueueResourceDetails) SSPQueueItem {
@@ -944,6 +1062,33 @@ func (s *SSPResourceService) GetQueueNodeUsage(ctx context.Context, identifier s
 	if queueUsesSharedVCNodes(*queue) {
 		return s.getSharedVCQueueNodeUsage(ctx, queue)
 	}
+	var kubernetesNodesResult <-chan asyncResult[[]corev1.Node]
+	var kubernetesPodsResult <-chan asyncResult[[]corev1.Pod]
+	if strings.TrimSpace(queue.VCluster) != "" && strings.TrimSpace(queue.VCluster) != "-" {
+		var nodeClient kubernetes.Interface
+		if s.queueNodeClientResolver != nil {
+			nodeClient, _ = s.queueNodeClientResolver(*queue)
+		}
+		if nodeClient != nil {
+			kubernetesNodesResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Node, error) {
+				list, err := nodeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{ResourceVersion: "0"})
+				return list.Items, err
+			})
+			kubernetesPodsResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Pod, error) {
+				list, err := nodeClient.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+					FieldSelector: "status.phase!=Succeeded,status.phase!=Failed",
+				})
+				return list.Items, err
+			})
+		} else {
+			kubernetesNodesResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Node, error) {
+				return s.platform.ListKubernetesNodesForProfile(ctx, queue.Profile, queue.VCluster)
+			})
+			kubernetesPodsResult = asyncCall(ctx, func(ctx context.Context) ([]corev1.Pod, error) {
+				return s.platform.ListActivePodsForProfile(ctx, queue.Profile, queue.VCluster, "")
+			})
+		}
+	}
 	nodes, err := s.platformQueueNodes(ctx, queue)
 	if err != nil {
 		return nil, err
@@ -954,6 +1099,7 @@ func (s *SSPResourceService) GetQueueNodeUsage(ctx context.Context, identifier s
 		cpuAllocated, cpuTotal, _ := sspQueueNodeResource(node, "CPU")
 		memoryAllocated, memoryTotal, _ := sspQueueNodeResource(node, "MEMORY")
 		acceleratorAllocated, acceleratorTotal, acceleratorFree := sspQueueNodeResource(node, "DEVICE")
+		rdmaAllocated, rdmaTotal, _ := sspQueueNodeRDMAResource(node)
 		items = append(items, SSPQueueNodeUsageItem{
 			HostName:             nodeItems[index].HostName,
 			HostIP:               strings.TrimSpace(node.HostIP),
@@ -964,9 +1110,18 @@ func (s *SSPResourceService) GetQueueNodeUsage(ctx context.Context, identifier s
 			MemoryTotal:          memoryTotal,
 			AcceleratorAllocated: acceleratorAllocated,
 			AcceleratorTotalText: acceleratorTotal,
+			RDMAAllocated:        rdmaAllocated,
+			RDMATotal:            rdmaTotal,
 			AcceleratorFree:      int64(firstSSPResourceNumber(acceleratorFree)),
 			AcceleratorTotal:     int64(firstSSPResourceNumber(acceleratorTotal)),
 		})
+	}
+	if kubernetesNodesResult != nil && kubernetesPodsResult != nil {
+		kubernetesNodes := <-kubernetesNodesResult
+		kubernetesPods := <-kubernetesPodsResult
+		if kubernetesNodes.Err == nil && kubernetesPods.Err == nil {
+			applyKubernetesQueueNodeRDMAUsage(items, kubernetesNodes.Value, kubernetesPods.Value)
+		}
 	}
 	sort.Slice(items, func(i, j int) bool { return strings.ToLower(items[i].HostIP) < strings.ToLower(items[j].HostIP) })
 	queue.NodeCount = len(nodes)
@@ -1003,11 +1158,24 @@ func queueNodeUsageItemsFromVC(items []VCNodeResourceUsageItem) []SSPQueueNodeUs
 			MemoryTotal:          item.Usage.Usage.Total.Memory,
 			AcceleratorAllocated: item.Usage.Usage.Allocated.Device,
 			AcceleratorTotalText: item.Usage.Usage.Total.Device,
+			RDMAAllocated:        item.RDMAAllocated,
+			RDMATotal:            item.RDMATotal,
 			AcceleratorFree:      int64(firstSSPResourceNumber(item.Usage.Usage.Available.Device)),
 			AcceleratorTotal:     int64(firstSSPResourceNumber(item.Usage.Usage.Total.Device)),
 		})
 	}
 	return result
+}
+
+func applyKubernetesQueueNodeRDMAUsage(items []SSPQueueNodeUsageItem, nodes []corev1.Node, pods []corev1.Pod) {
+	usages := kubernetesNodeRDMAUsage(nodes, pods)
+	for index := range items {
+		usage, ok := lookupNodeRDMAUsage(usages, items[index].HostName, items[index].HostIP)
+		if !ok {
+			continue
+		}
+		items[index].RDMAAllocated, items[index].RDMATotal = rdmaUsageStrings(usage)
+	}
 }
 
 func (s *SSPResourceService) resolveQueueForNodes(ctx context.Context, identifier string, region string) (*SSPQueueItem, error) {
@@ -1262,6 +1430,16 @@ func (s *SSPResourceService) queueNodeListItems(ctx context.Context, nodes []pla
 func sspQueueNodeResource(node platform.SSPQueueNode, resourceType string) (allocated string, total string, unallocated string) {
 	for _, summary := range node.SummaryData {
 		if strings.EqualFold(strings.TrimSpace(summary.ResourceType), strings.TrimSpace(resourceType)) {
+			return strings.TrimSpace(summary.Allocated), strings.TrimSpace(summary.Total), strings.TrimSpace(summary.Unallocated)
+		}
+	}
+	return "", "", ""
+}
+
+func sspQueueNodeRDMAResource(node platform.SSPQueueNode) (allocated string, total string, unallocated string) {
+	for _, summary := range node.SummaryData {
+		resourceType := strings.ToLower(strings.TrimSpace(summary.ResourceType))
+		if isRDMAResourceName(resourceType) || strings.Contains(resourceType, "hca") {
 			return strings.TrimSpace(summary.Allocated), strings.TrimSpace(summary.Total), strings.TrimSpace(summary.Unallocated)
 		}
 	}
