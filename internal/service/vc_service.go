@@ -83,6 +83,20 @@ type VCNodeRemoveResult struct {
 	acnUIDs      []string
 }
 
+type VCNodeAddResult struct {
+	ClusterName string
+	ClusterUID  string
+	ProfileName string
+	Nodes       []VCNodeListItem
+	RequestURL  string
+	Payload     string
+	Result      string
+
+	subscription string
+	region       string
+	acnUIDs      []string
+}
+
 type VCResourceUsageResult struct {
 	ClusterName string
 	ClusterUID  string
@@ -677,6 +691,81 @@ func (s *VCService) PrepareNodeRemove(ctx context.Context, clusterIdentifier str
 	}, nil
 }
 
+func (s *VCService) PrepareNodeAdd(ctx context.Context, clusterIdentifier string, nodeIdentifiers []string) (*VCNodeAddResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required")
+	}
+	cluster, err := s.Get(ctx, clusterIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(cluster.Subscription) == "" {
+		return nil, fmt.Errorf("cannot determine subscription id for vc %q", cluster.Name)
+	}
+	if strings.TrimSpace(cluster.Tenant) == "" || cluster.Tenant == "-" {
+		return nil, fmt.Errorf("cannot determine platform profile for vc %q", cluster.Name)
+	}
+
+	nodes, err := s.vcClient.ListAssignableAIComputeNodesForProfile(ctx, cluster.Tenant)
+	if err != nil {
+		return nil, fmt.Errorf("list candidate acn nodes for vc %s: %w", cluster.Name, err)
+	}
+	selected, err := resolveVCNodesForAddition(nodeIdentifiers, nodes, cluster.Name, cluster.Subscription, cluster.Region)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]VCNodeListItem, 0, len(selected))
+	acnUIDs := make([]string, 0, len(selected))
+	for _, node := range selected {
+		items = append(items, vcNodeListItemFromAIComputeNode(node))
+		acnUIDs = append(acnUIDs, strings.TrimSpace(node.UID))
+	}
+	requestURL, payload, err := s.vcClient.BuildAIComputeNodeAddRequest(cluster.Tenant, cluster.Subscription, cluster.Region, cluster.Name, acnUIDs)
+	if err != nil {
+		return nil, err
+	}
+	payloadJSON, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal node addition payload: %w", err)
+	}
+	return &VCNodeAddResult{
+		ClusterName: cluster.Name, ClusterUID: cluster.UID, ProfileName: cluster.Tenant,
+		Nodes: items, RequestURL: requestURL, Payload: string(payloadJSON), Result: "pending confirmation",
+		subscription: cluster.Subscription, region: cluster.Region, acnUIDs: acnUIDs,
+	}, nil
+}
+
+func (s *VCService) ApplyNodeAdd(ctx context.Context, result *VCNodeAddResult) error {
+	if s == nil || s.vcClient == nil {
+		return fmt.Errorf("platform client is required")
+	}
+	if result == nil || len(result.acnUIDs) == 0 {
+		return fmt.Errorf("prepared vc node addition is required")
+	}
+	_, err := s.vcClient.AddAIComputeNodesToVirtualCluster(ctx, result.ProfileName, result.subscription, result.region, result.ClusterName, result.acnUIDs)
+	if err != nil {
+		return fmt.Errorf("add nodes to vc %s: %w", result.ClusterName, err)
+	}
+
+	result.Result = "submitted, awaiting binding"
+	bound, err := s.vcClient.ListVirtualClusterNodes(ctx, result.ProfileName, result.subscription, result.region, result.ClusterName)
+	if err != nil {
+		return nil
+	}
+	boundUIDs := make(map[string]struct{}, len(bound))
+	for _, node := range bound {
+		boundUIDs[normalizeVCNodeLookupKey(node.UID)] = struct{}{}
+	}
+	for _, uid := range result.acnUIDs {
+		if _, ok := boundUIDs[normalizeVCNodeLookupKey(uid)]; !ok {
+			return nil
+		}
+	}
+	result.Result = "added"
+	return nil
+}
+
 func (s *VCService) ApplyNodeRemove(ctx context.Context, result *VCNodeRemoveResult) error {
 	if s == nil || s.vcClient == nil {
 		return fmt.Errorf("platform client is required")
@@ -738,6 +827,79 @@ func vcNodeListItemFromPlatform(node platform.VirtualClusterNode) VCNodeListItem
 		),
 		NodePool: strings.TrimSpace(node.Properties.NodePoolName),
 	}
+}
+
+func vcNodeListItemFromAIComputeNode(node platform.AIComputeNode) VCNodeListItem {
+	return vcNodeListItemFromPlatform(platform.VirtualClusterNode{AIComputeNode: node, Kind: "ACN"})
+}
+
+func resolveVCNodesForAddition(identifiers []string, nodes []platform.AIComputeNode, targetVC, targetSubscription, targetRegion string) ([]platform.AIComputeNode, error) {
+	if len(identifiers) == 0 {
+		return nil, fmt.Errorf("at least one node name, ip, or uid is required")
+	}
+	targetSubscription = normalizeVCNodeLookupKey(targetSubscription)
+	targetRegion = normalizeVCNodeLookupKey(targetRegion)
+	eligible := make([]platform.AIComputeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if tenant := normalizeVCNodeLookupKey(node.TenantID); tenant != "" && targetSubscription != "" && tenant != targetSubscription {
+			continue
+		}
+		zone := normalizeVCNodeLookupKey(node.Zone)
+		if targetRegion != "" && zone != "" && zone != targetRegion && !strings.HasPrefix(zone, targetRegion) {
+			continue
+		}
+		state := strings.ToUpper(strings.TrimSpace(node.State))
+		if state != "RUNNING" && state != "ERROR" {
+			continue
+		}
+		eligible = append(eligible, node)
+	}
+
+	selected := make([]platform.AIComputeNode, 0, len(identifiers))
+	seenUIDs := make(map[string]struct{}, len(identifiers))
+	for _, identifier := range identifiers {
+		identifier = strings.TrimSpace(identifier)
+		if identifier == "" {
+			continue
+		}
+		matches := make([]platform.AIComputeNode, 0, 1)
+		for _, node := range eligible {
+			for _, candidate := range []string{node.UID, node.ID, node.Name, node.DisplayName, node.Properties.HostName, node.Properties.HostIP} {
+				if strings.EqualFold(strings.TrimSpace(candidate), identifier) {
+					matches = append(matches, node)
+					break
+				}
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return nil, fmt.Errorf("node %q was not found among RUNNING/ERROR ACN nodes in subscription %s region %s", identifier, targetSubscription, targetRegion)
+		case 1:
+			node := matches[0]
+			boundVC := strings.TrimSpace(node.Properties.VirtualClusterName)
+			if strings.EqualFold(boundVC, strings.TrimSpace(targetVC)) {
+				return nil, fmt.Errorf("node %q is already present in vc %s", identifier, targetVC)
+			}
+			if boundVC != "" {
+				return nil, fmt.Errorf("node %q already belongs to vc %s; remove it first instead of moving it implicitly", identifier, boundVC)
+			}
+			uid := strings.TrimSpace(node.UID)
+			if uid == "" {
+				return nil, fmt.Errorf("node %q has no acn uid and cannot be added", identifier)
+			}
+			key := normalizeVCNodeLookupKey(uid)
+			if _, exists := seenUIDs[key]; !exists {
+				selected = append(selected, node)
+				seenUIDs[key] = struct{}{}
+			}
+		default:
+			return nil, fmt.Errorf("node %q matched multiple ACN nodes in subscription %s region %s", identifier, targetSubscription, targetRegion)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("at least one node name, ip, or uid is required")
+	}
+	return selected, nil
 }
 
 func resolveVCNodesForRemoval(identifiers []string, nodes []VCNodeListItem) ([]VCNodeListItem, error) {

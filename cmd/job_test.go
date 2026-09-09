@@ -38,17 +38,17 @@ func TestFormatJobGetTimeoutError(t *testing.T) {
 	}
 }
 
-func TestECPJobListHelpIncludesClusterUsage(t *testing.T) {
+func TestATEListHelpIncludesClusterUsage(t *testing.T) {
 	cmd := newECPJobListCmd()
 	if cmd.RunE == nil {
-		t.Fatal("ecp job list does not implement the global list entrypoint")
+		t.Fatal("ate list does not implement the global list entrypoint")
 	}
 	for _, flag := range []string{"state", "limit", "all", "all-status"} {
 		if cmd.Flags().Lookup(flag) == nil {
-			t.Fatalf("ecp job list is missing --%s", flag)
+			t.Fatalf("ate list is missing --%s", flag)
 		}
 	}
-	for _, fragment := range []string{"全部 VC", "ecp job list -s pending", "ecp job list --all-status -A"} {
+	for _, fragment := range []string{"全部 VC", "ate list -s pending", "ate list --all-status -A"} {
 		help := strings.Join([]string{cmd.Short, cmd.Long, cmd.Example}, "\n")
 		if !strings.Contains(help, fragment) {
 			t.Fatalf("ecp job list help does not contain %q:\n%s", fragment, help)
@@ -61,8 +61,8 @@ func TestECPJobListHelpIncludesClusterUsage(t *testing.T) {
 	help := strings.Join([]string{clusterCmd.Short, clusterCmd.Long, clusterCmd.Example}, "\n")
 	for _, fragment := range []string{
 		"任务列表",
-		"ecp job list cluster vc-a3-intern-delivery",
-		"ecp job list cluster -a running",
+		"ate list cluster vc-a3-intern-delivery",
+		"ate list cluster -a running",
 		"--all-status",
 	} {
 		if !strings.Contains(help, fragment) {

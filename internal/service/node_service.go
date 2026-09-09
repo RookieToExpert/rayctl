@@ -56,6 +56,7 @@ type NodeListItem struct {
 	ClusterUID  string
 	QueueName   string
 	Tenant      string
+	Model       string
 }
 
 type NodeMutationResult struct {

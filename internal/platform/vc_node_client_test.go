@@ -98,6 +98,46 @@ func TestRemoveAIComputeNodesFromVirtualClusterPayload(t *testing.T) {
 	}
 }
 
+func TestAddAIComputeNodesToVirtualClusterPayload(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost {
+			return nil, fmt.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/compute/ecp/v1/subscriptions/sub-id/resourceGroups/default/regions/cn-pj-01/virtualClusters/vc-test/AIComputeNodes:add" {
+			return nil, fmt.Errorf("unexpected path %s", r.URL.Path)
+		}
+		var payload struct {
+			SubscriptionName   string   `json:"subscription_name"`
+			ResourceGroupName  string   `json:"resource_group_name"`
+			Region             string   `json:"region"`
+			VirtualClusterName string   `json:"virtual_cluster_name"`
+			ACNUIDs            []string `json:"acn_uids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		if payload.SubscriptionName != "sub-id" || payload.ResourceGroupName != "default" || payload.Region != "cn-pj-01" || payload.VirtualClusterName != "vc-test" {
+			t.Errorf("unexpected payload: %#v", payload)
+		}
+		if len(payload.ACNUIDs) != 2 || payload.ACNUIDs[0] != "uid-1" || payload.ACNUIDs[1] != "uid-2" {
+			t.Errorf("acn_uids = %#v", payload.ACNUIDs)
+		}
+		return jsonHTTPResponse(r, `{"ai_compute_nodes":[{"uid":"uid-1"},{"uid":"uid-2"}]}`), nil
+	})}
+	client := &VirtualClusterClient{
+		accessKey: "ak", secretKey: "sk", baseURL: "https://example.test",
+		resourceGroup: "default", region: "cn-pj-01", httpClient: httpClient,
+	}
+
+	added, err := client.AddAIComputeNodesToVirtualCluster(context.Background(), "", "sub-id", "cn-pj-01", "vc-test", []string{"uid-1", "uid-2"})
+	if err != nil {
+		t.Fatalf("AddAIComputeNodesToVirtualCluster() error = %v", err)
+	}
+	if len(added) != 2 {
+		t.Fatalf("added = %d, want 2", len(added))
+	}
+}
+
 func jsonHTTPResponse(request *http.Request, body string) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusOK,

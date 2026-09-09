@@ -19,7 +19,7 @@ import (
 )
 
 // newNodeCmd 创建 "node" 命令，它是所有节点相关操作的父命令。
-// 该命令本身不执行具体业务，而是作为入口包含诸如 get, describe, cordon 等子命令。
+// 该命令本身不执行具体业务，而是作为入口包含诸如 list, get, cordon 等子命令。
 func newNodeCmd() *cobra.Command {
 	// 定义 node 基础命令及其描述
 	nodeCmd := &cobra.Command{
@@ -30,7 +30,7 @@ func newNodeCmd() *cobra.Command {
 	// 注册子命令：获取节点列表
 	nodeCmd.AddCommand(newNodeListCmd())
 	// 注册子命令：查看节点详情 (包含资源与运行中的 Pod)
-	nodeCmd.AddCommand(newNodeDescribeCmd())
+	nodeCmd.AddCommand(newNodeGetCmd())
 	// 注册子命令：执行固定的节点健康检查。
 	nodeCmd.AddCommand(newNodeHealthCmd())
 	// 注册子命令：封锁节点 (标记不可调度并添加维修标签)
@@ -122,6 +122,11 @@ func newNodeListCmd() *cobra.Command {
 							if !ok {
 								continue
 							}
+							nodes[i].Model = firstNonEmptyString(
+								strings.TrimSpace(item.Properties.Model),
+								strings.TrimSpace(item.Properties.AcceleratorModel),
+								strings.TrimSpace(item.Properties.MachineType),
+							)
 							if strings.TrimSpace(nodes[i].Tenant) == "" {
 								nodes[i].Tenant = strings.TrimSpace(item.ProfileName)
 							}
@@ -203,12 +208,7 @@ func newNodeListCmd() *cobra.Command {
 
 			// 4. 调用 output 包将节点列表以表格等形式打印到终端
 			// output.PrintNodeList 定义于 pkg/output/table.go
-			showProdRole := true
-			switch strings.ToLower(strings.TrimSpace(target)) {
-			case "ecp", "ecs":
-				showProdRole = false
-			}
-			output.PrintNodeList(displayNodes, resolvedSelector, len(nodes), start, end, displayLimit, showProdRole, longOutput)
+			output.PrintNodeList(displayNodes, resolvedSelector, len(nodes), start, end, displayLimit, true, longOutput)
 			return nil
 		},
 	}
@@ -302,21 +302,20 @@ func limitNodes(nodes []service.NodeListItem, limit int) ([]service.NodeListItem
 	return nodes[:limit], 1, limit
 }
 
-// newNodeDescribeCmd 创建 "describe" 子命令，用于展示特定节点的详细状态。
+// newNodeGetCmd 创建 "get" 子命令，用于展示特定节点的详细状态。
 // 包括该节点的可分配资源量 (Allocatable) 以及当前正在该节点上运行的 Pod 列表。
-func newNodeDescribeCmd() *cobra.Command {
+func newNodeGetCmd() *cobra.Command {
 	var debugTiming bool
 
-	// 定义 describe 命令的结构和行为
+	// 定义 get 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:     "describe <node-name> [node-name...]",
-		Aliases: []string{"check"},
-		Short:   "快速检查节点上的 vcluster Pod 和资源占用，支持节点名或 IP",
-		Long:    "快速检查节点上的 vcluster Pod 和资源占用，支持直接传入节点名，或传入形如 10.140.214.222 的节点 IP。",
+		Use:   "get <node-name> [node-name...]",
+		Short: "快速查看节点上的 vcluster Pod 和资源占用，支持节点名或 IP",
+		Long:  "快速查看节点上的 vcluster Pod 和资源占用，支持直接传入节点名，或传入形如 10.140.214.222 的节点 IP。",
 		Example: strings.Join([]string{
-			"  rayctl node check host-10-140-214-222",
-			"  rayctl node check 10.140.214.222",
-			"  rayctl node check 10.140.214.222 10.140.214.223",
+			"  rayctl node get host-10-140-214-222",
+			"  rayctl node get 10.140.214.222",
+			"  rayctl node get 10.140.214.222 10.140.214.223",
 		}, "\n"),
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -359,7 +358,7 @@ func newNodeDescribeCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for node check")
+	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for node get")
 
 	return cmd
 }

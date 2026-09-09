@@ -116,6 +116,7 @@ func newVCNodeCmd() *cobra.Command {
 	}
 	nodeCmd.AddCommand(newVCNodeListCmd())
 	nodeCmd.AddCommand(newVCNodeUsageCmd())
+	nodeCmd.AddCommand(newVCNodeAddCmd())
 	nodeCmd.AddCommand(newVCNodeRemoveCmd())
 	return nodeCmd
 }
@@ -223,6 +224,63 @@ func newVCNodeUsageCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用资源的节点；加速节点按卡数，CPU-only 节点按 CPU/内存")
+	return cmd
+}
+
+func newVCNodeAddCmd() *cobra.Command {
+	var dryRun bool
+	var yes bool
+	var longOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "add <vc-name-or-uid> <node-name-or-ip-or-uid>...",
+		Short: "向指定 VC 添加一个或多个 ACN 节点",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+			vcService := service.NewVCService(vcClient)
+			result, err := vcService.PrepareNodeAdd(cmd.Context(), args[0], args[1:])
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				result.Result = "dry-run"
+			}
+			output.PrintVCNodeAddResult(result, longOutput, dryRun)
+			if dryRun {
+				return nil
+			}
+
+			if !yes {
+				nodeLabels := make([]string, 0, len(result.Nodes))
+				for _, node := range result.Nodes {
+					nodeLabels = append(nodeLabels, firstNonEmptyString(node.HostName, node.HostIP, node.Name, node.UID))
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "将向 VC %s 添加 %d 个节点（%s），是否继续? (y/N): ", result.ClusterName, len(result.Nodes), strings.Join(nodeLabels, ", "))
+				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if err != nil {
+					return err
+				}
+				if !isYes(line) {
+					fmt.Fprintln(cmd.OutOrStdout(), "已取消添加。")
+					return nil
+				}
+			}
+
+			if err := vcService.ApplyNodeAdd(cmd.Context(), result); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "添加请求完成: vc=%s nodes=%d result=%s\n", result.ClusterName, len(result.Nodes), result.Result)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只展示目标节点和请求 payload，不真正添加")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 ACN 名称和 ACN UID")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "跳过确认直接添加")
 	return cmd
 }
 

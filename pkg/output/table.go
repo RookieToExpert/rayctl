@@ -65,67 +65,34 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 	}
 
 	rows := make([][]string, 0, len(nodes))
-	noWrapCells := make([][2]int, 0, len(nodes)*8)
+	noWrapCells := make([][2]int, 0, len(nodes)*7)
 	for rowIdx, node := range nodes {
-		row := []string{
-			node.Name,
-			yesNoFromReady(node.Ready),
-			yesNo(node.Schedulable == "Yes"),
-		}
-		if showProdRole {
-			row = append(row, emptyDash(node.ProdRole))
-		}
-		row = append(row,
-			yesNo(node.Repair),
-			node.InternalIP,
-			node.ClusterName,
-			emptyDash(node.QueueName),
-		)
 		if longOutput {
-			row = append(row, emptyDash(node.Tenant))
+			rows = append(rows, []string{node.Name, emptyDash(node.Model), emptyDash(node.QueueName), emptyDash(node.Tenant)})
+		} else {
+			rows = append(rows, []string{
+				node.Name,
+				yesNoFromReady(node.Ready),
+				yesNo(node.Schedulable == "Yes"),
+				yesNo(node.Repair),
+				emptyDash(node.ProdRole),
+				node.InternalIP,
+				node.ClusterName,
+			})
 		}
-		rows = append(rows, row)
-		for colIdx := range row {
+		for colIdx := range rows[len(rows)-1] {
 			noWrapCells = append(noWrapCells, [2]int{rowIdx, colIdx})
 		}
 	}
 
-	headers := []string{"HOST", "RDY", "SCH"}
-	maxWidths := []int{22, 5, 5}
-	minWidths := []int{19, 5, 5}
-	if showProdRole {
-		headers = append(headers, "PROD")
-		maxWidths = append(maxWidths, 18)
-		minWidths = append(minWidths, 11)
-	}
-	headers = append(headers, "RPR", "IP", "CLUSTERNAME", "QUEUE")
-	maxWidths = append(maxWidths, 3, 16, 40, 48)
-	minWidths = append(minWidths, 3, 14, 16, 18)
+	_ = showProdRole // Kept for API compatibility; PROD is part of the default view.
+	headers := []string{"HOSTNAME", "RDY", "SCH", "RPR", "PROD", "IP", "CLUSTER"}
+	maxWidths := []int{24, 5, 5, 3, 18, 16, 40}
+	minWidths := []int{19, 5, 5, 3, 11, 14, 16}
 	if longOutput {
-		if showProdRole {
-			maxWidths[0] = 19
-			minWidths[0] = 19
-			maxWidths[3] = 11
-			minWidths[3] = 11
-			maxWidths[5] = 14
-			minWidths[5] = 14
-			maxWidths[6] = 18
-			minWidths[6] = 12
-			maxWidths[7] = 32
-			minWidths[7] = 18
-		} else {
-			maxWidths[0] = 19
-			minWidths[0] = 19
-			maxWidths[4] = 14
-			minWidths[4] = 14
-			maxWidths[5] = 18
-			minWidths[5] = 12
-			maxWidths[6] = 32
-			minWidths[6] = 18
-		}
-		headers = append(headers, "TENANT")
-		maxWidths = append(maxWidths, 12)
-		minWidths = append(minWidths, 8)
+		headers = []string{"HOSTNAME", "MODEL", "QUEUE", "TENANT"}
+		maxWidths = []int{24, 28, 48, 18}
+		minWidths = []int{19, 12, 18, 8}
 	}
 
 	printBoxTableWithOptions(
@@ -2026,6 +1993,33 @@ func PrintVCNodeRemoveResult(result *service.VCNodeRemoveResult, longOutput bool
 	)
 }
 
+func PrintVCNodeAddResult(result *service.VCNodeAddResult, longOutput bool, showPayload bool) {
+	if result == nil {
+		return
+	}
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		[][]string{
+			{"VC", emptyDash(result.ClusterName)},
+			{"VC UID", emptyDash(result.ClusterUID)},
+			{"PROFILE", emptyDash(result.ProfileName)},
+			{"NODE COUNT", strconv.Itoa(len(result.Nodes))},
+			{"RESULT", emptyDash(result.Result)},
+		},
+		[]int{14, 72},
+		tableOptions{minWidths: []int{10, 24}},
+	)
+	fmt.Fprintln(os.Stdout)
+	printVCNodeItems(result.Nodes, longOutput, true)
+	if !showPayload {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions([]string{"REQUEST URL"}, [][]string{{emptyDash(result.RequestURL)}}, []int{140}, tableOptions{minWidths: []int{40}})
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions([]string{"PAYLOAD"}, [][]string{{emptyDash(result.Payload)}}, []int{120}, tableOptions{minWidths: []int{40}})
+}
+
 func printVCNodeItems(items []service.VCNodeListItem, longOutput bool, includeACNName bool) {
 	rows := make([][]string, 0, maxInt(1, len(items)))
 	noWrapCells := make([][2]int, 0, maxInt(1, len(items))*4)
@@ -2277,6 +2271,55 @@ func PrintAFSDetail(result *service.AFSListItem) {
 		{"UPDATED", emptyDash(result.UpdatedAt)},
 		{"RID", emptyDash(result.RID)},
 	})
+}
+
+func PrintAFSCreatePlan(plan *service.AFSCreatePlan, showPayload bool) {
+	if captureJSON(plan) {
+		return
+	}
+	if plan == nil {
+		return
+	}
+	printResourceDetail([][]string{
+		{"AFS", emptyDash(plan.Name)},
+		{"SIZE", emptyDash(plan.Size)},
+		{"STORAGE CLASS", emptyDash(plan.StorageClass)},
+		{"ZONE", emptyDash(plan.Zone)},
+		{"PROFILE", emptyDash(plan.Profile)},
+		{"BILLING", fmt.Sprintf("%d years, auto-renew=%t", plan.Years, plan.AutoRenew)},
+		{"SKU", emptyDash(firstNonEmptyOutput(plan.SKUName, plan.SKU))},
+	})
+	if !showPayload {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions([]string{"REQUEST URL"}, [][]string{{emptyDash(plan.RequestURL)}}, []int{140}, tableOptions{minWidths: []int{40}})
+	fmt.Fprintln(os.Stdout)
+	printBoxTableWithOptions([]string{"PAYLOAD"}, [][]string{{emptyDash(plan.Payload)}}, []int{120}, tableOptions{minWidths: []int{40}})
+}
+
+func PrintAFSCreateResult(result *service.AFSCreateResult) {
+	if captureJSON(result) {
+		return
+	}
+	if result == nil {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	rows := [][]string{
+		{"AFS", emptyDash(result.Name)},
+		{"UID", emptyDash(result.UID)},
+		{"STATE", emptyDash(result.State)},
+		{"ORDER ID", emptyDash(result.OrderID)},
+		{"ORDER STATE", emptyDash(result.OrderState)},
+		{"AMOUNT", emptyDash(result.Amount)},
+		{"PAYMENT", emptyDash(result.PaymentResult)},
+		{"PROFILE", emptyDash(result.Profile)},
+	}
+	if strings.TrimSpace(result.Warning) != "" {
+		rows = append(rows, []string{"WARNING", result.Warning})
+	}
+	printResourceDetail(rows)
 }
 
 func printResourceDetail(rows [][]string) {

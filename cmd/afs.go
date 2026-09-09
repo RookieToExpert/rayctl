@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -20,8 +22,69 @@ func newAFSCmd() *cobra.Command {
 
 	afsCmd.AddCommand(newAFSListCmd())
 	afsCmd.AddCommand(newAFSGetCmd())
+	afsCmd.AddCommand(newAFSCreateCmd())
 	afsCmd.AddCommand(newAFSCheckCmd())
 	return afsCmd
+}
+
+func newAFSCreateCmd() *cobra.Command {
+	var size string
+	var storageClass string
+	var zone string
+	var displayName string
+	var years int
+	var autoRenew bool
+	var dryRun bool
+	var yes bool
+
+	cmd := &cobra.Command{
+		Use:   "create <afs-name>",
+		Short: "创建个人 AFS 并完成订单支付",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, ok := platform.NewVirtualClusterClientFromEnv()
+			if !ok {
+				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			}
+			createService := service.NewAFSCreateService(client)
+			plan, err := createService.Prepare(cmd.Context(), service.AFSCreateOptions{
+				Name: args[0], DisplayName: displayName, Size: size, StorageClass: storageClass,
+				Zone: zone, Years: years, AutoRenew: autoRenew,
+			})
+			if err != nil {
+				return err
+			}
+			output.PrintAFSCreatePlan(plan, dryRun)
+			if dryRun {
+				return nil
+			}
+			if !yes {
+				fmt.Fprintf(cmd.OutOrStdout(), "将创建 AFS %s（%s，%s，%s，%d 年），是否继续? (y/N): ", plan.Name, plan.Size, plan.StorageClass, plan.Zone, plan.Years)
+				line, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if readErr != nil {
+					return readErr
+				}
+				if !isYes(strings.TrimSpace(line)) {
+					fmt.Fprintln(cmd.OutOrStdout(), "已取消创建。")
+					return nil
+				}
+			}
+			result, createErr := createService.Apply(cmd.Context(), plan)
+			if result != nil {
+				output.PrintAFSCreateResult(result)
+			}
+			return createErr
+		},
+	}
+	cmd.Flags().StringVar(&size, "size", "1TB", "AFS 容量，例如 500GB、1TB、2PB")
+	cmd.Flags().StringVar(&storageClass, "class", "OCEANSTOR", "存储类型")
+	cmd.Flags().StringVar(&zone, "zone", "", "可用区；默认使用当前 region 的 a 可用区")
+	cmd.Flags().StringVar(&displayName, "display-name", "", "显示名称")
+	cmd.Flags().IntVar(&years, "years", 10, "预付费年限")
+	cmd.Flags().BoolVar(&autoRenew, "auto-renew", true, "是否自动续费")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "查询匹配的 SKU 并展示请求，不创建资源")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "跳过确认直接创建并支付订单")
+	return cmd
 }
 
 func newAFSListCmd() *cobra.Command {

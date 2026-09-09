@@ -20,8 +20,7 @@ func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
 		{name: "user get", root: newUserCmd(), path: []string{"get"}},
 		{name: "aid get", root: newAIDCmd(), path: []string{"get"}},
 		{name: "ait get", root: newAITCmd(), path: []string{"get"}},
-		{name: "job get", root: newJobCmd(), path: []string{"get"}},
-		{name: "ecp job get", root: newECPCmd(), path: []string{"job", "get"}},
+		{name: "ate get", root: newATECmd(), path: []string{"get"}},
 		{name: "auth check user", root: newAuthCmd(), path: []string{"check", "user"}},
 		{name: "auth check groups", root: newAuthCmd(), path: []string{"check", "groups"}},
 		{name: "auth check afs", root: newAuthCmd(), path: []string{"check", "afs"}},
@@ -96,8 +95,7 @@ func TestResourceListCommandsRejectIdentifiers(t *testing.T) {
 		{name: "policy list", root: newPolicyCmd(), path: []string{"list"}},
 		{name: "aid list", root: newAIDCmd(), path: []string{"list"}},
 		{name: "ait list", root: newAITCmd(), path: []string{"list"}},
-		{name: "job list", root: newJobCmd(), path: []string{"list"}},
-		{name: "ecp job list", root: newECPCmd(), path: []string{"job", "list"}},
+		{name: "ate list", root: newATECmd(), path: []string{"list"}},
 	}
 
 	for _, tt := range tests {
@@ -123,7 +121,6 @@ func TestAITAndAIDListExposeCatalogFilters(t *testing.T) {
 	}{
 		{name: "ait", root: newAITCmd()},
 		{name: "aid", root: newAIDCmd()},
-		{name: "job", root: newJobCmd()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			command, _, err := tt.root.Find([]string{"list"})
@@ -149,15 +146,15 @@ func TestAITAndAIDListExposeCatalogFilters(t *testing.T) {
 	}
 }
 
-func TestSSPPrimaryAndLegacyCommandStructure(t *testing.T) {
-	jobGet, _, err := newJobCmd().Find([]string{"get"})
+func TestAITAndATECommandStructure(t *testing.T) {
+	jobGet, _, err := newAITCmd().Find([]string{"get"})
 	if err != nil {
 		t.Fatalf("find primary job get: %v", err)
 	}
 	if jobGet.Flags().Lookup("workspace") == nil {
 		t.Fatal("primary job get does not expose SSP workspace flag")
 	}
-	jobList, _, err := newJobCmd().Find([]string{"list"})
+	jobList, _, err := newAITCmd().Find([]string{"list"})
 	if err != nil {
 		t.Fatalf("find primary job list: %v", err)
 	}
@@ -167,14 +164,14 @@ func TestSSPPrimaryAndLegacyCommandStructure(t *testing.T) {
 		}
 	}
 
-	ecpGet, _, err := newECPCmd().Find([]string{"job", "get"})
+	ecpGet, _, err := newATECmd().Find([]string{"get"})
 	if err != nil {
 		t.Fatalf("find ecp job get: %v", err)
 	}
 	if ecpGet.Flags().Lookup("debug-timing") == nil {
 		t.Fatal("ecp job get does not expose ECP timing flag")
 	}
-	ecpList, _, err := newECPCmd().Find([]string{"job", "list"})
+	ecpList, _, err := newATECmd().Find([]string{"list"})
 	if err != nil {
 		t.Fatalf("find ecp job list: %v", err)
 	}

@@ -24,20 +24,15 @@ import (
 
 const defaultJobGetTimeout = 10 * time.Second
 
-func newJobCmd() *cobra.Command {
-	jobCmd := &cobra.Command{
-		Use:   "job",
-		Short: "查询 SSP TrainingJob",
+func newATECmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ate",
+		Short: "查询或创建 ATE VCJob",
 	}
-
-	getCmd := newSSPJobGetCmd()
-	jobCmd.AddCommand(getCmd)
-	jobCmd.AddCommand(newAITListCmd())
-
-	legacyCreate := newJobCreateCmd()
-	legacyCreate.Deprecated = "这是 ECP VCJob 创建入口，请使用 rayctl ecp job create"
-	jobCmd.AddCommand(legacyCreate)
-	return jobCmd
+	cmd.AddCommand(newECPJobListCmd())
+	cmd.AddCommand(newECPJobGetCmd())
+	cmd.AddCommand(newJobCreateCmd())
+	return cmd
 }
 
 func newECPJobGetCmd() *cobra.Command {
@@ -47,11 +42,11 @@ func newECPJobGetCmd() *cobra.Command {
 
 	getCmd := &cobra.Command{
 		Use:   "get <job-name-or-pod-name-or-uid> [job-name-or-pod-name-or-uid...]",
-		Short: "并行查询一个或多个旧 ECP VCJob",
-		Long:  "根据任务名、Pod 名或 UID 并行查询一个或多个旧 ECP VCJob 详情。",
+		Short: "并行查询一个或多个 ATE VCJob",
+		Long:  "根据任务名、Pod 名或 UID 并行查询一个或多个 ATE VCJob 详情。",
 		Example: strings.Join([]string{
-			"  rayctl ecp job get example-job",
-			"  rayctl ecp job get job-a job-b job-c",
+			"  rayctl ate get example-job",
+			"  rayctl ate get job-a job-b job-c",
 		}, "\n"),
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(getCmd *cobra.Command, args []string) error {
@@ -87,15 +82,15 @@ func newECPJobListCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "列出当前环境中的旧 ECP VCJob",
+		Short: "列出当前环境中的 ATE VCJob",
 		Long: "默认汇总当前 profile 全部 VC 中的 Running/Pending 任务。\n" +
 			"使用 --all-status 查询已结束的历史任务；使用 cluster 子命令仅查询指定 VC。",
 		Example: strings.Join([]string{
-			"  rayctl ecp job list",
-			"  rayctl ecp job list -s pending",
-			"  rayctl ecp job list -n 100",
-			"  rayctl ecp job list --all-status -A",
-			"  rayctl ecp job list cluster vc-a3-intern-delivery",
+			"  rayctl ate list",
+			"  rayctl ate list -s pending",
+			"  rayctl ate list -n 100",
+			"  rayctl ate list --all-status -A",
+			"  rayctl ate list cluster vc-a3-intern-delivery",
 		}, "\n"),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -158,11 +153,11 @@ func newJobListClusterCmd() *cobra.Command {
 		Long: "查看指定 VC 分区下的任务列表，默认只显示 Running 和 Pending 任务。\n" +
 			"可用 pending、running 或 active 过滤状态；使用 --all-status 显示包括已结束任务在内的全部状态；使用 -a 查询当前租户全部 VC。",
 		Example: strings.Join([]string{
-			"  rayctl ecp job list cluster vc-a3-intern-delivery",
-			"  rayctl ecp job list cluster vc-a3-intern-delivery pending",
-			"  rayctl ecp job list cluster vc-a3-intern-delivery --all-status",
-			"  rayctl ecp job list cluster -a",
-			"  rayctl ecp job list cluster -a running",
+			"  rayctl ate list cluster vc-a3-intern-delivery",
+			"  rayctl ate list cluster vc-a3-intern-delivery pending",
+			"  rayctl ate list cluster vc-a3-intern-delivery --all-status",
+			"  rayctl ate list cluster -a",
+			"  rayctl ate list cluster -a running",
 		}, "\n"),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if allVC {

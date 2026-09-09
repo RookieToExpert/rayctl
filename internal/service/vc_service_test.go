@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -68,6 +69,39 @@ func TestResolveVCNodesForRemovalRejectsPartialOrForeignNode(t *testing.T) {
 	nodes := []VCNodeListItem{{UID: "uid-1", HostIP: "10.0.0.1"}}
 	if _, err := resolveVCNodesForRemoval([]string{"10.0.0"}, nodes); err == nil {
 		t.Fatal("expected partial identifier to be rejected")
+	}
+}
+
+func TestResolveVCNodesForAddition(t *testing.T) {
+	newNode := func(uid, host, ip, tenant, zone, state, vc string) platform.AIComputeNode {
+		node := platform.AIComputeNode{UID: uid, TenantID: tenant, Zone: zone, State: state}
+		node.Properties.HostName = host
+		node.Properties.HostIP = ip
+		node.Properties.VirtualClusterName = vc
+		return node
+	}
+	nodes := []platform.AIComputeNode{
+		newNode("uid-free", "host-free", "10.0.0.1", "sub-id", "cn-pj-01a", "RUNNING", ""),
+		newNode("uid-target", "host-target", "10.0.0.2", "sub-id", "cn-pj-01a", "RUNNING", "vc-target"),
+		newNode("uid-other", "host-other", "10.0.0.3", "sub-id", "cn-pj-01b", "ERROR", "vc-other"),
+		newNode("uid-wrong-region", "host-wrong-region", "10.0.0.4", "sub-id", "cn-pj-03a", "RUNNING", ""),
+	}
+
+	selected, err := resolveVCNodesForAddition([]string{"10.0.0.1", "uid-free"}, nodes, "vc-target", "sub-id", "cn-pj-01")
+	if err != nil {
+		t.Fatalf("resolveVCNodesForAddition() error = %v", err)
+	}
+	if len(selected) != 1 || selected[0].UID != "uid-free" {
+		t.Fatalf("selected = %#v", selected)
+	}
+	if _, err := resolveVCNodesForAddition([]string{"host-target"}, nodes, "vc-target", "sub-id", "cn-pj-01"); err == nil || !strings.Contains(err.Error(), "already present") {
+		t.Fatalf("target binding error = %v", err)
+	}
+	if _, err := resolveVCNodesForAddition([]string{"host-other"}, nodes, "vc-target", "sub-id", "cn-pj-01"); err == nil || !strings.Contains(err.Error(), "vc-other") {
+		t.Fatalf("other binding error = %v", err)
+	}
+	if _, err := resolveVCNodesForAddition([]string{"host-wrong-region"}, nodes, "vc-target", "sub-id", "cn-pj-01"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("region error = %v", err)
 	}
 }
 

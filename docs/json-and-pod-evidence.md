@@ -9,9 +9,9 @@ Examples:
 ```sh
 rayctl aid list -n 5 -o json
 rayctl aid get dev-example -l -o json
-rayctl job get job-example -l --no-image -o json
+rayctl ait get job-example -l --no-image -o json
 rayctl air job get infer-example -l -o json
-rayctl node describe host-example -o json
+rayctl node get host-example -o json
 rayctl queue list -o json
 rayctl auth check user example -o json
 ```

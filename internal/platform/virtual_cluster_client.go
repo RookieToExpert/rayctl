@@ -2365,12 +2365,19 @@ func (c *VirtualClusterClient) listStorageVolumeResourcesWithProfile(ctx context
 }
 
 func (c *VirtualClusterClient) listAIComputeNodesWithProfile(ctx context.Context, profile clientProfile) ([]AIComputeNode, error) {
+	return c.listAIComputeNodesWithProfileFilter(ctx, profile, "")
+}
+
+func (c *VirtualClusterClient) listAIComputeNodesWithProfileFilter(ctx context.Context, profile clientProfile, filter string) ([]AIComputeNode, error) {
 	skip := 0
 	result := make([]AIComputeNode, 0)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
 		u.Path = "/compute/ecp/v1/subscriptions/-/resourceGroups/-/zones/-/aiComputeNodes"
 		query := u.Query()
+		if strings.TrimSpace(filter) != "" {
+			query.Set("filter", filter)
+		}
 		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
 		query.Set("skip", fmt.Sprintf("%d", skip))
 		u.RawQuery = query.Encode()
@@ -2531,6 +2538,22 @@ func (c *VirtualClusterClient) ListAIComputeNodes(ctx context.Context) ([]AIComp
 	return nil, fmt.Errorf("no platform profile available")
 }
 
+func (c *VirtualClusterClient) ListAIComputeNodesForProfile(ctx context.Context, profileName string) ([]AIComputeNode, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listAIComputeNodesWithProfile(ctx, profile)
+}
+
+func (c *VirtualClusterClient) ListAssignableAIComputeNodesForProfile(ctx context.Context, profileName string) ([]AIComputeNode, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listAIComputeNodesWithProfileFilter(ctx, profile, `(state="RUNNING" OR state="ERROR")`)
+}
+
 func (c *VirtualClusterClient) ListVirtualClusterNodes(
 	ctx context.Context,
 	profileName string,
@@ -2663,6 +2686,40 @@ func (c *VirtualClusterClient) RemoveAIComputeNodesFromVirtualCluster(
 	return response.AIComputeNodes, nil
 }
 
+func (c *VirtualClusterClient) AddAIComputeNodesToVirtualCluster(
+	ctx context.Context,
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+	acnUIDs []string,
+) ([]AIComputeNode, error) {
+	reqURL, payload, profile, err := c.buildAIComputeNodeMutationRequest(profileName, subscriptionID, region, virtualClusterName, acnUIDs, "add")
+	if err != nil {
+		return nil, err
+	}
+
+	var response virtualClusterNodeRemoveResponse
+	if err := c.postJSONWithProfile(ctx, profile, reqURL, payload, &response); err != nil {
+		return nil, err
+	}
+	for i := range response.AIComputeNodes {
+		response.AIComputeNodes[i].ProfileName = profile.Name
+	}
+	return response.AIComputeNodes, nil
+}
+
+func (c *VirtualClusterClient) BuildAIComputeNodeAddRequest(
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+	acnUIDs []string,
+) (string, map[string]any, error) {
+	reqURL, payload, _, err := c.buildAIComputeNodeMutationRequest(profileName, subscriptionID, region, virtualClusterName, acnUIDs, "add")
+	return reqURL, payload, err
+}
+
 func (c *VirtualClusterClient) BuildAIComputeNodeRemoveRequest(
 	profileName string,
 	subscriptionID string,
@@ -2681,6 +2738,17 @@ func (c *VirtualClusterClient) buildAIComputeNodeRemoveRequest(
 	virtualClusterName string,
 	acnUIDs []string,
 ) (string, map[string]any, clientProfile, error) {
+	return c.buildAIComputeNodeMutationRequest(profileName, subscriptionID, region, virtualClusterName, acnUIDs, "remove")
+}
+
+func (c *VirtualClusterClient) buildAIComputeNodeMutationRequest(
+	profileName string,
+	subscriptionID string,
+	region string,
+	virtualClusterName string,
+	acnUIDs []string,
+	action string,
+) (string, map[string]any, clientProfile, error) {
 	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
 		return "", nil, clientProfile{}, fmt.Errorf("platform profile %q not found", profileName)
@@ -2689,7 +2757,7 @@ func (c *VirtualClusterClient) buildAIComputeNodeRemoveRequest(
 	region = firstNonEmpty(strings.TrimSpace(region), strings.TrimSpace(profile.Region))
 	virtualClusterName = strings.TrimSpace(virtualClusterName)
 	if subscriptionID == "" {
-		return "", nil, clientProfile{}, fmt.Errorf("subscription id is required for virtual cluster node removal")
+		return "", nil, clientProfile{}, fmt.Errorf("subscription id is required for virtual cluster node %s", action)
 	}
 	if virtualClusterName == "" {
 		return "", nil, clientProfile{}, fmt.Errorf("virtual cluster name is required")
@@ -2697,14 +2765,18 @@ func (c *VirtualClusterClient) buildAIComputeNodeRemoveRequest(
 	if len(acnUIDs) == 0 {
 		return "", nil, clientProfile{}, fmt.Errorf("at least one acn uid is required")
 	}
+	if action != "add" && action != "remove" {
+		return "", nil, clientProfile{}, fmt.Errorf("unsupported virtual cluster node action %q", action)
+	}
 
 	u, _ := url.Parse(profile.BaseURL)
 	u.Path = fmt.Sprintf(
-		"/compute/ecp/v1/subscriptions/%s/resourceGroups/%s/regions/%s/virtualClusters/%s/AIComputeNodes:remove",
+		"/compute/ecp/v1/subscriptions/%s/resourceGroups/%s/regions/%s/virtualClusters/%s/AIComputeNodes:%s",
 		subscriptionID,
 		profile.ResourceGroup,
 		region,
 		virtualClusterName,
+		action,
 	)
 	payload := map[string]any{
 		"subscription_name":    subscriptionID,
