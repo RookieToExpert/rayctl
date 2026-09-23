@@ -112,6 +112,7 @@ func (c *VirtualClusterClient) ListVPCResources(ctx context.Context) ([]VPCResou
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	resources := make([]VPCResource, 0)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
@@ -126,7 +127,7 @@ func (c *VirtualClusterClient) ListVPCResources(ctx context.Context) ([]VPCResou
 			return nil, err
 		}
 		resources = append(resources, payload.VPCs...)
-		if paginationComplete(pageToken, payload.NextPageToken, len(payload.VPCs)) {
+		if len(payload.VPCs) == 0 || !cursor.advance(payload.NextPageToken) {
 			break
 		}
 		pageToken = strings.TrimSpace(payload.NextPageToken)
@@ -141,6 +142,7 @@ func (c *VirtualClusterClient) ListSubnetResources(ctx context.Context) ([]Subne
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	resources := make([]SubnetResource, 0)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
@@ -156,7 +158,7 @@ func (c *VirtualClusterClient) ListSubnetResources(ctx context.Context) ([]Subne
 			return nil, err
 		}
 		resources = append(resources, payload.Subnets...)
-		if paginationComplete(pageToken, payload.NextPageToken, len(payload.Subnets)) {
+		if len(payload.Subnets) == 0 || !cursor.advance(payload.NextPageToken) {
 			break
 		}
 		pageToken = strings.TrimSpace(payload.NextPageToken)
@@ -171,6 +173,7 @@ func (c *VirtualClusterClient) ListNATGatewayResources(ctx context.Context) ([]N
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	resources := make([]NATGatewayResource, 0)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
@@ -186,7 +189,7 @@ func (c *VirtualClusterClient) ListNATGatewayResources(ctx context.Context) ([]N
 			return nil, err
 		}
 		resources = append(resources, payload.NATGateways...)
-		if paginationComplete(pageToken, payload.NextPageToken, len(payload.NATGateways)) {
+		if len(payload.NATGateways) == 0 || !cursor.advance(payload.NextPageToken) {
 			break
 		}
 		pageToken = strings.TrimSpace(payload.NextPageToken)
@@ -201,6 +204,7 @@ func (c *VirtualClusterClient) ListCurrentStorageVolumeResources(ctx context.Con
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	resources := make([]StorageVolumeResource, 0)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
@@ -219,15 +223,10 @@ func (c *VirtualClusterClient) ListCurrentStorageVolumeResources(ctx context.Con
 			payload.Resources[i].ProfileName = profile.Name
 		}
 		resources = append(resources, payload.Resources...)
-		if paginationComplete(pageToken, payload.NextPageToken, len(payload.Resources)) {
+		if len(payload.Resources) == 0 || !cursor.advance(payload.NextPageToken) {
 			break
 		}
 		pageToken = strings.TrimSpace(payload.NextPageToken)
 	}
 	return resources, nil
-}
-
-func paginationComplete(current string, next string, itemCount int) bool {
-	next = strings.TrimSpace(next)
-	return itemCount == 0 || next == "" || next == current
 }

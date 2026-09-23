@@ -1119,6 +1119,7 @@ func (c *VirtualClusterClient) ListSSPQueueResources(ctx context.Context, profil
 	result := make([]SSPQueueResourceDetails, 0)
 	seen := make(map[string]struct{})
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	for {
 		endpoint, _ := url.Parse(profile.BaseURL)
 		endpoint.Path = "/rmh/v1/resources:page"
@@ -1144,7 +1145,7 @@ func (c *VirtualClusterClient) ListSSPQueueResources(ctx context.Context, profil
 			}
 		}
 		next := strings.TrimSpace(payload.NextPageToken)
-		if next == "" || next == pageToken || len(payload.Resources) < pageSize {
+		if len(payload.Resources) < pageSize || !cursor.advance(next) {
 			break
 		}
 		pageToken = next

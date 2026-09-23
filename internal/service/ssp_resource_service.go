@@ -1086,6 +1086,9 @@ func (s *SSPResourceService) collectQueueNodes(ctx context.Context, kind string,
 		result, err := s.listQueueNodesForScope(ctx, &queue)
 		return loadResult{queue: queue, result: result, err: err}
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result := &SSPNodeScopeListResult{Kind: kind, Name: name}
 	itemByNode := make(map[string]int)
 	queueNamesByNode := make(map[string][]string)
@@ -1334,6 +1337,9 @@ func (s *SSPResourceService) GetWorkspaceNodeUsage(ctx context.Context, identifi
 		result, queryErr := s.getQueueNodeUsage(ctx, &queue)
 		return queueUsageResult{queue: queue, result: result, err: queryErr}
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result := &SSPWorkspaceNodeUsageResult{Workspace: *workspace}
 	queueUsages := make([]*SSPQueueNodeUsageResult, 0, len(loads))
 	var firstErr error

@@ -1779,6 +1779,7 @@ func escapeIAMFilterValue(value string) string {
 
 func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile clientProfile) ([]IAMUser, error) {
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	users := make([]IAMUser, 0)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
@@ -1797,7 +1798,7 @@ func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile 
 			break
 		}
 		users = append(users, payload.Users...)
-		if strings.TrimSpace(payload.NextPageToken) == "" || payload.NextPageToken == pageToken {
+		if !cursor.advance(payload.NextPageToken) {
 			break
 		}
 		pageToken = payload.NextPageToken
@@ -1981,6 +1982,7 @@ func (c *VirtualClusterClient) ListUserGroupsForProfile(ctx context.Context, pro
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	result := make([]IAMGroup, 0)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
@@ -2000,7 +2002,7 @@ func (c *VirtualClusterClient) ListUserGroupsForProfile(ctx context.Context, pro
 		}
 		result = append(result, payload.Groups...)
 		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if nextToken == "" || nextToken == pageToken {
+		if !cursor.advance(nextToken) {
 			break
 		}
 		pageToken = nextToken
@@ -2019,6 +2021,7 @@ func (c *VirtualClusterClient) ListGroupUsersForProfile(ctx context.Context, pro
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	result := make([]IAMUser, 0)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
@@ -2035,7 +2038,7 @@ func (c *VirtualClusterClient) ListGroupUsersForProfile(ctx context.Context, pro
 		}
 		result = append(result, payload.Users...)
 		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if len(payload.Users) == 0 || nextToken == "" || nextToken == pageToken || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) {
+		if len(payload.Users) == 0 || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) || !cursor.advance(nextToken) {
 			break
 		}
 		pageToken = nextToken
@@ -2045,6 +2048,7 @@ func (c *VirtualClusterClient) ListGroupUsersForProfile(ctx context.Context, pro
 
 func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile clientProfile) ([]IAMGroup, error) {
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	result := make([]IAMGroup, 0)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
@@ -2064,7 +2068,7 @@ func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile
 		}
 		result = append(result, payload.Groups...)
 		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if nextToken == "" || nextToken == pageToken {
+		if !cursor.advance(nextToken) {
 			break
 		}
 		pageToken = nextToken
@@ -2238,6 +2242,7 @@ func (c *VirtualClusterClient) ListIAMBindingPoliciesForSubjectsProfile(ctx cont
 
 func (c *VirtualClusterClient) listIAMBindingPoliciesWithProfile(ctx context.Context, profile clientProfile, filter string) ([]IAMBindingPolicy, error) {
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	result := make([]IAMBindingPolicy, 0)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
@@ -2262,6 +2267,9 @@ func (c *VirtualClusterClient) listIAMBindingPoliciesWithProfile(ctx context.Con
 
 		nextToken := strings.TrimSpace(payload.NextPageToken)
 		if nextToken != "" && nextToken != pageToken {
+			if !cursor.advance(nextToken) {
+				break
+			}
 			pageToken = nextToken
 			continue
 		}
@@ -2272,7 +2280,11 @@ func (c *VirtualClusterClient) listIAMBindingPoliciesWithProfile(ctx context.Con
 		if err != nil {
 			break
 		}
-		pageToken = strconv.Itoa(current + 1)
+		nextToken = strconv.Itoa(current + 1)
+		if !cursor.advance(nextToken) {
+			break
+		}
+		pageToken = nextToken
 	}
 	return result, nil
 }
@@ -2284,6 +2296,7 @@ func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo,
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	result := make([]IAMRoleInfo, 0)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
@@ -2311,6 +2324,9 @@ func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo,
 		result = append(result, roles...)
 		nextToken := strings.TrimSpace(payload.NextPageToken)
 		if nextToken != "" && nextToken != pageToken {
+			if !cursor.advance(nextToken) {
+				break
+			}
 			pageToken = nextToken
 			continue
 		}
@@ -2321,7 +2337,11 @@ func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo,
 		if err != nil {
 			break
 		}
-		pageToken = strconv.Itoa(current + 1)
+		nextToken = strconv.Itoa(current + 1)
+		if !cursor.advance(nextToken) {
+			break
+		}
+		pageToken = nextToken
 	}
 	return result, nil
 }
@@ -2337,6 +2357,7 @@ func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	result := make([]IAMRoleInfo, 0)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
@@ -2365,6 +2386,9 @@ func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string
 		result = append(result, roles...)
 		nextToken := strings.TrimSpace(payload.NextPageToken)
 		if nextToken != "" && nextToken != pageToken {
+			if !cursor.advance(nextToken) {
+				break
+			}
 			pageToken = nextToken
 			continue
 		}
@@ -2375,7 +2399,11 @@ func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string
 		if err != nil {
 			break
 		}
-		pageToken = strconv.Itoa(current + 1)
+		nextToken = strconv.Itoa(current + 1)
+		if !cursor.advance(nextToken) {
+			break
+		}
+		pageToken = nextToken
 	}
 	return result, nil
 }
@@ -2399,6 +2427,7 @@ func (c *VirtualClusterClient) FindIAMResourceScope(ctx context.Context, name st
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	for {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/authz/v1/services/rm/levels/resources/scopes"
@@ -2448,7 +2477,7 @@ func (c *VirtualClusterClient) FindIAMResourceScope(ctx context.Context, name st
 		}
 
 		nextPageToken := strings.TrimSpace(payload.NextPageToken)
-		if nextPageToken == "" || nextPageToken == pageToken || len(items) == 0 {
+		if len(items) == 0 || !cursor.advance(nextPageToken) {
 			break
 		}
 		pageToken = nextPageToken
@@ -2557,6 +2586,7 @@ func (c *VirtualClusterClient) DeleteIAMPolicy(ctx context.Context, policyID str
 
 func (c *VirtualClusterClient) listStorageVolumeResourcesWithProfile(ctx context.Context, profile clientProfile, zone string) ([]StorageVolumeResource, error) {
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	resources := make([]StorageVolumeResource, 0)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
@@ -2572,7 +2602,7 @@ func (c *VirtualClusterClient) listStorageVolumeResourcesWithProfile(ctx context
 			return nil, err
 		}
 		resources = append(resources, payload.Resources...)
-		if strings.TrimSpace(payload.NextPageToken) == "" {
+		if !cursor.advance(payload.NextPageToken) {
 			break
 		}
 		pageToken = payload.NextPageToken
@@ -2638,26 +2668,26 @@ func (c *VirtualClusterClient) ResolveUsernames(ctx context.Context, ids []strin
 	result := make(map[string]string, len(unique))
 	var lastErr error
 	success := false
-	remaining := append([]string(nil), unique...)
-	for _, profile := range c.orderedProfiles() {
-		if len(remaining) == 0 {
-			break
-		}
-		resolved, err := c.resolveUsernamesWithProfile(ctx, profile, remaining)
-		if err != nil {
-			lastErr = err
+	queries := queryProfiles(ctx, c.orderedProfiles(), func(ctx context.Context, profile clientProfile) (map[string]string, error) {
+		return c.resolveUsernamesWithProfile(ctx, profile, unique)
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, query := range queries {
+		if query.err != nil {
+			lastErr = query.err
 			continue
 		}
 		success = true
-		nextRemaining := make([]string, 0, len(remaining))
-		for _, id := range remaining {
-			if value, ok := resolved[id]; ok && strings.TrimSpace(value) != "" {
-				result[id] = value
+		for _, id := range unique {
+			if _, exists := result[id]; exists {
 				continue
 			}
-			nextRemaining = append(nextRemaining, id)
+			if value, ok := query.value[id]; ok && strings.TrimSpace(value) != "" {
+				result[id] = value
+			}
 		}
-		remaining = nextRemaining
 	}
 	if len(result) > 0 || success {
 		return result, nil
@@ -2690,27 +2720,27 @@ func (c *VirtualClusterClient) ResolveUserIDs(ctx context.Context, usernames []s
 	result := make(map[string]string, len(unique))
 	var lastErr error
 	success := false
-	remaining := append([]string(nil), unique...)
-	for _, profile := range c.orderedProfiles() {
-		if len(remaining) == 0 {
-			break
-		}
-		resolved, err := c.resolveUserIDsWithProfile(ctx, profile, remaining)
-		if err != nil {
-			lastErr = err
+	queries := queryProfiles(ctx, c.orderedProfiles(), func(ctx context.Context, profile clientProfile) (map[string]string, error) {
+		return c.resolveUserIDsWithProfile(ctx, profile, unique)
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, query := range queries {
+		if query.err != nil {
+			lastErr = query.err
 			continue
 		}
 		success = true
-		nextRemaining := make([]string, 0, len(remaining))
-		for _, username := range remaining {
+		for _, username := range unique {
 			key := strings.ToLower(strings.TrimSpace(username))
-			if id := strings.TrimSpace(resolved[key]); id != "" {
-				result[key] = id
+			if _, exists := result[key]; exists {
 				continue
 			}
-			nextRemaining = append(nextRemaining, username)
+			if id := strings.TrimSpace(query.value[key]); id != "" {
+				result[key] = id
+			}
 		}
-		remaining = nextRemaining
 	}
 	if len(result) > 0 || success {
 		return result, nil
@@ -2726,14 +2756,17 @@ func (c *VirtualClusterClient) ListAIComputeNodes(ctx context.Context) ([]AIComp
 	seen := make(map[string]struct{})
 	var lastErr error
 	success := false
-	for _, profile := range c.orderedProfiles() {
-		items, err := c.listAIComputeNodesWithProfile(ctx, profile)
-		if err != nil {
-			lastErr = err
+	queries := queryProfiles(ctx, c.orderedProfiles(), c.listAIComputeNodesWithProfile)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, query := range queries {
+		if query.err != nil {
+			lastErr = query.err
 			continue
 		}
 		success = true
-		for _, item := range items {
+		for _, item := range query.value {
 			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.ID), strings.TrimSpace(item.Properties.HostName), strings.TrimSpace(item.Properties.HostIP))
 			if key == "" {
 				continue
@@ -3201,7 +3234,7 @@ func (c *VirtualClusterClient) ListVolcanoJobMetadataForProfile(ctx context.Cont
 	}
 	req.Header.Set("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doPlatformRequest(c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", reqURL, err)
 	}
@@ -3245,7 +3278,7 @@ func (c *VirtualClusterClient) CountVolcanoJobsForProfile(ctx context.Context, p
 	}
 	req.Header.Set("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doPlatformRequest(c.httpClient, req)
 	if err != nil {
 		return 0, fmt.Errorf("request %s: %w", reqURL, err)
 	}
@@ -3702,15 +3735,20 @@ func (c *VirtualClusterClient) ListStorageVolumeResources(ctx context.Context, z
 	seen := make(map[string]struct{})
 	var lastErr error
 	success := false
-	for _, profile := range c.orderedProfiles() {
-		items, err := c.listStorageVolumeResourcesWithProfile(ctx, profile, zone)
-		if err != nil {
-			lastErr = err
+	queries := queryProfiles(ctx, c.orderedProfiles(), func(ctx context.Context, profile clientProfile) ([]StorageVolumeResource, error) {
+		return c.listStorageVolumeResourcesWithProfile(ctx, profile, zone)
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, query := range queries {
+		if query.err != nil {
+			lastErr = query.err
 			continue
 		}
 		success = true
-		for _, item := range items {
-			item.ProfileName = profile.Name
+		for _, item := range query.value {
+			item.ProfileName = query.profile.Name
 			key := firstNonEmpty(strings.TrimSpace(item.ID), strings.TrimSpace(item.RID), strings.TrimSpace(item.Name))
 			if key == "" {
 				continue
@@ -3814,6 +3852,7 @@ func (c *VirtualClusterClient) FindResourceByName(ctx context.Context, name stri
 
 func (c *VirtualClusterClient) findResourceByNameWithProfile(ctx context.Context, profile clientProfile, name string, kindSet map[string]struct{}) (*StorageVolumeResource, error) {
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
 		u.Path = "/rmh/v1/resources:page"
@@ -3841,7 +3880,7 @@ func (c *VirtualClusterClient) findResourceByNameWithProfile(ctx context.Context
 		}
 
 		nextPageToken := strings.TrimSpace(payload.NextPageToken)
-		if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
+		if len(payload.Resources) == 0 || !cursor.advance(nextPageToken) {
 			break
 		}
 		pageToken = nextPageToken
@@ -3878,6 +3917,7 @@ func (c *VirtualClusterClient) findResourceByUIDWithProfiles(ctx context.Context
 	var lastErr error
 	for _, profile := range profiles {
 		pageToken := "1"
+		cursor := newPageCursor(pageToken)
 		for {
 			u, _ := url.Parse(profile.BaseURL)
 			u.Path = "/rmh/v1/resources:page"
@@ -3905,7 +3945,7 @@ func (c *VirtualClusterClient) findResourceByUIDWithProfiles(ctx context.Context
 			}
 
 			nextPageToken := strings.TrimSpace(payload.NextPageToken)
-			if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
+			if len(payload.Resources) == 0 || !cursor.advance(nextPageToken) {
 				break
 			}
 			pageToken = nextPageToken
@@ -3977,6 +4017,7 @@ func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragment(ctx cont
 
 func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragmentWithProfile(ctx context.Context, profile clientProfile, field string, fragment string) (*StorageVolumeResource, error) {
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	for {
 		u, _ := url.Parse(profile.BaseURL)
 		u.Path = "/rmh/v1/resources:page"
@@ -4008,7 +4049,7 @@ func (c *VirtualClusterClient) findStorageVolumeResourceByFieldFragmentWithProfi
 		}
 
 		nextPageToken := strings.TrimSpace(payload.NextPageToken)
-		if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) == 0 {
+		if len(payload.Resources) == 0 || !cursor.advance(nextPageToken) {
 			break
 		}
 		pageToken = nextPageToken
@@ -4861,7 +4902,7 @@ func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clie
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doPlatformRequest(c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", reqURL, err)
 	}

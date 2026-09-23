@@ -52,6 +52,7 @@ func (c *VirtualClusterClient) FindSSPWorkspaceForProfile(ctx context.Context, p
 	}
 
 	pageToken := "1"
+	cursor := newPageCursor(pageToken)
 	for {
 		endpoint, _ := url.Parse(profile.BaseURL)
 		endpoint.Path = "/rmh/v1/resources:page"
@@ -81,7 +82,7 @@ func (c *VirtualClusterClient) FindSSPWorkspaceForProfile(ctx context.Context, p
 			}
 		}
 		next := strings.TrimSpace(payload.NextPageToken)
-		if next == "" || next == pageToken || len(payload.Resources) == 0 {
+		if len(payload.Resources) == 0 || !cursor.advance(next) {
 			break
 		}
 		pageToken = next

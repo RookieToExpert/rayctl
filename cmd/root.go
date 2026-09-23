@@ -56,5 +56,8 @@ func Execute() error {
 
 func ExecuteContext(ctx context.Context) error {
 	resetRequestedProcessExitCode()
-	return rootCmd.ExecuteContext(ctx)
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
