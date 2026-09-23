@@ -3,6 +3,9 @@ package service
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"rayctl/internal/platform"
 )
 
@@ -44,5 +47,19 @@ func TestAIRGatewayItemBuildsExternalEndpoint(t *testing.T) {
 func TestAIRLooksLikeUUID(t *testing.T) {
 	if !airLooksLikeUUID("5abab46b-513d-4b1e-b4cd-7b462d259a22") || airLooksLikeUUID("infer-demo") {
 		t.Fatal("airLooksLikeUUID returned unexpected result")
+	}
+}
+
+func TestSetAIRNamespacesUsesPodMapping(t *testing.T) {
+	pods := []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "vcluster-host-ns",
+		Annotations: map[string]string{
+			"vcluster.loft.sh/object-namespace": "workspace-queue-uid",
+		},
+	}}}
+	var namespace, hostNamespace string
+	setAIRNamespaces(&namespace, &hostNamespace, pods)
+	if namespace != "workspace-queue-uid" || hostNamespace != "vcluster-host-ns" {
+		t.Fatalf("namespaces = %q / %q", namespace, hostNamespace)
 	}
 }

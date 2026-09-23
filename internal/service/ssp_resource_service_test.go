@@ -76,6 +76,37 @@ func TestMatchSSPQueueAcceptsVolcanoQueueName(t *testing.T) {
 	}
 }
 
+func TestSSPClusterQueueItemsUsesAuthoritativeQueueData(t *testing.T) {
+	cluster := SSPClusterItem{
+		Name:          "cluster-a3",
+		UID:           "cluster-uid",
+		VCluster:      "vc-a3",
+		Subscription:  "subscription-uid",
+		ResourceGroup: "default",
+		Region:        "cn-pj-01",
+		Profile:       "ailabdev",
+	}
+	queue := platform.SSPQueue{
+		UID:           "queue-uid",
+		Name:          "queue-d-reserved-a3-frontier",
+		State:         "RUNNING",
+		Type:          "EXCLUSIVE",
+		CreateTime:    "2026-09-10T13:16:11+08:00",
+		WorkspaceName: "ws-d-a3-frontier",
+	}
+	queue.Properties.Workspace.UID = "workspace-uid"
+	queue.Properties.NodeStatus.Total = 5
+
+	items := sspClusterQueueItems(cluster, []platform.SSPQueue{queue})
+	if len(items) != 1 {
+		t.Fatalf("sspClusterQueueItems() returned %d items", len(items))
+	}
+	item := items[0]
+	if item.State != "RUNNING" || item.Workspace != "ws-d-a3-frontier" || item.NodeCount != 5 || item.Cluster != "cluster-a3" {
+		t.Fatalf("unexpected queue item: %#v", item)
+	}
+}
+
 func TestQueueNodeListItemUsesNodeLabels(t *testing.T) {
 	node := corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
@@ -212,18 +243,27 @@ func TestQueueDetailReasons(t *testing.T) {
 		includeDetails bool
 		want           string
 	}{
-		{name: "fast path", details: platform.SSPQueueResourceDetails{SpotLending: &enabled, NodeCountKnown: true}},
-		{name: "default fills missing lending", details: platform.SSPQueueResourceDetails{NodeCountKnown: true}, want: "spot-lending"},
-		{name: "default ignores missing node count", details: platform.SSPQueueResourceDetails{SpotLending: &enabled}},
-		{name: "long loads runtime detail", details: platform.SSPQueueResourceDetails{SpotLending: &enabled, NodeCountKnown: true}, includeDetails: true, want: "full-details"},
-		{name: "long fills missing node count", details: platform.SSPQueueResourceDetails{SpotLending: &enabled}, includeDetails: true, want: "node-count"},
-		{name: "long fills both", details: platform.SSPQueueResourceDetails{}, includeDetails: true, want: "spot-lending,node-count"},
+		{name: "fast path", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled, NodeCountKnown: true}},
+		{name: "missing workspace", details: platform.SSPQueueResourceDetails{SpotLending: &enabled, NodeCountKnown: true}, want: "workspace"},
+		{name: "default fills missing lending", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", NodeCountKnown: true}, want: "spot-lending"},
+		{name: "default ignores missing node count", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled}},
+		{name: "long loads runtime detail", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled, NodeCountKnown: true}, includeDetails: true, want: "full-details"},
+		{name: "long fills missing node count", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled}, includeDetails: true, want: "node-count"},
+		{name: "long fills both", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo"}, includeDetails: true, want: "spot-lending,node-count"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := strings.Join(queueDetailReasons(test.details, test.includeDetails), ","); got != test.want {
 				t.Fatalf("queueDetailReasons() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestQueueItemFromResourceDetailsDoesNotGuessWorkspace(t *testing.T) {
+	details := platform.SSPQueueResourceDetails{Name: "queue-d-reserved-a3-infra-2-online"}
+	item := queueItemFromResourceDetails(details)
+	if item.Workspace != "" {
+		t.Fatalf("Workspace = %q, want empty until queue detail resolves the real workspace", item.Workspace)
 	}
 }
 
@@ -312,6 +352,39 @@ func TestFilterFreeQueueNodesSupportsCPUOnlyNodes(t *testing.T) {
 
 	if len(result.Items) != 2 || result.Items[0].HostName != "cpu-free" || result.Items[1].HostName != "gpu-free" {
 		t.Fatalf("items = %#v", result.Items)
+	}
+}
+
+func TestMergeWorkspaceNodeUsageItemsDeduplicatesSharedNodes(t *testing.T) {
+	queueA := &SSPQueueNodeUsageResult{
+		Queue: SSPQueueItem{Name: "queue-elastic-a"},
+		Items: []SSPQueueNodeUsageItem{{HostName: "host-10-0-0-1", HostIP: "10.0.0.1", CPUTotal: "16"}},
+	}
+	queueB := &SSPQueueNodeUsageResult{
+		Queue: SSPQueueItem{Name: "queue-elastic-b"},
+		Items: []SSPQueueNodeUsageItem{
+			{HostName: "host-10-0-0-1", HostIP: "10.0.0.1", CPUTotal: "16"},
+			{HostName: "host-10-0-0-2", HostIP: "10.0.0.2", CPUTotal: "32"},
+		},
+	}
+
+	items := mergeWorkspaceNodeUsageItems([]*SSPQueueNodeUsageResult{queueA, queueB})
+	if len(items) != 2 {
+		t.Fatalf("merged items = %#v", items)
+	}
+	if items[0].Queues != "queue-elastic-a, queue-elastic-b" {
+		t.Fatalf("merged queues = %q", items[0].Queues)
+	}
+}
+
+func TestFilterFreeWorkspaceNodesUsesQueueSemantics(t *testing.T) {
+	result := &SSPWorkspaceNodeUsageResult{Items: []SSPQueueNodeUsageItem{
+		{HostName: "free", CPUAllocated: "8", CPUTotal: "16", MemoryAllocated: "16GiB", MemoryTotal: "32GiB"},
+		{HostName: "full", CPUAllocated: "16", CPUTotal: "16", MemoryAllocated: "16GiB", MemoryTotal: "32GiB"},
+	}}
+	result.FilterFreeNodes()
+	if len(result.Items) != 1 || result.Items[0].HostName != "free" {
+		t.Fatalf("filtered workspace items = %#v", result.Items)
 	}
 }
 

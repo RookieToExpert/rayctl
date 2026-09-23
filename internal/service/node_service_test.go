@@ -238,3 +238,67 @@ func TestDescribeKeepsUserJobAndFiltersSystemWorkloads(t *testing.T) {
 		t.Fatalf("CPUUsage = %q, want 8/0", result.CPUUsage)
 	}
 }
+
+func TestDescribeECSNodeIncludesVisibleVMWorkloads(t *testing.T) {
+	clientset := fake.NewSimpleClientset(
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "host-ecs",
+				Labels: map[string]string{prodRoleLabelKey: "ecs"},
+			},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("255900m"),
+				corev1.ResourceMemory: resource.MustParse("100Gi"),
+			}},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "ecs-user",
+				Name:      "virt-launcher-ecs-demo",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "VirtualMachineInstance",
+					Name: "ecs-demo",
+				}},
+			},
+			Spec: corev1.PodSpec{
+				NodeName: "host-ecs",
+				Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("16015m"),
+					corev1.ResourceMemory: resource.MustParse("64Gi"),
+				}}}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "infra",
+				Name:      "virt-handler",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "DaemonSet",
+					Name: "virt-handler",
+				}},
+			},
+			Spec: corev1.PodSpec{
+				NodeName: "host-ecs",
+				Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				}}}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	)
+
+	result, err := NewNodeService(clientset).Describe(context.Background(), "host-ecs")
+	if err != nil {
+		t.Fatalf("Describe returned error: %v", err)
+	}
+	if result.MatchedPodCount != 1 || len(result.Pods) != 1 || result.Pods[0] != "virt-launcher-ecs-demo" {
+		t.Fatalf("ECS workloads = %v, want virt-launcher-ecs-demo", result.Pods)
+	}
+	if result.CPUUsage != "16.015/255.9" {
+		t.Fatalf("CPUUsage = %q, want 16.015/255.9", result.CPUUsage)
+	}
+	if result.MemoryUsage != "64/100GiB" {
+		t.Fatalf("MemoryUsage = %q, want 64/100GiB", result.MemoryUsage)
+	}
+}

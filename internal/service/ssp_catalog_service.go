@@ -23,6 +23,7 @@ type SSPCatalogListOptions struct {
 	State        string
 	Limit        int
 	All          bool
+	CreatedAfter time.Time
 	IncludeNodes bool
 }
 
@@ -35,14 +36,17 @@ type SSPCatalogListItem struct {
 	Queue     string
 	Node      string
 	Creator   string
+	CreatorID string
 	Resource  string
 	CreatedAt string
+	EndedAt   string
 }
 
 type SSPCatalogListResult struct {
-	Items    []SSPCatalogListItem
-	Warnings []string
-	AID      bool `json:"-"`
+	Items     []SSPCatalogListItem
+	Warnings  []string
+	AID       bool   `json:"-"`
+	TimeLabel string `json:"-"`
 }
 
 type SSPCatalogService struct {
@@ -60,10 +64,12 @@ func (s *SSPCatalogService) SetKubeClient(clientset kubernetes.Interface) {
 
 func (s *SSPCatalogService) ListAIT(ctx context.Context, options SSPCatalogListOptions) (*SSPCatalogListResult, error) {
 	if queue := strings.TrimSpace(options.Queue); queue != "" {
-		return s.listQueueWorkloads(ctx, queue, "trainingJob", options)
+		result, err := s.listQueueWorkloads(ctx, queue, "trainingJob", options)
+		setSSPCatalogTimeLabel(result, options.State)
+		return result, err
 	}
-	return s.listWorkspaceCatalog(ctx, options, func(ctx context.Context, workspace platform.SSPWorkspace, state string, limit int) ([]SSPCatalogListItem, error) {
-		jobs, err := s.platform.ListSSPTrainingJobsInWorkspace(ctx, workspace, state, limit)
+	result, err := s.listWorkspaceCatalog(ctx, options, func(ctx context.Context, workspace platform.SSPWorkspace, state string, limit int, createdAfter time.Time) ([]SSPCatalogListItem, error) {
+		jobs, err := s.platform.ListSSPTrainingJobsInWorkspaceSince(ctx, workspace, state, limit, createdAfter)
 		if err != nil {
 			return nil, err
 		}
@@ -75,12 +81,16 @@ func (s *SSPCatalogService) ListAIT(ctx context.Context, options SSPCatalogListO
 				Workspace: job.WorkspaceName,
 				Queue:     firstNonEmpty(job.Spec.Queue.Name, lastResourceSegment(job.Spec.Queue.ID)),
 				Creator:   firstNonEmpty(job.Ownership.CreatorName, job.Ownership.CreatorID),
+				CreatorID: job.Ownership.CreatorID,
 				Resource:  formatSSPTrainingJobResources(job),
 				CreatedAt: formatSSPTime(job.Status.CreateTime),
+				EndedAt:   formatSSPTime(firstNonEmpty(job.Status.EndTime, job.Status.UpdateTime)),
 			})
 		}
 		return items, nil
 	})
+	setSSPCatalogTimeLabel(result, options.State)
+	return result, err
 }
 
 func (s *SSPCatalogService) ListAID(ctx context.Context, options SSPCatalogListOptions) (*SSPCatalogListResult, error) {
@@ -89,8 +99,8 @@ func (s *SSPCatalogService) ListAID(ctx context.Context, options SSPCatalogListO
 	if queue := strings.TrimSpace(options.Queue); queue != "" {
 		result, err = s.listQueueWorkloads(ctx, queue, "aid", options)
 	} else {
-		result, err = s.listWorkspaceCatalog(ctx, options, func(ctx context.Context, workspace platform.SSPWorkspace, state string, limit int) ([]SSPCatalogListItem, error) {
-			aids, listErr := s.platform.ListSSPAIDsInWorkspace(ctx, workspace, state, limit)
+		result, err = s.listWorkspaceCatalog(ctx, options, func(ctx context.Context, workspace platform.SSPWorkspace, state string, limit int, createdAfter time.Time) ([]SSPCatalogListItem, error) {
+			aids, listErr := s.platform.ListSSPAIDsInWorkspaceSince(ctx, workspace, state, limit, createdAfter)
 			if listErr != nil {
 				return nil, listErr
 			}
@@ -103,6 +113,7 @@ func (s *SSPCatalogService) ListAID(ctx context.Context, options SSPCatalogListO
 					Workspace: aid.Properties.Workload.WorkspaceName,
 					Queue:     firstNonEmpty(aid.Properties.Workload.Queue.Name, lastResourceSegment(aid.Properties.Workload.Queue.ID)),
 					Creator:   firstNonEmpty(aid.Properties.Ownership.CreatorName, aid.Properties.Ownership.CreatorID, aid.CreatorID),
+					CreatorID: firstNonEmpty(aid.Properties.Ownership.CreatorID, aid.CreatorID),
 					Resource: formatSSPAIDResourceSummary(SSPAIDResourceItem{
 						CPU:         formatSSPResource(aid.Properties.Workload.BaseSpec.CPU, ""),
 						Memory:      formatSSPResource(aid.Properties.Workload.BaseSpec.Memory, ""),
@@ -184,7 +195,7 @@ func (s *SSPCatalogService) enrichAIDCatalogNodes(ctx context.Context, result *S
 	}
 }
 
-type sspCatalogWorkspaceLoader func(context.Context, platform.SSPWorkspace, string, int) ([]SSPCatalogListItem, error)
+type sspCatalogWorkspaceLoader func(context.Context, platform.SSPWorkspace, string, int, time.Time) ([]SSPCatalogListItem, error)
 
 func (s *SSPCatalogService) listWorkspaceCatalog(ctx context.Context, options SSPCatalogListOptions, load sspCatalogWorkspaceLoader) (*SSPCatalogListResult, error) {
 	if s.platform == nil {
@@ -216,7 +227,7 @@ func (s *SSPCatalogService) listWorkspaceCatalog(ctx context.Context, options SS
 		err   error
 	}
 	loads := boundedMap(ctx, workspaces, 12, func(ctx context.Context, workspace platform.SSPWorkspace) loadResult {
-		items, queryErr := load(ctx, workspace, normalizeSSPCatalogAPIState(options.State), limit)
+		items, queryErr := load(ctx, workspace, normalizeSSPCatalogAPIState(options.State), limit, options.CreatedAfter)
 		return loadResult{items: items, err: queryErr}
 	})
 	items := make([]SSPCatalogListItem, 0)
@@ -258,7 +269,7 @@ func (s *SSPCatalogService) listQueueWorkloads(ctx context.Context, queueName st
 		queueLimit = 0
 	}
 	workloads, err := s.platform.ListSSPQueueWorkloads(ctx, queue.ProfileName, queue.Subscription, queue.ResourceGroup, queue.Region, queue.ClusterName, queue.Name, platform.SSPQueueWorkloadQuery{
-		Type: workloadType, State: strings.TrimSpace(options.State), Limit: queueLimit,
+		Type: workloadType, State: strings.TrimSpace(options.State), Limit: queueLimit, CreatedAfter: options.CreatedAfter,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list workloads for queue %s: %w", queue.Name, err)
@@ -276,8 +287,10 @@ func (s *SSPCatalogService) listQueueWorkloads(ctx context.Context, queueName st
 			Workspace: workspace,
 			Queue:     queue.Name,
 			Creator:   firstNonEmpty(workload.Ownership.CreatorName, workload.Ownership.CreatorID),
+			CreatorID: workload.Ownership.CreatorID,
 			Resource:  formatSSPWorkloadResources(workload),
 			CreatedAt: formatSSPTime(workload.CreateTime),
+			EndedAt:   formatSSPTime(firstNonEmpty(workload.EndTime, workload.UpdateTime)),
 		})
 	}
 	items = filterAndSortSSPCatalogItems(items, options.State, limit)
@@ -313,7 +326,7 @@ func formatSSPTrainingJobResources(job platform.SSPTrainingJob) string {
 
 func resolveSSPCatalogLimit(limit int, all bool) (int, error) {
 	if all {
-		return -1, nil
+		return 5000, nil
 	}
 	if limit == 0 {
 		return 50, nil
@@ -333,13 +346,30 @@ func filterAndSortSSPCatalogItems(items []SSPCatalogListItem, state string, limi
 		}
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
-		if filtered[i].CreatedAt == filtered[j].CreatedAt {
+		left := sspCatalogItemTime(filtered[i], state)
+		right := sspCatalogItemTime(filtered[j], state)
+		if left == right {
 			return strings.ToLower(filtered[i].Name) < strings.ToLower(filtered[j].Name)
 		}
-		return filtered[i].CreatedAt > filtered[j].CreatedAt
+		return left > right
 	})
 	if limit > 0 && len(filtered) > limit {
 		filtered = filtered[:limit]
 	}
 	return filtered
+}
+
+func setSSPCatalogTimeLabel(result *SSPCatalogListResult, state string) {
+	if result != nil && strings.EqualFold(strings.TrimSpace(state), "failed") {
+		result.TimeLabel = "FAILED"
+	}
+}
+
+func sspCatalogItemTime(item SSPCatalogListItem, state string) string {
+	if strings.EqualFold(strings.TrimSpace(state), "failed") {
+		if endedAt := strings.TrimSpace(item.EndedAt); endedAt != "" && endedAt != "-" {
+			return endedAt
+		}
+	}
+	return item.CreatedAt
 }

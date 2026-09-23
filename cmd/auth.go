@@ -135,27 +135,31 @@ func newAuthCheckGroupsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "groups <group-name-or-id> [group-name-or-id...]",
 		Aliases: []string{"group"},
-		Short:   "查看用户组信息和组自身拥有的权限",
+		Short:   "查看用户组成员、协管员和组自身拥有的权限",
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAuthCheckGroups(cmd, args, long)
 		},
 	}
-	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 source/service/role names/create time 等详细权限信息")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示成员 ID、是否在组内以及完整权限信息")
 	return cmd
 }
 
 func newAuthCheckUserCmd() *cobra.Command {
 	var long bool
+	var tenant string
+	var allTenants bool
 	cmd := &cobra.Command{
 		Use:   "user <username-or-userid> [username-or-userid...]",
 		Short: "查看用户所属组以及直接或继承的权限",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuthCheckUser(cmd, args, long)
+			return runAuthCheckUser(cmd, args, long, tenant, allTenants)
 		},
 	}
 	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 member/source/service/role names/create time 等详细权限信息")
+	cmd.Flags().StringVarP(&tenant, "tenant", "t", "", "指定租户（platform.json 中的 profile 名称）")
+	cmd.Flags().BoolVar(&allTenants, "all-tenants", false, "并发查询当前环境下所有已配置租户")
 	return cmd
 }
 
@@ -716,6 +720,9 @@ func runAuthCheckResources(cmd *cobra.Command, resourceType string, resourceName
 		}
 		valid = append(valid, query.result)
 	}
+	if len(valid) == 0 {
+		return errors.Join(queryErrors...)
+	}
 	if long && len(resourceNames) == 1 && len(valid) == 1 {
 		output.PrintAuthAFSResult(valid[0])
 	} else {
@@ -775,31 +782,64 @@ func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool) error {
 	return errors.Join(queryErrors...)
 }
 
-func runAuthCheckUser(cmd *cobra.Command, args []string, long bool) error {
+func runAuthCheckUser(cmd *cobra.Command, args []string, long bool, tenant string, allTenants bool) error {
 	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
 	if !ok {
 		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 	}
 
 	authService := service.NewAuthService(vcClient)
-	profileName, err := vcClient.ResolveProfileName("")
-	if err != nil {
-		return err
+	if strings.TrimSpace(tenant) != "" && allTenants {
+		return fmt.Errorf("--tenant 与 --all-tenants 不能同时使用")
+	}
+	profileNames := vcClient.ProfileNames(effectiveEnvironmentSelection())
+	if requested := strings.TrimSpace(tenant); requested != "" {
+		matched := ""
+		for _, name := range profileNames {
+			if strings.EqualFold(name, requested) {
+				matched = name
+				break
+			}
+		}
+		if matched == "" {
+			return fmt.Errorf("当前环境没有租户 profile %q；可选值: %s", requested, strings.Join(profileNames, ", "))
+		}
+		profileNames = []string{matched}
+	} else if !allTenants {
+		profileName, err := vcClient.ResolveProfileName("")
+		if err != nil {
+			return err
+		}
+		profileNames = []string{profileName}
+	}
+	if len(profileNames) == 0 {
+		return fmt.Errorf("当前环境没有可用的租户 profile")
 	}
 	type queryResult struct {
 		identifier string
+		profile    string
 		results    []*service.AuthUserResult
 		err        error
 	}
-	queries := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
-		results, err := authService.GetUserForProfile(ctx, identifier, profileName)
-		return queryResult{identifier, results, err}
+	type queryTarget struct{ identifier, profile string }
+	targets := make([]queryTarget, 0, len(args)*len(profileNames))
+	for _, identifier := range args {
+		for _, profile := range profileNames {
+			targets = append(targets, queryTarget{identifier: identifier, profile: profile})
+		}
+	}
+	queries := runBoundedQueries(cmd.Context(), targets, 6, func(ctx context.Context, target queryTarget) queryResult {
+		results, err := authService.GetUserForProfile(ctx, target.identifier, target.profile)
+		return queryResult{target.identifier, target.profile, results, err}
 	})
 	valid := make([]*service.AuthUserResult, 0)
 	queryErrors := make([]error, 0)
 	for _, query := range queries {
 		if query.err != nil {
-			queryErrors = append(queryErrors, fmt.Errorf("user %q: %w", query.identifier, query.err))
+			if allTenants && strings.Contains(strings.ToLower(query.err.Error()), "not found") {
+				continue
+			}
+			queryErrors = append(queryErrors, fmt.Errorf("user %q (tenant %s): %w", query.identifier, query.profile, query.err))
 			continue
 		}
 		valid = append(valid, query.results...)

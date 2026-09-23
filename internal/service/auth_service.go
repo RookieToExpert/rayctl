@@ -35,6 +35,8 @@ type AuthAFSItem struct {
 }
 
 type AuthUserResult struct {
+	ProfileName string
+	Environment string
 	ID          string
 	Username    string
 	Name        string
@@ -52,7 +54,20 @@ type AuthGroupResult struct {
 	PosixGroupName string
 	TenantCode     string
 	Status         string
+	Members        []AuthGroupMemberItem
+	MemberCount    int
+	AdminCount     int
 	Permissions    []AuthPermissionItem
+}
+
+type AuthGroupMemberItem struct {
+	ID       string
+	Username string
+	Name     string
+	Status   string
+	JoinTime string
+	Role     string
+	InGroup  bool
 }
 
 type AuthGroupItem struct {
@@ -265,43 +280,40 @@ func (s *AuthService) GetUserForProfile(ctx context.Context, identifier string, 
 	if identifier == "" {
 		return nil, fmt.Errorf("user identifier is required")
 	}
+	if strings.TrimSpace(profileName) == "" {
+		profileName = s.vcClient.CurrentProfileName()
+	}
 
-	type usersResult struct {
-		items []platform.IAMUser
-		err   error
+	users, err := s.vcClient.FindUsersForProfile(ctx, profileName, identifier)
+	if err != nil {
+		return nil, err
 	}
-	type policiesResult struct {
-		items []platform.IAMBindingPolicy
-		err   error
+	type userGroups struct {
+		groups []platform.IAMGroup
+		err    error
 	}
-	usersCh := make(chan usersResult, 1)
-	policiesCh := make(chan policiesResult, 1)
-	go func() {
-		items, err := s.vcClient.FindUsersForProfile(ctx, profileName, identifier)
-		usersCh <- usersResult{items: items, err: err}
-	}()
-	go func() {
-		items, err := s.vcClient.ListIAMBindingPoliciesForProfile(ctx, profileName)
-		policiesCh <- policiesResult{items: items, err: err}
-	}()
-	userQuery := <-usersCh
-	policyQuery := <-policiesCh
-	if userQuery.err != nil {
-		return nil, userQuery.err
+	groupLoads := boundedMap(ctx, users, 6, func(ctx context.Context, user platform.IAMUser) userGroups {
+		groups, queryErr := s.vcClient.ListUserGroupsForProfile(ctx, profileName, user.ID)
+		return userGroups{groups: groups, err: queryErr}
+	})
+	policyIdentifiers := make([]string, 0, len(users)*4)
+	for index, user := range users {
+		if groupLoads[index].err != nil {
+			return nil, fmt.Errorf("list groups for user %q: %w", firstNonEmpty(user.Username, user.ID), groupLoads[index].err)
+		}
+		policyIdentifiers = append(policyIdentifiers, user.ID, user.Username, user.Name)
+		for _, group := range groupLoads[index].groups {
+			policyIdentifiers = append(policyIdentifiers, group.ID, group.Name, group.DisplayName, group.PosixGroupName)
+		}
 	}
-	if policyQuery.err != nil {
-		return nil, fmt.Errorf("list binding policies: %w", policyQuery.err)
+	policies, err := s.vcClient.ListIAMBindingPoliciesForSubjectsProfile(ctx, profileName, policyIdentifiers)
+	if err != nil {
+		return nil, fmt.Errorf("list binding policies: %w", err)
 	}
-	users := userQuery.items
-	policies := policyQuery.items
 
 	results := make([]*AuthUserResult, 0, len(users))
-	for _, user := range users {
-		groups, err := s.vcClient.ListUserGroupsForProfile(ctx, profileName, user.ID)
-		if err != nil {
-			return nil, fmt.Errorf("list groups for user %q: %w", firstNonEmpty(user.Username, user.ID), err)
-		}
-
+	for userIndex, user := range users {
+		groups := groupLoads[userIndex].groups
 		groupItems := make([]AuthGroupItem, 0, len(groups))
 		groupByID := make(map[string]AuthGroupItem, len(groups))
 		for _, group := range groups {
@@ -326,6 +338,8 @@ func (s *AuthService) GetUserForProfile(ctx context.Context, identifier string, 
 
 		permissions := collectUserPermissions(user, groupByID, policies)
 		results = append(results, &AuthUserResult{
+			ProfileName: profileName,
+			Environment: s.vcClient.ProfileEnvironment(profileName),
 			ID:          user.ID,
 			Username:    user.Username,
 			Name:        user.Name,
@@ -352,37 +366,33 @@ func (s *AuthService) GetGroupsForProfile(ctx context.Context, identifier string
 		return nil, fmt.Errorf("group identifier is required")
 	}
 
-	type groupsResult struct {
-		items []platform.IAMGroup
+	groups, err := s.vcClient.FindGroupsForProfile(ctx, profileName, identifier)
+	if err != nil {
+		return nil, err
+	}
+	policyIdentifiers := make([]string, 0, len(groups)*4)
+	for _, group := range groups {
+		policyIdentifiers = append(policyIdentifiers, group.ID, group.Name, group.DisplayName, group.PosixGroupName)
+	}
+	type groupUsers struct {
+		users []platform.IAMUser
 		err   error
 	}
-	type policiesResult struct {
-		items []platform.IAMBindingPolicy
-		err   error
-	}
-	groupsCh := make(chan groupsResult, 1)
-	policiesCh := make(chan policiesResult, 1)
+	usersCh := make(chan []groupUsers, 1)
 	go func() {
-		items, err := s.vcClient.FindGroupsForProfile(ctx, profileName, identifier)
-		groupsCh <- groupsResult{items: items, err: err}
+		usersCh <- boundedMap(ctx, groups, 6, func(ctx context.Context, group platform.IAMGroup) groupUsers {
+			users, queryErr := s.vcClient.ListGroupUsersForProfile(ctx, profileName, group.ID)
+			return groupUsers{users: users, err: queryErr}
+		})
 	}()
-	go func() {
-		items, err := s.vcClient.ListIAMBindingPoliciesForProfile(ctx, profileName)
-		policiesCh <- policiesResult{items: items, err: err}
-	}()
-	groupQuery := <-groupsCh
-	policyQuery := <-policiesCh
-	if groupQuery.err != nil {
-		return nil, groupQuery.err
+	policies, policyErr := s.vcClient.ListIAMBindingPoliciesForSubjectsProfile(ctx, profileName, policyIdentifiers)
+	userLoads := <-usersCh
+	if policyErr != nil {
+		return nil, fmt.Errorf("list binding policies: %w", policyErr)
 	}
-	if policyQuery.err != nil {
-		return nil, fmt.Errorf("list binding policies: %w", policyQuery.err)
-	}
-	groups := groupQuery.items
-	policies := policyQuery.items
 
 	results := make([]*AuthGroupResult, 0, len(groups))
-	for _, group := range groups {
+	for groupIndex, group := range groups {
 		item := AuthGroupItem{
 			ID:             strings.TrimSpace(group.ID),
 			Name:           strings.TrimSpace(group.Name),
@@ -390,6 +400,11 @@ func (s *AuthService) GetGroupsForProfile(ctx context.Context, identifier string
 			PosixGroupName: strings.TrimSpace(group.PosixGroupName),
 			Status:         strings.TrimSpace(group.Status),
 		}
+		if userLoads[groupIndex].err != nil {
+			return nil, fmt.Errorf("list members for group %q: %w", groupDisplayName(item), userLoads[groupIndex].err)
+		}
+		users := userLoads[groupIndex].users
+		members, adminCount := collectAuthGroupMembers(item, users, policies)
 		results = append(results, &AuthGroupResult{
 			ID:             item.ID,
 			Name:           item.Name,
@@ -397,10 +412,102 @@ func (s *AuthService) GetGroupsForProfile(ctx context.Context, identifier string
 			PosixGroupName: item.PosixGroupName,
 			TenantCode:     strings.TrimSpace(group.TenantCode),
 			Status:         item.Status,
+			Members:        members,
+			MemberCount:    len(users),
+			AdminCount:     adminCount,
 			Permissions:    collectGroupPermissions(item, policies),
 		})
 	}
 	return results, nil
+}
+
+func collectAuthGroupMembers(group AuthGroupItem, users []platform.IAMUser, policies []platform.IAMBindingPolicy) ([]AuthGroupMemberItem, int) {
+	adminPolicies := make([]platform.IAMBindingPolicy, 0)
+	seenAdmins := make(map[string]struct{})
+	for _, policy := range policies {
+		if !isGroupCollaboratorPolicy(policy, group.ID) {
+			continue
+		}
+		key := strings.ToLower(firstNonEmpty(strings.TrimSpace(policy.MemberValue), strings.TrimSpace(policy.MemberIdentify), strings.TrimSpace(policy.MemberName)))
+		if _, ok := seenAdmins[key]; ok {
+			continue
+		}
+		seenAdmins[key] = struct{}{}
+		adminPolicies = append(adminPolicies, policy)
+	}
+
+	items := make([]AuthGroupMemberItem, 0, len(users)+len(adminPolicies))
+	matchedAdmins := make(map[int]struct{})
+	for _, user := range users {
+		item := AuthGroupMemberItem{
+			ID:       strings.TrimSpace(user.ID),
+			Username: strings.TrimSpace(user.Username),
+			Name:     strings.TrimSpace(user.Name),
+			Status:   strings.TrimSpace(user.Status),
+			JoinTime: formatLocalTime(user.JoinTime),
+			Role:     "成员",
+			InGroup:  true,
+		}
+		for index, policy := range adminPolicies {
+			if policyMatchesUser(policy, user) {
+				item.Role = "协管员"
+				matchedAdmins[index] = struct{}{}
+			}
+		}
+		items = append(items, item)
+	}
+
+	for index, policy := range adminPolicies {
+		if _, ok := matchedAdmins[index]; ok {
+			continue
+		}
+		items = append(items, AuthGroupMemberItem{
+			ID:       strings.TrimSpace(policy.MemberValue),
+			Username: strings.TrimSpace(policy.MemberIdentify),
+			Name:     strings.TrimSpace(policy.MemberName),
+			Role:     "协管员",
+			InGroup:  false,
+		})
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		leftAdmin := items[i].Role == "协管员"
+		rightAdmin := items[j].Role == "协管员"
+		if leftAdmin != rightAdmin {
+			return leftAdmin
+		}
+		left := strings.ToLower(firstNonEmpty(items[i].Username, items[i].Name, items[i].ID))
+		right := strings.ToLower(firstNonEmpty(items[j].Username, items[j].Name, items[j].ID))
+		return left < right
+	})
+	return items, len(adminPolicies)
+}
+
+func isGroupCollaboratorPolicy(policy platform.IAMBindingPolicy, groupID string) bool {
+	if !isIAMUserMember(policy.MemberType) {
+		return false
+	}
+	wantScope := "/iam/groups/" + strings.TrimSpace(groupID)
+	if !strings.EqualFold(strings.TrimRight(strings.TrimSpace(policy.Scope), "/"), wantScope) {
+		return false
+	}
+	for _, role := range policy.RoleInfos {
+		if strings.EqualFold(strings.TrimSpace(role.RoleName), "iam.userGroupCollaborator") {
+			return true
+		}
+	}
+	return false
+}
+
+func policyMatchesUser(policy platform.IAMBindingPolicy, user platform.IAMUser) bool {
+	for _, left := range []string{policy.MemberValue, policy.MemberIdentify, policy.MemberName} {
+		for _, right := range []string{user.ID, user.Username, user.Name} {
+			if strings.TrimSpace(left) != "" && strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*AuthGrantAFSResult, error) {
@@ -928,7 +1035,7 @@ func (s *AuthService) findGrantResource(ctx context.Context, resourceType string
 	case "afs":
 		return s.vcClient.FindStorageVolumeResource(ctx, name)
 	case "vc":
-		return s.vcClient.FindResourceByName(ctx, name, "virtualClusters")
+		return s.vcClient.FindVirtualClusterResource(ctx, name)
 	case "ccr":
 		return s.vcClient.FindResourceByName(ctx, name, "namespaces")
 	case "subnet":

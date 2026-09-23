@@ -3,6 +3,7 @@ package cmd
 import (
 	"testing"
 
+	"rayctl/internal/platform"
 	"rayctl/internal/service"
 )
 
@@ -24,6 +25,35 @@ func TestNormalizeNodeIdentifier(t *testing.T) {
 				t.Fatalf("normalizeNodeIdentifier(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPlatformNodeKubernetesName(t *testing.T) {
+	nodeWithHostName := platform.AIComputeNode{Name: "ecp-c550-h3c-62b1"}
+	nodeWithHostName.Properties.HostName = "host-10-12-34-56"
+	nodeWithHostIP := platform.AIComputeNode{DisplayName: "ecp-display-name"}
+	nodeWithHostIP.Properties.HostIP = "10.12.34.57"
+
+	if got := platformNodeKubernetesName("ecp-c550-h3c-62b1", []platform.AIComputeNode{nodeWithHostName}); got != "host-10-12-34-56" {
+		t.Fatalf("platformNodeKubernetesName(hostname) = %q", got)
+	}
+	if got := platformNodeKubernetesName("ecp-display-name", []platform.AIComputeNode{nodeWithHostIP}); got != "host-10-12-34-57" {
+		t.Fatalf("platformNodeKubernetesName(host IP) = %q", got)
+	}
+	if got := platformNodeKubernetesName("other", []platform.AIComputeNode{nodeWithHostName}); got != "" {
+		t.Fatalf("platformNodeKubernetesName(non-match) = %q", got)
+	}
+}
+
+func TestCanResolvePlatformNodeName(t *testing.T) {
+	if !canResolvePlatformNodeName("ecp-c550-h3c-62b1", "ecp-c550-h3c-62b1") {
+		t.Fatal("platform node name should be eligible for resolution")
+	}
+	if canResolvePlatformNodeName("10.12.34.56", "host-10-12-34-56") {
+		t.Fatal("IP address should not trigger platform name resolution")
+	}
+	if canResolvePlatformNodeName("host-10-12-34-56", "host-10-12-34-56") {
+		t.Fatal("Kubernetes host name should not trigger platform name resolution")
 	}
 }
 
@@ -57,5 +87,33 @@ func TestFilterNodeListByVCMatchesNameAndUID(t *testing.T) {
 	}
 	if got := filterNodeListByVC(nodes, "vc-uid-target"); len(got) != 1 || got[0].Name != "by-uid" {
 		t.Fatalf("filterNodeListByVC(uid) = %#v", got)
+	}
+}
+
+func TestFilterNodeListByScopeMatchesHostAndIP(t *testing.T) {
+	nodes := []service.NodeListItem{
+		{Name: "host-10-1-1-1", InternalIP: "10.1.1.1"},
+		{Name: "custom-node", InternalIP: "10.1.1.2"},
+		{Name: "other", InternalIP: "10.1.1.3"},
+	}
+	scope := &service.SSPNodeScopeListResult{Items: []service.SSPNodeScopeListItem{
+		{HostName: "host-10-1-1-1", Queues: "queue-a"},
+		{HostIP: "10.1.1.2", Queues: "queue-b"},
+	}}
+	got := filterNodeListByScope(nodes, scope)
+	if len(got) != 2 || got[0].QueueName != "queue-a" || got[1].QueueName != "queue-b" {
+		t.Fatalf("filterNodeListByScope() = %#v", got)
+	}
+}
+
+func TestNodeListIncludesWorkspaceAndClusterFlags(t *testing.T) {
+	cmd := newNodeListCmd()
+	for _, flag := range []string{"workspace", "cluster"} {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Fatalf("node list is missing --%s", flag)
+		}
+	}
+	if got := nodeListFilterDescription("", "", "", "ws-demo", "cluster-demo"); got != "workspace=ws-demo, cluster=cluster-demo" {
+		t.Fatalf("filter description = %q", got)
 	}
 }

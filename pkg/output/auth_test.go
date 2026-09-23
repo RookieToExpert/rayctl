@@ -1,6 +1,7 @@
 package output
 
 import (
+	"strings"
 	"testing"
 
 	"rayctl/internal/service"
@@ -61,5 +62,21 @@ func TestFormatAuthScopeForUserDisplayResolvesGroupName(t *testing.T) {
 	}
 	if got := formatAuthScopeForUserDisplay("iam/groups/unknown", groups); got != "用户组 unknown" {
 		t.Fatalf("unknown group scope = %q, want 用户组 unknown", got)
+	}
+}
+
+func TestPrintAuthGroupResultIncludesMembersAndCollaborators(t *testing.T) {
+	result := &service.AuthGroupResult{
+		ID: "group-uid", Name: "ug-demo", MemberCount: 2, AdminCount: 1,
+		Members: []service.AuthGroupMemberItem{
+			{ID: "admin-uid", Username: "admin-user", Name: "管理员", Role: "协管员", Status: "valid", JoinTime: "2026-09-20 09:02:03", InGroup: true},
+			{ID: "member-uid", Username: "member-user", Name: "普通成员", Role: "成员", Status: "valid", InGroup: true},
+		},
+	}
+	text := captureTableOutput(t, func() { PrintAuthGroupResult(result, false) })
+	for _, expected := range []string{"USERNAME", "ROLE", "admin-user", "协管员", "member-user", "成员 2 人，其中协管员 1 人"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("output missing %q:\n%s", expected, text)
+		}
 	}
 }

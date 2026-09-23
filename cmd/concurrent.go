@@ -5,11 +5,11 @@ import (
 	"sync"
 )
 
-func runBoundedQueries[T any](
+func runBoundedQueries[I any, T any](
 	ctx context.Context,
-	identifiers []string,
+	identifiers []I,
 	maxParallel int,
-	query func(context.Context, string) T,
+	query func(context.Context, I) T,
 ) []T {
 	results := make([]T, len(identifiers))
 	if len(identifiers) == 0 {

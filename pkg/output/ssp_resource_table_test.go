@@ -64,6 +64,43 @@ func TestPrintSSPWorkspaceDetailShowsQueueRuntimeAndLongUID(t *testing.T) {
 	}
 }
 
+func TestPrintAIRDetailsShowVirtualAndHostNamespaces(t *testing.T) {
+	jobText := captureTableOutput(t, func() {
+		PrintSSPAIRJobDetail(&service.SSPAIRJobItem{Namespace: "virtual-ns", HostNamespace: "host-ns"}, false)
+	})
+	gatewayText := captureTableOutput(t, func() {
+		PrintSSPAIRGatewayDetail(&service.SSPAIRGatewayItem{Namespace: "virtual-ns", HostNamespace: "host-ns"}, false)
+	})
+	for _, text := range []string{jobText, gatewayText} {
+		for _, expected := range []string{"VC NAMESPACE", "virtual-ns", "HOST NAMESPACE", "host-ns"} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("missing %q:\n%s", expected, text)
+			}
+		}
+	}
+}
+
+func TestWorkloadDetailsShowVirtualAndHostNamespaces(t *testing.T) {
+	outputs := []string{
+		captureTableOutput(t, func() {
+			PrintJobDetail(&service.JobGetResult{Namespace: "virtual-ns", HostNamespace: "host-ns", Terminal: true}, false, false)
+		}),
+		captureTableOutput(t, func() {
+			PrintSSPJobDetail(&service.SSPJobGetResult{Namespace: "virtual-ns", HostNamespace: "host-ns", Terminal: true}, false)
+		}),
+		captureTableOutput(t, func() {
+			PrintSSPAIDDetail(&service.SSPAIDGetResult{Namespace: "virtual-ns", HostNamespace: "host-ns", Terminal: true}, false, false)
+		}),
+	}
+	for _, text := range outputs {
+		for _, expected := range []string{"VC NAMESPACE", "virtual-ns", "HOST NAMESPACE", "host-ns"} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("missing %q:\n%s", expected, text)
+			}
+		}
+	}
+}
+
 func TestPrintSSPCatalogListColumns(t *testing.T) {
 	result := &service.SSPCatalogListResult{Items: []service.SSPCatalogListItem{{
 		Name: "job-demo", State: "Running", Workspace: "ws-demo", Queue: "queue-demo", Creator: "test-user", CreatedAt: "2026-09-02 12:00:00",
@@ -176,6 +213,30 @@ func TestPrintQueueNodeUsageHidesAcceleratorForCPUOnlyNodes(t *testing.T) {
 
 	if strings.Contains(text, "ACCEL") {
 		t.Fatalf("CPU-only output contains ACCEL column:\n%s", text)
+	}
+}
+
+func TestPrintWorkspaceNodeUsageIncludesQueuesAndSharedPoolNotice(t *testing.T) {
+	result := &service.SSPWorkspaceNodeUsageResult{
+		Workspace:     service.SSPWorkspaceItem{Name: "ws-demo"},
+		SharedVCPools: true,
+		Items: []service.SSPQueueNodeUsageItem{{
+			Queues: "queue-a, queue-b", HostName: "host-10-0-0-1", HostIP: "10.0.0.1",
+			CPUAllocated: "8", CPUTotal: "16", MemoryAllocated: "16GiB", MemoryTotal: "32GiB",
+		}},
+	}
+	text := captureTableOutput(t, func() { PrintSSPWorkspaceNodeUsage([]*service.SSPWorkspaceNodeUsageResult{result}) })
+	for _, expected := range []string{"QUEUES", "queue-a, queue-b", "host-10-0-0-1", "8/16", "共享候选池", "相同节点"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing %q:\n%s", expected, text)
+		}
+	}
+}
+
+func TestCompactWorkspaceQueueNames(t *testing.T) {
+	got := compactWorkspaceQueueNames("ws-d-a3-ai4s", "queue-d-elastic-cpu-ai4s, queue-d-reserved-a3-ai4s")
+	if got != "elastic-cpu-ai4s, reserved-a3-ai4s" {
+		t.Fatalf("compact queue names = %q", got)
 	}
 }
 

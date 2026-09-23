@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"rayctl/internal/kube"
 	"rayctl/internal/platform"
 )
 
@@ -69,6 +71,7 @@ type jobIdentity struct {
 	Submitter     string
 	PodGroupName  string
 	VClusterName  string
+	VClusterUID   string
 	ProfileName   string
 	HostNamespace string
 	HostJobName   string
@@ -102,6 +105,7 @@ type JobGetResult struct {
 	Name                   string
 	WorkloadType           string
 	Namespace              string
+	HostNamespace          string
 	UID                    string
 	Status                 string
 	CreatedAt              string
@@ -135,6 +139,7 @@ type JobClusterItem struct {
 	CreatedAt      string
 	CreatedAtShort string
 	CreatedAtTime  time.Time
+	eventAtTime    time.Time
 }
 
 type JobClusterListResult struct {
@@ -146,6 +151,7 @@ type JobClusterListResult struct {
 	TotalPodCount   int
 	ShowClusterName bool
 	StatusFilter    string
+	Warnings        []string
 }
 
 type JobCheckResult struct {
@@ -1003,6 +1009,10 @@ func (s *JobService) GetCurrentTenantClusterJobs(ctx context.Context, includeIna
 // ListCurrentTenantVolcanoJobs queries the ECP cached Job endpoint for each VC.
 // Unlike GetCurrentTenantClusterJobs, this path does not infer jobs from Pods.
 func (s *JobService) ListCurrentTenantVolcanoJobs(ctx context.Context, includeInactive bool, statusFilter string, limit int) (*JobClusterListResult, error) {
+	return s.ListCurrentTenantVolcanoJobsSince(ctx, includeInactive, statusFilter, limit, time.Time{})
+}
+
+func (s *JobService) ListCurrentTenantVolcanoJobsSince(ctx context.Context, includeInactive bool, statusFilter string, limit int, createdAfter time.Time) (*JobClusterListResult, error) {
 	if s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for cluster job listing")
 	}
@@ -1024,18 +1034,34 @@ func (s *JobService) ListCurrentTenantVolcanoJobs(ctx context.Context, includeIn
 	results := boundedMap(ctx, vclusters, 32, func(ctx context.Context, vc platform.VirtualCluster) clusterResult {
 		clusterName := firstNonEmpty(strings.TrimSpace(vc.Name), strings.TrimSpace(vc.DisplayName), "vc-"+strings.TrimSpace(vc.UID))
 		vcRef := firstNonEmpty("vc-"+strings.TrimSpace(vc.UID), strings.TrimSpace(vc.Name), strings.TrimSpace(vc.UID))
-		jobs, queryErr := s.vcClient.ListVolcanoJobsPageForProfile(ctx, vc.ProfileName, vcRef, filter, limit)
+		if s.vcClient.ProfileEnvironment(vc.ProfileName) == platform.ClusterDCloud {
+			kubeconfig := localDCloudVCKubeconfig(vc)
+			if kubeconfig == "" {
+				return clusterResult{name: clusterName, err: fmt.Errorf("本地 VC kubeconfig 不存在")}
+			}
+			jobs, queryErr := listLocalVolcanoJobs(ctx, kubeconfig, includeInactive, statusFilter, limit, createdAfter)
+			return clusterResult{name: clusterName, jobs: jobs, err: queryErr}
+		}
+		jobs, queryErr := s.vcClient.ListVolcanoJobsPageForProfileSince(ctx, vc.ProfileName, vcRef, filter, limit, createdAfter)
 		return clusterResult{name: clusterName, jobs: jobs, err: queryErr}
 	})
 
 	items := make([]JobClusterItem, 0)
+	warnings := make([]string, 0)
+	succeeded := 0
 	for _, result := range results {
 		if result.err != nil {
-			return nil, fmt.Errorf("list volcano jobs for cluster %q: %w", result.name, result.err)
+			warnings = append(warnings, fmt.Sprintf("跳过 VC %s：%s", result.name, conciseJobListError(result.err)))
+			continue
 		}
+		succeeded++
 		for index := range result.jobs {
 			job := &result.jobs[index]
 			createdAt := job.GetCreationTimestamp().Time
+			eventAt := createdAt
+			if normalizeClusterStatusFilter(statusFilter) == "failed" {
+				eventAt = volcanoJobTerminalTimestamp(job)
+			}
 			items = append(items, JobClusterItem{
 				ClusterName: result.name,
 				JobName: firstNonEmpty(
@@ -1053,12 +1079,13 @@ func (s *JobService) ListCurrentTenantVolcanoJobs(ctx context.Context, includeIn
 				CreatedAt:      createdAt.In(utcPlus8).Format("2006-01-02 15:04:05"),
 				CreatedAtShort: createdAt.In(utcPlus8).Format("01-02 15:04"),
 				CreatedAtTime:  createdAt,
+				eventAtTime:    eventAt,
 			})
 		}
 	}
 	sort.Slice(items, func(i, j int) bool {
-		if !items[i].CreatedAtTime.Equal(items[j].CreatedAtTime) {
-			return items[i].CreatedAtTime.After(items[j].CreatedAtTime)
+		if !items[i].eventAtTime.Equal(items[j].eventAtTime) {
+			return items[i].eventAtTime.After(items[j].eventAtTime)
 		}
 		if items[i].ClusterName != items[j].ClusterName {
 			return items[i].ClusterName < items[j].ClusterName
@@ -1068,6 +1095,9 @@ func (s *JobService) ListCurrentTenantVolcanoJobs(ctx context.Context, includeIn
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
 	}
+	if succeeded == 0 && len(vclusters) > 0 {
+		return nil, fmt.Errorf("全部 %d 个 VC 的任务查询均失败；%s", len(vclusters), firstNonEmpty(strings.TrimPrefix(warnings[0], "跳过 VC "), "请检查平台或 VC kubeconfig"))
+	}
 	return &JobClusterListResult{
 		ClusterName:     "当前租户全部分区",
 		Items:           items,
@@ -1075,11 +1105,145 @@ func (s *JobService) ListCurrentTenantVolcanoJobs(ctx context.Context, includeIn
 		StatusFilter:    normalizeClusterStatusFilter(statusFilter),
 		TotalJobCount:   -1,
 		TotalPodCount:   -1,
+		Warnings:        warnings,
 	}, nil
+}
+
+func localDCloudVCKubeconfig(vc platform.VirtualCluster) string {
+	name := strings.TrimSpace(vc.Name)
+	if !strings.HasPrefix(name, "vc-") || filepath.Base(name) != name {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	path := filepath.Join(home, "Dcloud", name)
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return ""
+	}
+	return path
+}
+
+func listLocalVolcanoJobs(ctx context.Context, kubeconfig string, includeInactive bool, statusFilter string, limit int, createdAfter time.Time) ([]unstructured.Unstructured, error) {
+	restConfig, err := kube.NewRestConfig(kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	restConfig.Timeout = 4 * time.Second
+	client, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create VC client: %w", err)
+	}
+	list, err := client.Resource(volcanoJobGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return filterLocalECPVolcanoJobs(list.Items, includeInactive, statusFilter, limit, createdAfter), nil
+}
+
+func filterLocalECPVolcanoJobs(jobs []unstructured.Unstructured, includeInactive bool, statusFilter string, limit int, createdAfter time.Time) []unstructured.Unstructured {
+	filtered := make([]unstructured.Unstructured, 0, len(jobs))
+	stateFilter := normalizeClusterStatusFilter(statusFilter)
+	for index := range jobs {
+		job := jobs[index]
+		submitter := firstNonEmpty(
+			getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
+			getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"),
+		)
+		if job.GetNamespace() != "default" && strings.TrimSpace(submitter) == "" {
+			continue
+		}
+		eventAt := job.GetCreationTimestamp().Time
+		if stateFilter == "failed" {
+			eventAt = volcanoJobTerminalTimestamp(&job)
+		}
+		if !createdAfter.IsZero() && !eventAt.IsZero() && eventAt.Before(createdAfter) {
+			continue
+		}
+		phase := extractVolcanoJobPhase(&job)
+		if stateFilter == "failed" {
+			if !strings.EqualFold(phase, stateFilter) {
+				continue
+			}
+		} else if !includeInactive && !strings.EqualFold(strings.TrimSpace(statusFilter), "all") {
+			switch stateFilter {
+			case "pending", "running":
+				if !strings.EqualFold(phase, stateFilter) {
+					continue
+				}
+			default:
+				if !isActiveVolcanoJobPhase(phase) {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, job)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		left := filtered[i].GetCreationTimestamp().Time
+		right := filtered[j].GetCreationTimestamp().Time
+		if stateFilter == "failed" {
+			left = volcanoJobTerminalTimestamp(&filtered[i])
+			right = volcanoJobTerminalTimestamp(&filtered[j])
+		}
+		return left.After(right)
+	})
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+	return filtered
+}
+
+func volcanoJobTerminalTimestamp(job *unstructured.Unstructured) time.Time {
+	if job == nil {
+		return time.Time{}
+	}
+	latest := parseJobTimestamp(firstNonEmpty(
+		getNestedText(job.Object, "status", "state", "lastTransitionTime"),
+		getNestedText(job.Object, "status", "completionTime"),
+		getNestedText(job.Object, "status", "finishedAt"),
+	))
+	conditions, _, _ := unstructured.NestedSlice(job.Object, "status", "conditions")
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		transition := parseJobTimestamp(firstNonEmpty(
+			getNestedText(condition, "lastTransitionTime"),
+			getNestedText(condition, "transitionTime"),
+			getNestedText(condition, "lastUpdateTime"),
+		))
+		if transition.After(latest) {
+			latest = transition
+		}
+	}
+	if latest.IsZero() {
+		return job.GetCreationTimestamp().Time
+	}
+	return latest
+}
+
+func conciseJobListError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded") {
+		return "查询超时"
+	}
+	message := strings.TrimSpace(err.Error())
+	if index := strings.Index(message, ": request "); index >= 0 {
+		message = message[:index]
+	}
+	if message == "" {
+		return "查询失败"
+	}
+	return message
 }
 
 func volcanoJobAPIStateFilter(includeInactive bool, statusFilter string) string {
 	filter := normalizeClusterStatusFilter(statusFilter)
+	if filter == "failed" {
+		return fmt.Sprintf(`state=%q`, "Failed")
+	}
 	if includeInactive || strings.EqualFold(strings.TrimSpace(statusFilter), "all") {
 		return ""
 	}
@@ -1157,6 +1321,12 @@ func (s *JobService) getCurrentTenantActiveClusterJobs(ctx context.Context, vclu
 // Unlike the cluster summary path, it does not fetch Pods because user output does
 // not need Pod counts.
 func (s *JobService) GetCurrentTenantUserJobs(ctx context.Context, submitters []string) ([]JobClusterItem, error) {
+	return s.GetCurrentTenantUserJobsWithStatus(ctx, submitters, false)
+}
+
+// GetCurrentTenantUserJobsWithStatus returns jobs submitted by the requested
+// users. The legacy user --jobs path passes false to preserve active-only output.
+func (s *JobService) GetCurrentTenantUserJobsWithStatus(ctx context.Context, submitters []string, includeInactive bool) ([]JobClusterItem, error) {
 	if s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for user job listing")
 	}
@@ -1229,7 +1399,7 @@ func (s *JobService) GetCurrentTenantUserJobs(ctx context.Context, submitters []
 		for i := range result.jobs {
 			job := &result.jobs[i]
 			status := extractVolcanoJobPhase(job)
-			if !isActiveVolcanoJobPhase(status) {
+			if !includeInactive && !isActiveVolcanoJobPhase(status) {
 				continue
 			}
 			submitter := firstNonEmpty(
@@ -1275,6 +1445,8 @@ func normalizeClusterStatusFilter(value string) string {
 		return "running"
 	case "active":
 		return "active"
+	case "failed":
+		return "failed"
 	default:
 		return ""
 	}
@@ -1299,6 +1471,10 @@ func filterClusterItemsByStatus(items []JobClusterItem, statusFilter string) []J
 			}
 		case "active":
 			if status == "running" || status == "pending" {
+				filtered = append(filtered, item)
+			}
+		case "failed":
+			if status == "failed" {
 				filtered = append(filtered, item)
 			}
 		}
@@ -1471,6 +1647,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 		Name:                   identity.Name,
 		WorkloadType:           jobWorkloadType(job, pods),
 		Namespace:              identity.Namespace,
+		HostNamespace:          identity.HostNamespace,
 		UID:                    identity.UID,
 		Status:                 status,
 		CreatedAt:              createdAt,
@@ -1980,6 +2157,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		Name:                   identity.Name,
 		WorkloadType:           jobWorkloadType(job, pods),
 		Namespace:              identity.Namespace,
+		HostNamespace:          identity.HostNamespace,
 		UID:                    identity.UID,
 		Status:                 status,
 		CreatedAt:              createdAt,
@@ -2523,6 +2701,7 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 							Submitter:    firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), "-"),
 							PodGroupName: fmt.Sprintf("%s-%s", job.GetName(), string(job.GetUID())),
 							VClusterName: vcRef,
+							VClusterUID:  vc.UID,
 							ProfileName:  vc.ProfileName,
 						},
 					}
@@ -2560,6 +2739,9 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 		}
 	}
 
+	for index := range matches {
+		matches[index].HostNamespace = s.findVClusterHostNamespace(ctx, matches[index].VClusterUID, matches[index].Namespace)
+	}
 	if len(matches) == 1 {
 		return &matches[0], nil
 	}
@@ -2574,6 +2756,32 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 	}
 
 	return nil, fmt.Errorf("platform volcano job %q not found", identifier)
+}
+
+func (s *JobService) findVClusterHostNamespace(ctx context.Context, vclusterUID string, virtualNamespace string) string {
+	if s == nil || s.clientset == nil {
+		return ""
+	}
+	controlNamespace := "vc-" + strings.TrimPrefix(strings.TrimSpace(vclusterUID), "vc-")
+	if controlNamespace == "vc-" {
+		return ""
+	}
+	namespaces, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+		LabelSelector: clusterVirtualNamespaceLabelKey + "=" + controlNamespace,
+	})
+	if err != nil {
+		return ""
+	}
+	for _, namespace := range namespaces.Items {
+		logicalName := firstNonEmpty(
+			strings.TrimSpace(namespace.Labels[clusterLogicalNamespaceLabelKey]),
+			strings.TrimSpace(namespace.Annotations[clusterLogicalNamespaceAnnotKey]),
+		)
+		if strings.EqualFold(logicalName, strings.TrimSpace(virtualNamespace)) {
+			return namespace.Name
+		}
+	}
+	return ""
 }
 
 func platformVCRefs(vc platform.VirtualCluster) []string {

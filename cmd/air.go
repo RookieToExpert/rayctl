@@ -71,10 +71,8 @@ func newAIRJobGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if longOutput {
-				if client, err := kube.NewClientset(kubeconfig); err == nil {
-					airService.SetKubeClient(client)
-				}
+			if client, err := kube.NewClientset(kubeconfig); err == nil {
+				airService.SetKubeClient(client)
 			}
 			results, queryErrors := airService.GetJobs(service.WithPodEvidenceOptions(cmd.Context(), noImage, kubeconfig), args, region, workspace, longOutput, workerLimit)
 			printed := false
@@ -150,6 +148,9 @@ func newAIRGatewayGetCmd() *cobra.Command {
 			airService, err := newAIRQueryService()
 			if err != nil {
 				return err
+			}
+			if client, err := kube.NewClientset(kubeconfig); err == nil {
+				airService.SetKubeClient(client)
 			}
 			results, queryErrors := airService.GetGateways(cmd.Context(), args, region, workspace)
 			printed := false

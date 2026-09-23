@@ -43,7 +43,7 @@ func TestATEListHelpIncludesClusterUsage(t *testing.T) {
 	if cmd.RunE == nil {
 		t.Fatal("ate list does not implement the global list entrypoint")
 	}
-	for _, flag := range []string{"state", "limit", "all", "all-status"} {
+	for _, flag := range []string{"state", "limit", "all", "all-status", "since"} {
 		if cmd.Flags().Lookup(flag) == nil {
 			t.Fatalf("ate list is missing --%s", flag)
 		}
@@ -74,6 +74,31 @@ func TestATEListHelpIncludesClusterUsage(t *testing.T) {
 	for _, fragment := range []string{"Running 和 Pending", "--all-status", "当前租户全部 VC"} {
 		if !strings.Contains(clusterHelp, fragment) {
 			t.Fatalf("job list cluster help does not contain %q:\n%s", fragment, clusterHelp)
+		}
+	}
+}
+
+func TestATEListAcceptsFailedStatus(t *testing.T) {
+	if !isValidClusterStatusFilter("failed") {
+		t.Fatal("failed status was rejected")
+	}
+}
+
+func TestParseListDurationSupportsDays(t *testing.T) {
+	got, err := parseListDuration("7d")
+	if err != nil || got != 7*24*time.Hour {
+		t.Fatalf("parseListDuration(7d) = %s, %v", got, err)
+	}
+	if _, err := parseListDuration("0d"); err == nil {
+		t.Fatal("parseListDuration accepted zero days")
+	}
+}
+
+func TestAuthCheckUserTenantFlags(t *testing.T) {
+	cmd := newAuthCheckUserCmd()
+	for _, flag := range []string{"tenant", "all-tenants"} {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Fatalf("auth check user is missing --%s", flag)
 		}
 	}
 }

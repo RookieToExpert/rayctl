@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestJobNameLookupAcrossNamespaces(t *testing.T) {
@@ -24,6 +25,29 @@ func TestJobNameLookupAcrossNamespaces(t *testing.T) {
 	}
 	if jobs[0].GetNamespace() != "wj" || jobs[1].GetNamespace() != "other" {
 		t.Fatal("namespace matches lost")
+	}
+}
+
+func TestListFailedVolcanoJobsUsesFailureTime(t *testing.T) {
+	var order string
+	client := &VirtualClusterClient{
+		profiles: map[string]clientProfile{"d": {Name: "d", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.example.test"}},
+		httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			order = r.URL.Query().Get("order")
+			body := `{"apiVersion":"batch.volcano.sh/v1alpha1","kind":"JobList","items":[{"apiVersion":"batch.volcano.sh/v1alpha1","kind":"Job","metadata":{"name":"recent-failure","creationTimestamp":"2026-09-01T00:00:00Z"},"status":{"state":{"phase":"Failed","lastTransitionTime":"2026-09-18T05:00:00Z"}}},{"apiVersion":"batch.volcano.sh/v1alpha1","kind":"Job","metadata":{"name":"old-failure","creationTimestamp":"2026-09-17T00:00:00Z"},"status":{"state":{"phase":"Failed","lastTransitionTime":"2026-09-17T05:00:00Z"}}}]}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		})},
+	}
+
+	items, err := client.ListVolcanoJobsPageForProfileSince(context.Background(), "d", "vc-example", `state="Failed"`, 50, time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("ListVolcanoJobsPageForProfileSince() error = %v", err)
+	}
+	if order != "updated_at desc" {
+		t.Fatalf("order = %q, want updated_at desc", order)
+	}
+	if len(items) != 1 || items[0].GetName() != "recent-failure" {
+		t.Fatalf("failed jobs = %#v, want recent-failure", items)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
@@ -58,6 +59,8 @@ type SSPAIRJobItem struct {
 	Queue         string
 	QueueType     string
 	Cluster       string
+	Namespace     string
+	HostNamespace string
 	Priority      string
 	Creator       string
 	Region        string
@@ -76,23 +79,25 @@ type SSPAIRJobItem struct {
 }
 
 type SSPAIRGatewayItem struct {
-	Name      string
-	UID       string
-	State     string
-	Workspace string
-	Queue     string
-	QueueType string
-	Cluster   string
-	Priority  string
-	Creator   string
-	Region    string
-	Profile   string
-	Replicas  int
-	CreatedAt string
-	UpdatedAt string
-	Resource  SSPAIRResourceItem
-	DNATRules []SSPAIRDNATItem
-	Raw       platform.SSPAIRGateway
+	Name          string
+	UID           string
+	State         string
+	Workspace     string
+	Queue         string
+	QueueType     string
+	Cluster       string
+	Namespace     string
+	HostNamespace string
+	Priority      string
+	Creator       string
+	Region        string
+	Profile       string
+	Replicas      int
+	CreatedAt     string
+	UpdatedAt     string
+	Resource      SSPAIRResourceItem
+	DNATRules     []SSPAIRDNATItem
+	Raw           platform.SSPAIRGateway
 }
 
 type SSPAIRJobListResult struct{ Items []SSPAIRJobItem }
@@ -207,6 +212,8 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 			return detailResult{err: fmt.Errorf("AIR job %q: %w", identifiers[index], queryErr)}
 		}
 		item := s.airJobItem(*detail)
+		pods, podErr := s.findAIRPods(ctx, item.UID)
+		setAIRNamespaces(&item.Namespace, &item.HostNamespace, pods)
 		if includeWorkers {
 			workers, total, workersErr := s.platform.ListSSPAIRWorkers(ctx, *detail, workerLimit)
 			if workersErr != nil {
@@ -220,14 +227,11 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 				})
 			}
 			if s.clientset != nil {
-				podCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-				pods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(podCtx, metav1.ListOptions{LabelSelector: labels.Set(map[string]string{sspWorkloadUIDLabel: item.UID}).AsSelector().String(), ResourceVersion: "0"})
-				cancel()
-				if err != nil {
-					item.PodEvidence = &podevidence.Result{Warnings: []string{"AIR Pod discovery: " + err.Error()}}
+				if podErr != nil {
+					item.PodEvidence = &podevidence.Result{Warnings: []string{"AIR Pod discovery: " + podErr.Error()}}
 				} else {
-					item.PodEvidence = collectWorkloadEvidence(ctx, s.clientset, s.platform, pods.Items, item.Name, "air", item.Workspace)
-					if len(pods.Items) == 0 {
+					item.PodEvidence = collectWorkloadEvidence(ctx, s.clientset, s.platform, pods, item.Name, "air", item.Workspace)
+					if len(pods) == 0 {
 						item.PodEvidence.Warnings = append(item.PodEvidence.Warnings, "No matching Pods in current kubeconfig; verify HC environment")
 					}
 				}
@@ -327,12 +331,38 @@ func (s *SSPAIRService) GetGateways(ctx context.Context, identifiers []string, r
 			}
 		case 1:
 			item := matches[0]
+			pods, _ := s.findAIRPods(ctx, item.UID)
+			setAIRNamespaces(&item.Namespace, &item.HostNamespace, pods)
 			result[index] = &item
 		default:
 			errs[index] = fmt.Errorf("AIR gateway %q matched multiple workspaces; use --workspace", identifier)
 		}
 	}
 	return result, compactErrors(errs)
+}
+
+func (s *SSPAIRService) findAIRPods(ctx context.Context, workloadUID string) ([]corev1.Pod, error) {
+	if s == nil || s.clientset == nil || strings.TrimSpace(workloadUID) == "" {
+		return nil, nil
+	}
+	podCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	pods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(podCtx, metav1.ListOptions{
+		LabelSelector:   labels.Set(map[string]string{sspWorkloadUIDLabel: workloadUID}).AsSelector().String(),
+		ResourceVersion: "0",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pods.Items, nil
+}
+
+func setAIRNamespaces(namespace *string, hostNamespace *string, pods []corev1.Pod) {
+	if len(pods) == 0 {
+		return
+	}
+	*hostNamespace = strings.TrimSpace(pods[0].Namespace)
+	*namespace = aidWorkspaceNamespace(pods, *hostNamespace)
 }
 
 func airLooksLikeUUID(value string) bool {

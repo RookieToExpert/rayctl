@@ -568,7 +568,9 @@ func nodeHasUserWorkloadScope(node *corev1.Node) bool {
 	if node == nil {
 		return false
 	}
-	return nodeResolveClusterUID(node.Labels) != "" || strings.TrimSpace(node.Labels[nodeQueueUIDLabelKey]) != ""
+	return nodeResolveClusterUID(node.Labels) != "" ||
+		strings.TrimSpace(node.Labels[nodeQueueUIDLabelKey]) != "" ||
+		strings.EqualFold(strings.TrimSpace(node.Labels[prodRoleLabelKey]), "ecs")
 }
 
 func isUserWorkloadPod(pod corev1.Pod) bool {

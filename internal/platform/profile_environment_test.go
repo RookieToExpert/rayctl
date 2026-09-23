@@ -44,6 +44,24 @@ func TestResolveProfileNameUsesMatchingTenantEnvironment(t *testing.T) {
 	}
 }
 
+func TestProfileNamesFiltersCurrentEnvironment(t *testing.T) {
+	client := &VirtualClusterClient{
+		currentProfile: "tenant-a-d",
+		profiles: map[string]clientProfile{
+			"tenant-a-d":  {Name: "tenant-a-d", BaseURL: "https://management.d.pjlab.org.cn", Region: "cn-pj-01"},
+			"tenant-b-d":  {Name: "tenant-b-d", BaseURL: "https://management.d.pjlab.org.cn", Region: "cn-pj-01"},
+			"tenant-a-pt": {Name: "tenant-a-pt", BaseURL: "https://management.pjlab.org.cn", Region: "cn-pj-03"},
+		},
+	}
+	got := client.ProfileNames("")
+	if len(got) != 2 || got[0] != "tenant-a-d" || got[1] != "tenant-b-d" {
+		t.Fatalf("ProfileNames(current) = %#v", got)
+	}
+	if all := client.ProfileNames("all"); len(all) != 3 {
+		t.Fatalf("ProfileNames(all) = %#v", all)
+	}
+}
+
 func TestSelectProfileForProcessDoesNotRequireConfigRewrite(t *testing.T) {
 	client := &VirtualClusterClient{
 		currentProfile: "ailabdev",

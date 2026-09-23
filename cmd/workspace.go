@@ -19,6 +19,62 @@ func newWorkspaceCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newWorkspaceListCmd())
 	cmd.AddCommand(newWorkspaceGetCmd())
+	cmd.AddCommand(newWorkspaceNodeCmd())
+	return cmd
+}
+
+func newWorkspaceNodeCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "node", Short: "查询 SSP workspace 的节点资源水位"}
+	cmd.AddCommand(newWorkspaceNodeUsageCmd())
+	return cmd
+}
+
+func newWorkspaceNodeUsageCmd() *cobra.Command {
+	var freeOnly bool
+	cmd := &cobra.Command{
+		Use:     "usage <workspace-name-or-uid> [workspace-name-or-uid...]",
+		Short:   "并行查看一个或多个 SSP workspace 的逐节点资源水位",
+		Long:    "聚合 workspace 下所有 queue 的节点并按 IP/hostname 去重；ALLOC/TOTAL 表示用户工作负载已申请资源/节点可分配资源。",
+		Example: "  rayctl ws node usage ws-d-a3-ai4s\n  rayctl ws node usage ws-d-a3-ai4s --free",
+		Args:    cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			region, err := selectedSSPRegionForLookup()
+			if err != nil {
+				return err
+			}
+			resourceService, err := newSSPResourceQueryService()
+			if err != nil {
+				return err
+			}
+			type queryResult struct {
+				identifier string
+				result     *service.SSPWorkspaceNodeUsageResult
+				err        error
+			}
+			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
+				result, queryErr := resourceService.GetWorkspaceNodeUsage(ctx, identifier, region)
+				return queryResult{identifier: identifier, result: result, err: queryErr}
+			})
+			queryErrors := make([]error, 0)
+			valid := make([]*service.SSPWorkspaceNodeUsageResult, 0, len(results))
+			for _, result := range results {
+				if result.err != nil {
+					queryErrors = append(queryErrors, fmt.Errorf("workspace %q: %w", result.identifier, result.err))
+					continue
+				}
+				if freeOnly {
+					result.result.FilterFreeNodes()
+				}
+				for _, warning := range result.result.Warnings {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning)
+				}
+				valid = append(valid, result.result)
+			}
+			output.PrintSSPWorkspaceNodeUsage(valid)
+			return errors.Join(queryErrors...)
+		},
+	}
+	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用资源的节点；加速节点按卡数，CPU-only 节点按 CPU/内存")
 	return cmd
 }
 

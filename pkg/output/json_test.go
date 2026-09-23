@@ -84,6 +84,25 @@ func TestJSONListPreservesLimitMetadata(t *testing.T) {
 	}
 }
 
+func TestJSONListCollectsResultWarningsAtTopLevel(t *testing.T) {
+	session := BeginJSON()
+	defer EndJSON()
+	PrintECPJobList(&service.JobClusterListResult{Warnings: []string{"skipped vc-test"}})
+	var buffer bytes.Buffer
+	if err := session.Write(&buffer, true, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(buffer.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Warnings) != 1 || payload.Warnings[0] != "skipped vc-test" {
+		t.Fatal(buffer.String())
+	}
+}
+
 func TestJSONResourceUnits(t *testing.T) {
 	value, ok := resourceJSON(".cpu", "500m")
 	if !ok || value.(map[string]any)["unit"] != "millicores" || value.(map[string]any)["value"] != 500.0 {

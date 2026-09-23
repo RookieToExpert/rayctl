@@ -79,6 +79,7 @@ func newECPJobListCmd() *cobra.Command {
 	var limit int
 	var all bool
 	var includeInactive bool
+	var since string
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -94,6 +95,10 @@ func newECPJobListCmd() *cobra.Command {
 		}, "\n"),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			createdAfter, windowed, err := resolveListCreatedAfter(all, cmd.Flags().Changed("since"), since)
+			if err != nil {
+				return err
+			}
 			if !isValidClusterStatusFilter(state) && strings.TrimSpace(state) != "" {
 				return fmt.Errorf("unsupported status filter %q", state)
 			}
@@ -113,7 +118,10 @@ func newECPJobListCmd() *cobra.Command {
 			if all {
 				queryLimit = 0
 			}
-			result, err := jobService.ListCurrentTenantVolcanoJobs(cmd.Context(), includeInactive, state, queryLimit)
+			if windowed {
+				queryLimit = 5000
+			}
+			result, err := jobService.ListCurrentTenantVolcanoJobsSince(cmd.Context(), includeInactive, state, queryLimit, createdAfter)
 			if err != nil {
 				return err
 			}
@@ -124,9 +132,10 @@ func newECPJobListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&state, "state", "s", "", "按状态筛选: pending、running、active 或 all")
+	cmd.Flags().StringVarP(&state, "state", "s", "", "按状态筛选: pending、running、active、failed 或 all")
 	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "最多显示的最新任务数，范围 1-1000")
-	cmd.Flags().BoolVarP(&all, "all", "A", false, "显示全部匹配任务，忽略 --limit")
+	cmd.Flags().BoolVarP(&all, "all", "A", false, "显示最近 --since 时间窗内的任务，默认 7d，最多 5000 条")
+	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制创建时间窗口，例如 24h、7d、30d；单独使用也会启用窗口扫描")
 	cmd.Flags().BoolVar(&includeInactive, "all-status", false, "查询包括已结束任务在内的历史任务")
 	cmd.AddCommand(newJobListClusterCmd())
 	return cmd
@@ -212,7 +221,7 @@ func newJobListClusterCmd() *cobra.Command {
 
 func isValidClusterStatusFilter(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "pending", "running", "active", "all":
+	case "pending", "running", "active", "failed", "all":
 		return true
 	default:
 		return false

@@ -28,6 +28,66 @@ func TestEnsurePVCGetDiagnosisForPendingPVC(t *testing.T) {
 	}
 }
 
+func TestFilterLocalECPVolcanoJobs(t *testing.T) {
+	job := func(name, namespace, submitter, phase string, created time.Time) unstructured.Unstructured {
+		labels := map[string]any{}
+		if submitter != "" {
+			labels["lepton.sensetime.com/submitter"] = submitter
+		}
+		return unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": name, "namespace": namespace, "creationTimestamp": created.Format(time.RFC3339), "labels": labels},
+			"status":   map[string]any{"state": map[string]any{"phase": phase}},
+		}}
+	}
+	now := time.Now()
+	jobs := []unstructured.Unstructured{
+		job("default-without-submitter", "default", "", "Running", now.Add(-time.Minute)),
+		job("named-namespace", "experiment", "alice", "Pending", now),
+		job("ssp-job", "workspace-uid", "", "Running", now.Add(time.Minute)),
+		job("finished", "default", "", "Completed", now.Add(2*time.Minute)),
+	}
+
+	got := filterLocalECPVolcanoJobs(jobs, false, "", 10, time.Time{})
+	if len(got) != 2 || got[0].GetName() != "named-namespace" || got[1].GetName() != "default-without-submitter" {
+		t.Fatalf("filtered active jobs = %#v", got)
+	}
+	got = filterLocalECPVolcanoJobs(jobs, true, "all", 2, time.Time{})
+	if len(got) != 2 || got[0].GetName() != "finished" || got[1].GetName() != "named-namespace" {
+		t.Fatalf("filtered all jobs with limit = %#v", got)
+	}
+	got = filterLocalECPVolcanoJobs(jobs, true, "all", 10, now.Add(-30*time.Second))
+	if len(got) != 2 || got[0].GetName() != "finished" || got[1].GetName() != "named-namespace" {
+		t.Fatalf("filtered jobs after cutoff = %#v", got)
+	}
+	recentFailure := job("recent-failure", "default", "", "Failed", now.Add(-48*time.Hour))
+	if err := unstructured.SetNestedField(recentFailure.Object, now.Format(time.RFC3339), "status", "state", "lastTransitionTime"); err != nil {
+		t.Fatal(err)
+	}
+	oldFailure := job("old-failure", "default", "", "Failed", now.Add(-time.Hour))
+	if err := unstructured.SetNestedField(oldFailure.Object, now.Add(-2*time.Hour).Format(time.RFC3339), "status", "state", "lastTransitionTime"); err != nil {
+		t.Fatal(err)
+	}
+	got = filterLocalECPVolcanoJobs([]unstructured.Unstructured{oldFailure, recentFailure}, true, "failed", 10, now.Add(-30*time.Minute))
+	if len(got) != 1 || got[0].GetName() != "recent-failure" {
+		t.Fatalf("failed jobs after cutoff = %#v", got)
+	}
+}
+
+func TestFindVClusterHostNamespaceUsesLogicalNamespaceMapping(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "vcluster-resource-default",
+		Labels: map[string]string{
+			clusterVirtualNamespaceLabelKey: "vc-cluster-uid",
+			clusterLogicalNamespaceLabelKey: "default",
+		},
+	}})
+	service := NewJobService(clientset, nil, nil)
+	got := service.findVClusterHostNamespace(context.Background(), "cluster-uid", "default")
+	if got != "vcluster-resource-default" {
+		t.Fatalf("host namespace = %q", got)
+	}
+}
+
 func TestEnsurePVCGetDiagnosisPrioritizesMissingPVC(t *testing.T) {
 	_, diagnosis := ensurePVCGetDiagnosis("Pending", false, "", nil, []VolumeClaimRef{
 		{ClaimName: "pvc-pending", Status: string(corev1.ClaimPending)},
@@ -103,6 +163,7 @@ func TestVolcanoJobAPIStateFilter(t *testing.T) {
 		{name: "default active", want: `(state="Running" OR state="Pending")`},
 		{name: "pending", status: "pending", want: `state="Pending"`},
 		{name: "running", status: "running", want: `state="Running"`},
+		{name: "failed", status: "failed", want: `state="Failed"`},
 		{name: "active", status: "active", want: `(state="Running" OR state="Pending")`},
 		{name: "all status flag", includeInactive: true, want: ""},
 		{name: "all filter", status: "all", want: ""},

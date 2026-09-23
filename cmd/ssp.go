@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -30,12 +32,17 @@ func newAIDListCmd() *cobra.Command {
 	var state string
 	var limit int
 	var all bool
+	var since string
 	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出当前环境中的 AID 开发机",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			createdAfter, windowed, err := resolveListCreatedAfter(all, cmd.Flags().Changed("since"), since)
+			if err != nil {
+				return err
+			}
 			region, err := selectedSSPRegion()
 			if err != nil {
 				return err
@@ -48,7 +55,7 @@ func newAIDListCmd() *cobra.Command {
 				catalog.SetKubeClient(clientset)
 			}
 			result, err := catalog.ListAID(cmd.Context(), service.SSPCatalogListOptions{
-				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: all, IncludeNodes: longOutput,
+				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: windowed, CreatedAfter: createdAfter, IncludeNodes: longOutput,
 			})
 			if err != nil {
 				return err
@@ -58,6 +65,7 @@ func newAIDListCmd() *cobra.Command {
 		},
 	}
 	addSSPCatalogListFlags(cmd, &workspace, &queue, &state, &limit, &all)
+	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制创建时间窗口，例如 24h、7d、30d；单独使用也会启用窗口扫描")
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示资源规格和创建时间")
 	return cmd
 }
@@ -136,11 +144,16 @@ func newAITListCmd() *cobra.Command {
 	var state string
 	var limit int
 	var all bool
+	var since string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出当前环境中的 AIT 训练任务",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			createdAfter, windowed, err := resolveListCreatedAfter(all, cmd.Flags().Changed("since"), since)
+			if err != nil {
+				return err
+			}
 			region, err := selectedSSPRegion()
 			if err != nil {
 				return err
@@ -150,7 +163,7 @@ func newAITListCmd() *cobra.Command {
 				return err
 			}
 			result, err := catalog.ListAIT(cmd.Context(), service.SSPCatalogListOptions{
-				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: all,
+				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: windowed, CreatedAfter: createdAfter,
 			})
 			if err != nil {
 				return err
@@ -160,6 +173,7 @@ func newAITListCmd() *cobra.Command {
 		},
 	}
 	addSSPCatalogListFlags(cmd, &workspace, &queue, &state, &limit, &all)
+	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制时间窗口；FAILED 按失败时间，其他状态按创建时间，例如 24h、7d、30d")
 	return cmd
 }
 
@@ -168,7 +182,34 @@ func addSSPCatalogListFlags(cmd *cobra.Command, workspace *string, queue *string
 	cmd.Flags().StringVarP(queue, "queue", "q", "", "只查询指定 queue；会自动定位所属 workspace")
 	cmd.Flags().StringVarP(state, "state", "s", "", "按状态筛选，例如 Running、Pending")
 	cmd.Flags().IntVarP(limit, "limit", "n", 50, "最多显示的最新记录数，范围 1-1000")
-	cmd.Flags().BoolVarP(all, "all", "A", false, "显示全部记录，忽略 --limit")
+	cmd.Flags().BoolVarP(all, "all", "A", false, "显示最近 --since 时间窗内的记录，默认 7d，最多 5000 条")
+}
+
+func resolveListCreatedAfter(all bool, sinceChanged bool, since string) (time.Time, bool, error) {
+	if !all && !sinceChanged {
+		return time.Time{}, false, nil
+	}
+	duration, err := parseListDuration(since)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("invalid --since %q, examples: 24h, 7d, 30d", since)
+	}
+	return time.Now().Add(-duration), true, nil
+}
+
+func parseListDuration(value string) (time.Duration, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if strings.HasSuffix(value, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(value, "d"))
+		if err != nil || days < 1 {
+			return 0, fmt.Errorf("invalid day duration")
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("invalid duration")
+	}
+	return duration, nil
 }
 
 func newSSPCatalogQueryService() (*service.SSPCatalogService, error) {

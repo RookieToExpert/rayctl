@@ -17,6 +17,7 @@ func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
 		{name: "subnet get", root: newSubnetCmd(), path: []string{"get"}},
 		{name: "natgw get", root: newNATGatewayCmd(), path: []string{"get"}},
 		{name: "vc node list", root: newVCCmd(), path: []string{"node", "list"}},
+		{name: "workspace node usage", root: newWorkspaceCmd(), path: []string{"node", "usage"}},
 		{name: "user get", root: newUserCmd(), path: []string{"get"}},
 		{name: "aid get", root: newAIDCmd(), path: []string{"get"}},
 		{name: "ait get", root: newAITCmd(), path: []string{"get"}},

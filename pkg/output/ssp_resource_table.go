@@ -372,7 +372,11 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool,
 				row = append(row, emptyDash(item.Resource))
 			}
 			if includeCreated {
-				row = append(row, emptyDash(item.CreatedAt))
+				value := item.CreatedAt
+				if result.TimeLabel == "FAILED" {
+					value = item.EndedAt
+				}
+				row = append(row, emptyDash(value))
 			}
 			rows = append(rows, row)
 		}
@@ -396,7 +400,11 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool,
 		minWidths = append(minWidths, 24)
 	}
 	if includeCreated {
-		headers = append(headers, "CREATED")
+		header := "CREATED"
+		if result != nil && result.TimeLabel != "" {
+			header = result.TimeLabel
+		}
+		headers = append(headers, header)
 		maxWidths = append(maxWidths, 20)
 		minWidths = append(minWidths, 19)
 	}
@@ -454,7 +462,8 @@ func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {
 	rows := [][]string{
 		{"TYPE", "AIR JOB"}, {"NAME", emptyDash(result.Name)}, {"UID", emptyDash(result.UID)},
 		{"STATE", emptyDash(result.State)}, {"WORKSPACE", emptyDash(result.Workspace)}, {"QUEUE", emptyDash(result.Queue)},
-		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)}, {"PRIORITY", emptyDash(result.Priority)},
+		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)},
+		{"VC NAMESPACE", emptyDash(result.Namespace)}, {"HOST NAMESPACE", emptyDash(result.HostNamespace)}, {"PRIORITY", emptyDash(result.Priority)},
 		{"READY / TOTAL", fmt.Sprintf("%d / %d", result.ReadyReplicas, result.Replicas)}, {"CREATOR", emptyDash(result.Creator)},
 		{"INTERNAL IP", emptyDash(result.InternalIP)}, {"REGION", emptyDash(result.Region)}, {"PROFILE", emptyDash(result.Profile)},
 		{"CREATED", emptyDash(result.CreatedAt)}, {"UPDATED", emptyDash(result.UpdatedAt)},
@@ -536,7 +545,8 @@ func PrintSSPAIRGatewayDetail(result *service.SSPAIRGatewayItem, longOutput bool
 	rows := [][]string{
 		{"TYPE", "AIR GATEWAY"}, {"NAME", emptyDash(result.Name)}, {"UID", emptyDash(result.UID)},
 		{"STATE", emptyDash(result.State)}, {"WORKSPACE", emptyDash(result.Workspace)}, {"QUEUE", emptyDash(result.Queue)},
-		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)}, {"PRIORITY", emptyDash(result.Priority)},
+		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)},
+		{"VC NAMESPACE", emptyDash(result.Namespace)}, {"HOST NAMESPACE", emptyDash(result.HostNamespace)}, {"PRIORITY", emptyDash(result.Priority)},
 		{"REPLICAS", strconv.Itoa(result.Replicas)}, {"CREATOR", emptyDash(result.Creator)}, {"REGION", emptyDash(result.Region)},
 		{"PROFILE", emptyDash(result.Profile)}, {"CREATED", emptyDash(result.CreatedAt)}, {"UPDATED", emptyDash(result.UpdatedAt)},
 	}
@@ -689,13 +699,115 @@ func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
 }
 
+func PrintSSPWorkspaceNodeUsage(results []*service.SSPWorkspaceNodeUsageResult) {
+	if captureJSON(results) {
+		return
+	}
+	multipleWorkspaces := len(results) > 1
+	showAccelerator := false
+	showRDMA := false
+	rows := make([][]string, 0)
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		for _, item := range result.Items {
+			showAccelerator = showAccelerator || sspNodeUsageItemHasAccelerator(item)
+			showRDMA = showRDMA || sspNodeUsageItemHasRDMA(item)
+		}
+		if result.SharedVCPools {
+			fmt.Fprintf(os.Stdout, "说明 [%s]: ELASTIC queue 的节点来自 VC 共享候选池；相同节点已按 IP/hostname 合并。\n\n", emptyDash(result.Workspace.Name))
+		}
+	}
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		for _, item := range result.Items {
+			row := []string{emptyDash(compactWorkspaceQueueNames(result.Workspace.Name, item.Queues)), emptyDash(item.HostName), emptyDash(item.HostIP), emptyDash(item.State)}
+			if showAccelerator {
+				row = append(row, emptyDash(formatPlatformResourcePair(item.AcceleratorAllocated, item.AcceleratorTotalText)))
+			}
+			if showRDMA {
+				row = append(row, formatPlatformResourcePair(item.RDMAAllocated, item.RDMATotal))
+			}
+			row = append(row,
+				emptyDash(formatPlatformResourcePair(item.CPUAllocated, item.CPUTotal)),
+				emptyDash(formatPlatformResourcePair(item.MemoryAllocated, item.MemoryTotal)),
+			)
+			if multipleWorkspaces {
+				row = append([]string{emptyDash(result.Workspace.Name)}, row...)
+			}
+			rows = append(rows, row)
+		}
+	}
+	headers := []string{"QUEUES", "HOST", "IP", "STATE"}
+	widths := []int{34, 20, 15, 10}
+	minimums := []int{18, 20, 15, 8}
+	emptyRow := []string{"-", "-", "-", "-"}
+	if showAccelerator {
+		headers = append(headers, "ACCEL ALLOC/TOTAL")
+		widths = append(widths, 18)
+		minimums = append(minimums, 17)
+		emptyRow = append(emptyRow, "-")
+	}
+	if showRDMA {
+		headers = append(headers, "RDMA ALLOC/TOTAL")
+		widths = append(widths, 17)
+		minimums = append(minimums, 16)
+		emptyRow = append(emptyRow, "-")
+	}
+	headers = append(headers, "CPU ALLOC/TOTAL", "MEMORY ALLOC/TOTAL")
+	widths = append(widths, 18, 22)
+	minimums = append(minimums, 15, 20)
+	emptyRow = append(emptyRow, "-", "-")
+	if multipleWorkspaces {
+		headers = append([]string{"WORKSPACE"}, headers...)
+		widths = append([]int{34}, widths...)
+		minimums = append([]int{18}, minimums...)
+		emptyRow = append([]string{"-"}, emptyRow...)
+	}
+	if len(rows) == 0 {
+		rows = append(rows, emptyRow)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
+}
+
+func compactWorkspaceQueueNames(workspace string, queues string) string {
+	workspace = strings.TrimSpace(strings.TrimPrefix(workspace, "ws-"))
+	environment, _, found := strings.Cut(workspace, "-")
+	if !found || environment == "" {
+		return queues
+	}
+	prefix := "queue-" + environment + "-"
+	parts := strings.Split(queues, ",")
+	for index := range parts {
+		parts[index] = strings.TrimSpace(parts[index])
+		if strings.HasPrefix(strings.ToLower(parts[index]), strings.ToLower(prefix)) {
+			parts[index] = parts[index][len(prefix):]
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sspNodeUsageItemHasRDMA(item service.SSPQueueNodeUsageItem) bool {
+	return platformResourceAmountIsPositive(item.RDMATotal) || platformResourceAmountIsPositive(item.RDMAAllocated)
+}
+
+func sspNodeUsageItemHasAccelerator(item service.SSPQueueNodeUsageItem) bool {
+	return item.AcceleratorTotal > 0 || item.AcceleratorFree > 0 ||
+		platformResourceAmountIsPositive(item.AcceleratorTotalText) ||
+		platformResourceAmountIsPositive(item.AcceleratorAllocated) ||
+		platformResourceAmountIsPositive(item.Accelerator)
+}
+
 func sspQueueUsageHasRDMA(results []*service.SSPQueueNodeUsageResult) bool {
 	for _, result := range results {
 		if result == nil {
 			continue
 		}
 		for _, item := range result.Items {
-			if platformResourceAmountIsPositive(item.RDMATotal) || platformResourceAmountIsPositive(item.RDMAAllocated) {
+			if sspNodeUsageItemHasRDMA(item) {
 				return true
 			}
 		}
@@ -709,10 +821,7 @@ func sspQueueUsageHasAccelerator(results []*service.SSPQueueNodeUsageResult) boo
 			continue
 		}
 		for _, item := range result.Items {
-			if item.AcceleratorTotal > 0 || item.AcceleratorFree > 0 ||
-				platformResourceAmountIsPositive(item.AcceleratorTotalText) ||
-				platformResourceAmountIsPositive(item.AcceleratorAllocated) ||
-				platformResourceAmountIsPositive(item.Accelerator) {
+			if sspNodeUsageItemHasAccelerator(item) {
 				return true
 			}
 		}

@@ -20,11 +20,22 @@ func TestFilterAndSortSSPCatalogItems(t *testing.T) {
 	}
 }
 
+func TestFilterAndSortFailedSSPCatalogItemsUsesEndedAt(t *testing.T) {
+	items := []SSPCatalogListItem{
+		{Name: "created-newer", State: "Failed", CreatedAt: "2026-09-18 12:00:00", EndedAt: "2026-09-18 12:10:00"},
+		{Name: "failed-newer", State: "FAILED", CreatedAt: "2026-09-17 12:00:00", EndedAt: "2026-09-18 13:00:00"},
+	}
+	got := filterAndSortSSPCatalogItems(items, "failed", 1)
+	if len(got) != 1 || got[0].Name != "failed-newer" {
+		t.Fatalf("failed items = %#v, want failed-newer", got)
+	}
+}
+
 func TestValidateSSPCatalogLimit(t *testing.T) {
 	if got, err := resolveSSPCatalogLimit(0, false); err != nil || got != 50 {
 		t.Fatalf("default limit = %d, %v", got, err)
 	}
-	if got, err := resolveSSPCatalogLimit(50, true); err != nil || got != -1 {
+	if got, err := resolveSSPCatalogLimit(50, true); err != nil || got != 5000 {
 		t.Fatalf("all limit = %d, %v", got, err)
 	}
 	if _, err := resolveSSPCatalogLimit(1001, false); err == nil {

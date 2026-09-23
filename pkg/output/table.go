@@ -228,7 +228,8 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 		{"JOB", result.Name},
 		{"STATUS", emptyDash(result.Status)},
 		{"VC", result.VClusterName},
-		{"NAMESPACE", result.Namespace},
+		{"VC NAMESPACE", result.Namespace},
+		{"HOST NAMESPACE", emptyDash(result.HostNamespace)},
 	}
 	if longOutput {
 		summaryRows = append(summaryRows, []string{"UID", result.UID})
@@ -367,7 +368,8 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 		{"WORKSPACE", emptyDash(result.Workspace)},
 		{"QUEUE", emptyDash(result.Queue)},
 		{"QUEUE TYPE", emptyDash(result.QueueType)},
-		{"NAMESPACE", emptyDash(result.Namespace)},
+		{"VC NAMESPACE", emptyDash(result.Namespace)},
+		{"HOST NAMESPACE", emptyDash(result.HostNamespace)},
 	}
 	if longOutput {
 		summaryRows = append(summaryRows, []string{"UID", emptyDash(result.UID)})
@@ -581,7 +583,8 @@ func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool, debugTi
 		{"STATE", emptyDash(result.State)},
 		{"VC", emptyDash(result.VCluster)},
 		{"WORKSPACE", emptyDash(result.Workspace)},
-		{"NAMESPACE", emptyDash(result.Namespace)},
+		{"VC NAMESPACE", emptyDash(result.Namespace)},
+		{"HOST NAMESPACE", emptyDash(result.HostNamespace)},
 		{"QUEUE", emptyDash(result.Queue)},
 		{"QUEUE TYPE", emptyDash(result.QueueType)},
 		{"PRIORITY", emptyDash(result.Priority)},
@@ -806,6 +809,16 @@ func PrintECPJobList(result *service.JobClusterListResult) {
 		},
 	)
 	fmt.Fprintf(os.Stdout, "\n本次筛选共 %d 条。\n", total)
+	if result != nil && len(result.Warnings) > 0 {
+		const warningLimit = 5
+		for index, warning := range result.Warnings {
+			if index >= warningLimit {
+				fmt.Fprintf(os.Stdout, "Warning: 另有 %d 个 VC 查询失败。\n", len(result.Warnings)-warningLimit)
+				break
+			}
+			fmt.Fprintf(os.Stdout, "Warning: %s\n", warning)
+		}
+	}
 }
 
 func PrintUserDetail(result *service.UserGetResult) {
@@ -842,32 +855,34 @@ func PrintUserDetail(result *service.UserGetResult) {
 		},
 	)
 
-	if len(result.Jobs) == 0 {
-		return
+	if len(result.Workloads) > 0 {
+		fmt.Fprintln(os.Stdout)
+		printUserWorkloadTable(result.Workloads)
+	} else if len(result.Jobs) > 0 {
+		fmt.Fprintln(os.Stdout)
+		jobRows := make([][]string, 0, maxInt(1, len(result.Jobs)))
+		for _, job := range result.Jobs {
+			jobRows = append(jobRows, []string{
+				emptyDash(job.ClusterName),
+				emptyDash(job.JobName),
+				emptyDash(job.Status),
+				emptyDash(job.CreatedAtShort),
+			})
+		}
+		printBoxTableWithOptions(
+			[]string{"分区名", "任务", "状态", "创建时间"},
+			jobRows,
+			[]int{24, 64, 10, 11},
+			tableOptions{
+				noWrapCells: makeNoWrapCells(append(
+					noWrapCellsForSingleColumn(len(jobRows), 2),
+					noWrapCellsForSingleColumn(len(jobRows), 3)...,
+				)...),
+				minWidths: []int{12, 20, 7, 11},
+			},
+		)
 	}
-
-	fmt.Fprintln(os.Stdout)
-	jobRows := make([][]string, 0, maxInt(1, len(result.Jobs)))
-	for _, job := range result.Jobs {
-		jobRows = append(jobRows, []string{
-			emptyDash(job.ClusterName),
-			emptyDash(job.JobName),
-			emptyDash(job.Status),
-			emptyDash(job.CreatedAtShort),
-		})
-	}
-	printBoxTableWithOptions(
-		[]string{"分区名", "任务", "状态", "创建时间"},
-		jobRows,
-		[]int{24, 64, 10, 11},
-		tableOptions{
-			noWrapCells: makeNoWrapCells(append(
-				noWrapCellsForSingleColumn(len(jobRows), 2),
-				noWrapCellsForSingleColumn(len(jobRows), 3)...,
-			)...),
-			minWidths: []int{12, 20, 7, 11},
-		},
-	)
+	printUserWorkloadWarnings(result.WorkloadWarnings)
 }
 
 func userGroupNames(groups []service.AuthGroupItem) string {
@@ -894,16 +909,69 @@ func PrintUserSummary(results []*service.UserGetResult, includeJobs bool) {
 		return
 	}
 	jobRows := make([][]string, 0)
+	workloadRows := make([][]string, 0)
 	for _, result := range results {
+		for _, workload := range result.Workloads {
+			workloadRows = append(workloadRows, append([]string{emptyDash(result.Username)}, userWorkloadRow(workload)...))
+		}
 		for _, job := range result.Jobs {
 			jobRows = append(jobRows, []string{emptyDash(result.Username), emptyDash(job.ClusterName), emptyDash(job.JobName), emptyDash(job.Status), emptyDash(job.CreatedAtShort)})
 		}
 	}
+	if len(workloadRows) > 0 {
+		fmt.Fprintln(os.Stdout)
+		printBoxTableWithOptions(
+			[]string{"USER", "TYPE", "WORKLOAD", "STATE", "WORKSPACE", "QUEUE / VC", "CREATED"},
+			workloadRows,
+			[]int{20, 5, 46, 12, 28, 32, 19},
+			tableOptions{minWidths: []int{10, 4, 18, 8, 12, 12, 16}},
+		)
+		for _, result := range results {
+			printUserWorkloadWarnings(result.WorkloadWarnings)
+		}
+		return
+	}
 	if len(jobRows) == 0 {
+		for _, result := range results {
+			printUserWorkloadWarnings(result.WorkloadWarnings)
+		}
 		return
 	}
 	fmt.Fprintln(os.Stdout)
 	printBoxTableWithOptions([]string{"USERNAME", "VC", "JOB", "STATUS", "CREATED"}, jobRows, []int{24, 24, 56, 10, 11}, tableOptions{minWidths: []int{12, 12, 18, 8, 11}})
+	for _, result := range results {
+		printUserWorkloadWarnings(result.WorkloadWarnings)
+	}
+}
+
+func printUserWorkloadTable(items []service.UserWorkloadItem) {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, userWorkloadRow(item))
+	}
+	printBoxTableWithOptions(
+		[]string{"TYPE", "WORKLOAD", "STATE", "WORKSPACE", "QUEUE / VC", "CREATED"},
+		rows,
+		[]int{5, 52, 12, 28, 32, 19},
+		tableOptions{minWidths: []int{4, 18, 8, 12, 12, 16}},
+	)
+}
+
+func userWorkloadRow(item service.UserWorkloadItem) []string {
+	location := firstNonEmptyOutput(item.Queue, item.VCluster)
+	if strings.TrimSpace(item.Queue) != "" && strings.TrimSpace(item.VCluster) != "" && !strings.EqualFold(strings.TrimSpace(item.Queue), strings.TrimSpace(item.VCluster)) {
+		location = item.Queue + " / " + item.VCluster
+	}
+	return []string{
+		emptyDash(item.Type), emptyDash(item.Name), emptyDash(item.State),
+		emptyDash(item.Workspace), emptyDash(location), emptyDash(item.CreatedAt),
+	}
+}
+
+func printUserWorkloadWarnings(warnings []string) {
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stdout, "Warning: %s\n", warning)
+	}
 }
 
 func PrintAuthAFSResult(result *service.AuthAFSResult) {
@@ -1011,21 +1079,74 @@ func PrintAuthUserSummary(results []*service.AuthUserResult) {
 		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, [][]string{{"-", "-"}}, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
 		return
 	}
-	for resultIndex, result := range results {
+	type userGroup struct {
+		result  *service.AuthUserResult
+		results []*service.AuthUserResult
+	}
+	groups := make([]userGroup, 0)
+	indexes := map[string]int{}
+	for _, result := range results {
+		key := strings.ToLower(firstNonEmptyOutput(result.Username, result.ID))
+		index, ok := indexes[key]
+		if !ok {
+			copyResult := *result
+			copyResult.Groups = nil
+			groups = append(groups, userGroup{result: &copyResult})
+			index = len(groups) - 1
+			indexes[key] = index
+		}
+		groups[index].results = append(groups[index].results, result)
+		seenGroups := map[string]struct{}{}
+		for _, item := range groups[index].result.Groups {
+			seenGroups[strings.ToLower(firstNonEmptyOutput(item.ID, item.Name, item.PosixGroupName))] = struct{}{}
+		}
+		for _, item := range result.Groups {
+			groupKey := strings.ToLower(firstNonEmptyOutput(item.ID, item.Name, item.PosixGroupName))
+			if _, exists := seenGroups[groupKey]; exists {
+				continue
+			}
+			groups[index].result.Groups = append(groups[index].result.Groups, item)
+			seenGroups[groupKey] = struct{}{}
+		}
+	}
+	for resultIndex, group := range groups {
 		if resultIndex > 0 {
 			fmt.Fprintln(os.Stdout)
 		}
-		printAuthUserIdentityTable(result)
-		permissions := compactAuthPermissions(result.Permissions)
-		rows := make([][]string, 0, maxInt(1, len(permissions)))
-		if len(permissions) == 0 {
-			rows = append(rows, []string{"-", "-"})
-		} else {
+		identities := make([]string, 0, len(group.results))
+		seenIdentities := map[string]struct{}{}
+		for _, result := range group.results {
+			identity := emptyDash(result.ID)
+			if len(group.results) > 1 {
+				identity = emptyDash(result.ProfileName) + "=" + identity
+			}
+			if _, exists := seenIdentities[identity]; exists {
+				continue
+			}
+			seenIdentities[identity] = struct{}{}
+			identities = append(identities, identity)
+		}
+		group.result.ID = strings.Join(identities, "\n")
+		printAuthUserIdentityTable(group.result)
+		rows := make([][]string, 0)
+		seen := map[string]struct{}{}
+		for _, result := range group.results {
+			permissions := compactAuthPermissions(result.Permissions)
+			if len(permissions) == 0 {
+				rows = append(rows, []string{emptyDash(result.ProfileName), emptyDash(strings.ToUpper(result.Environment)), "-", "-"})
+				continue
+			}
 			for _, item := range permissions {
-				rows = append(rows, []string{emptyDash(formatAuthScopeForUserDisplay(item.Scope, result.Groups)), emptyDash(item.Roles)})
+				row := []string{emptyDash(result.ProfileName), emptyDash(strings.ToUpper(result.Environment)), emptyDash(formatAuthScopeForUserDisplay(item.Scope, result.Groups)), emptyDash(item.Roles)}
+				key := strings.ToLower(strings.Join(row, "\x00"))
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				rows = append(rows, row)
 			}
 		}
-		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, rows, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
+		printBoxTableWithOptions([]string{"TENANT", "ENV", "SCOPE", "ROLES"}, rows, []int{24, 6, 50, 58}, tableOptions{minWidths: []int{12, 5, 18, 12}})
 	}
 }
 
@@ -1041,8 +1162,11 @@ func printAuthUserIdentityTable(result *service.AuthUserResult) {
 	printBoxTableWithOptions(
 		[]string{"USER", "ID", "GROUPS"},
 		[][]string{{username, id, groups}},
-		[]int{24, 36, 64},
-		tableOptions{minWidths: []int{12, 36, 16}},
+		[]int{24, 58, 48},
+		tableOptions{
+			noWrapCells: makeNoWrapCells([2]int{0, 1}),
+			minWidths:   []int{12, 58, 16},
+		},
 	)
 }
 
@@ -1072,6 +1196,7 @@ func PrintAuthGroupSummary(results []*service.AuthGroupResult) {
 			}
 		}
 		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, rows, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
+		printAuthGroupMembers(result, false)
 	}
 }
 
@@ -1114,6 +1239,8 @@ func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
 		[][]string{
+			{"PROFILE", emptyDash(result.ProfileName)},
+			{"ENVIRONMENT", emptyDash(strings.ToUpper(result.Environment))},
 			{"ID", emptyDash(result.ID)},
 			{"USERNAME", emptyDash(result.Username)},
 			{"NAME", emptyDash(result.Name)},
@@ -1134,6 +1261,8 @@ func PrintAuthUserResult(result *service.AuthUserResult, long bool) {
 				[2]int{5, 1},
 				[2]int{6, 1},
 				[2]int{7, 1},
+				[2]int{8, 1},
+				[2]int{9, 1},
 			),
 			minWidths: []int{10, 20},
 		},
@@ -1349,6 +1478,8 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 			{"POSIX", emptyDash(result.PosixGroupName)},
 			{"TENANT CODE", emptyDash(result.TenantCode)},
 			{"STATUS", emptyDash(result.Status)},
+			{"成员数量", strconv.Itoa(result.MemberCount)},
+			{"协管员数量", strconv.Itoa(result.AdminCount)},
 			{"权限数量", strconv.Itoa(len(permissions))},
 		},
 		[]int{14, 72},
@@ -1387,6 +1518,7 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 				minWidths: []int{18, 10},
 			},
 		)
+		printAuthGroupMembers(result, false)
 		return
 	}
 
@@ -1417,6 +1549,50 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 			minWidths:   []int{6, 8, 18, 10, 12, 19},
 		},
 	)
+	printAuthGroupMembers(result, true)
+}
+
+func printAuthGroupMembers(result *service.AuthGroupResult, long bool) {
+	if result == nil {
+		return
+	}
+	fmt.Fprintln(os.Stdout, "\n成员：")
+	rows := make([][]string, 0, maxInt(1, len(result.Members)))
+	for _, member := range result.Members {
+		row := []string{
+			emptyDash(member.Username), emptyDash(member.Name), emptyDash(member.Role),
+			emptyDash(member.Status), emptyDash(member.JoinTime),
+		}
+		if long {
+			inGroup := "否"
+			if member.InGroup {
+				inGroup = "是"
+			}
+			row = append([]string{emptyDash(member.ID)}, row...)
+			row = append(row, inGroup)
+		}
+		rows = append(rows, row)
+	}
+	headers := []string{"USERNAME", "NAME", "ROLE", "STATUS", "JOINED"}
+	widths := []int{24, 18, 12, 10, 19}
+	minimums := []int{12, 10, 8, 8, 19}
+	if long {
+		headers = append([]string{"ID"}, headers...)
+		headers = append(headers, "IN GROUP")
+		widths = append([]int{38}, widths...)
+		widths = append(widths, 10)
+		minimums = append([]int{36}, minimums...)
+		minimums = append(minimums, 8)
+	}
+	if len(rows) == 0 {
+		row := make([]string, len(headers))
+		for index := range row {
+			row[index] = "-"
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{minWidths: minimums})
+	fmt.Fprintf(os.Stdout, "\n成员 %d 人，其中协管员 %d 人。\n", result.MemberCount, result.AdminCount)
 }
 
 func PrintAuthGrantAFSResult(result *service.AuthGrantAFSResult) {

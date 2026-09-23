@@ -47,6 +47,17 @@ func captureJSON(value any) bool {
 		}
 		return true
 	}
+	explicitWarnings := []string{}
+	if v.IsValid() && v.Kind() == reflect.Struct {
+		field := v.FieldByName("Warnings")
+		if field.IsValid() && field.Kind() == reflect.Slice {
+			for index := 0; index < field.Len(); index++ {
+				if field.Index(index).Kind() == reflect.String {
+					explicitWarnings = append(explicitWarnings, field.Index(index).String())
+				}
+			}
+		}
+	}
 	warnings := []string{}
 	object := publicJSON(reflect.ValueOf(value), "", &warnings)
 	if item, ok := object.(map[string]any); ok {
@@ -56,6 +67,7 @@ func captureJSON(value any) bool {
 			}
 		}
 		item["warnings"] = warnings
+		jsonSession.Warnings = append(jsonSession.Warnings, explicitWarnings...)
 	}
 	jsonSession.Items = append(jsonSession.Items, object)
 	return true

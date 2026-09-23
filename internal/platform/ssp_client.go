@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 type SSPCluster struct {
@@ -262,10 +264,11 @@ type sspQueueNodeListResponse struct {
 }
 
 type SSPQueueWorkloadQuery struct {
-	Type     string
-	State    string
-	Priority string
-	Limit    int
+	Type         string
+	State        string
+	Priority     string
+	Limit        int
+	CreatedAfter time.Time
 }
 
 type SSPQueueWorkload struct {
@@ -295,6 +298,8 @@ type SSPQueueWorkload struct {
 		CreatorName string `json:"creator_name"`
 	} `json:"ownership"`
 	CreateTime string `json:"create_time"`
+	UpdateTime string `json:"update_time"`
+	EndTime    string `json:"end_time"`
 }
 
 type sspQueueWorkloadListResponse struct {
@@ -449,6 +454,178 @@ func (c *VirtualClusterClient) ListSSPClusterQueues(ctx context.Context, cluster
 			break
 		}
 		skip += count
+	}
+	return result, nil
+}
+
+func (c *VirtualClusterClient) ListSSPQueuesForRegion(ctx context.Context, region string) ([]SSPQueue, error) {
+	profiles := c.sspProfilesForRegion(region)
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("no platform profile configured for region %q", region)
+	}
+
+	const pageSize = 10
+	result := make([]SSPQueue, 0)
+	seen := make(map[string]struct{})
+	type pageResult struct {
+		skip    int
+		payload sspQueueListResponse
+		err     error
+	}
+	for _, profile := range profiles {
+		fetchPage := func(skip int) pageResult {
+			endpoint, _ := url.Parse(profile.BaseURL)
+			endpoint.Path = "/compute/ssp/v1/subscriptions/-/resourceGroups/-/regions/-/clusters/-/queues"
+			query := endpoint.Query()
+			query.Set("page_size", strconv.Itoa(pageSize))
+			query.Set("skip", strconv.Itoa(skip))
+			query.Set("order_by", "create_time desc")
+			endpoint.RawQuery = query.Encode()
+
+			var payload sspQueueListResponse
+			if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
+				return pageResult{skip: skip, err: err}
+			}
+			return pageResult{skip: skip, payload: payload}
+		}
+		appendPage := func(payload sspQueueListResponse) {
+			for index := range payload.Queues {
+				queue := payload.Queues[index]
+				normalizeSSPQueue(&queue, profile)
+				if strings.TrimSpace(region) != "" && !strings.EqualFold(strings.TrimSpace(queue.Region), strings.TrimSpace(region)) {
+					continue
+				}
+				key := strings.ToLower(profile.Name + "|" + firstNonEmpty(queue.UID, queue.Name))
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				result = append(result, queue)
+			}
+		}
+
+		first := fetchPage(0)
+		if first.err != nil {
+			return nil, fmt.Errorf("profile %s: %w", profile.Name, first.err)
+		}
+		appendPage(first.payload)
+		if len(first.payload.Queues) < pageSize {
+			continue
+		}
+
+		if first.payload.TotalSize <= 0 {
+			for skip := pageSize; ; skip += pageSize {
+				page := fetchPage(skip)
+				if page.err != nil {
+					return nil, fmt.Errorf("profile %s: %w", profile.Name, page.err)
+				}
+				appendPage(page.payload)
+				if len(page.payload.Queues) < pageSize {
+					break
+				}
+			}
+			continue
+		}
+
+		pageCount := (first.payload.TotalSize - 1) / pageSize
+		ordered := make([]pageResult, pageCount)
+		jobs := make(chan int)
+		var workers sync.WaitGroup
+		workers.Add(min(pageCount, 6))
+		for range min(pageCount, 6) {
+			go func() {
+				defer workers.Done()
+				for pageIndex := range jobs {
+					ordered[pageIndex-1] = fetchPage(pageIndex * pageSize)
+				}
+			}()
+		}
+		for pageIndex := 1; pageIndex <= pageCount; pageIndex++ {
+			jobs <- pageIndex
+		}
+		close(jobs)
+		workers.Wait()
+		for _, page := range ordered {
+			if page.err != nil {
+				return nil, fmt.Errorf("profile %s page skip=%d: %w", profile.Name, page.skip, page.err)
+			}
+			appendPage(page.payload)
+			if len(page.payload.Queues) == 0 {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func normalizeSSPQueue(queue *SSPQueue, profile clientProfile) {
+	queue.ProfileName = profile.Name
+	queue.SubscriptionName = firstNonEmpty(queue.SubscriptionName, profile.Subscription)
+	queue.ResourceGroup = firstNonEmpty(queue.ResourceGroup, profile.ResourceGroup, defaultResourceGroup)
+	queue.Region = firstNonEmpty(queue.Region, profile.Region)
+	queue.UID = firstNonEmpty(strings.TrimSpace(queue.UID), sspResourceIdentifier(queue.ID))
+	queue.Type = firstNonEmpty(queue.Type, queue.QueueType, queue.Properties.Type, queue.Properties.QueueType, queue.Spec.Type, queue.Spec.QueueType)
+	queue.WorkspaceName = firstNonEmpty(queue.WorkspaceName, queue.Properties.Workspace.Name)
+}
+
+func (c *VirtualClusterClient) FindSSPQueuesForRegion(ctx context.Context, region string, names []string) ([]SSPQueue, error) {
+	profiles := c.sspProfilesForRegion(region)
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("no platform profile configured for region %q", region)
+	}
+	uniqueNames := make([]string, 0, len(names))
+	targets := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if key == "" {
+			continue
+		}
+		if _, exists := targets[key]; exists {
+			continue
+		}
+		targets[key] = struct{}{}
+		uniqueNames = append(uniqueNames, name)
+	}
+	if len(uniqueNames) == 0 {
+		return nil, nil
+	}
+
+	result := make([]SSPQueue, 0, len(uniqueNames))
+	seen := make(map[string]struct{}, len(uniqueNames))
+	for _, profile := range profiles {
+		for start := 0; start < len(uniqueNames); start += 50 {
+			end := min(start+50, len(uniqueNames))
+			filters := make([]string, 0, end-start)
+			for _, name := range uniqueNames[start:end] {
+				filters = append(filters, fmt.Sprintf(`name="%s"`, escapeSSPFilterValue(name)))
+			}
+			endpoint, _ := url.Parse(profile.BaseURL)
+			endpoint.Path = "/compute/ssp/v1/subscriptions/-/resourceGroups/-/regions/-/clusters/-/queues"
+			query := endpoint.Query()
+			query.Set("page_size", "100")
+			query.Set("skip", "0")
+			query.Set("filter", strings.Join(filters, " OR "))
+			endpoint.RawQuery = query.Encode()
+
+			var payload sspQueueListResponse
+			if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
+				return nil, fmt.Errorf("profile %s: %w", profile.Name, err)
+			}
+			for index := range payload.Queues {
+				queue := payload.Queues[index]
+				if _, wanted := targets[strings.ToLower(strings.TrimSpace(queue.Name))]; !wanted {
+					continue
+				}
+				normalizeSSPQueue(&queue, profile)
+				key := strings.ToLower(firstNonEmpty(queue.UID, queue.Name))
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				result = append(result, queue)
+			}
+		}
 	}
 	return result, nil
 }
@@ -723,7 +900,11 @@ func (c *VirtualClusterClient) ListSSPQueueWorkloads(ctx context.Context, profil
 		values := endpoint.Query()
 		values.Set("page_size", strconv.Itoa(pageSize))
 		values.Set("skip", strconv.Itoa(skip))
-		values.Set("order_by", "create_time desc")
+		orderBy := "create_time desc"
+		if strings.EqualFold(strings.TrimSpace(query.State), "failed") {
+			orderBy = "update_time desc"
+		}
+		values.Set("order_by", orderBy)
 		if len(filters) > 0 {
 			values.Set("filter", strings.Join(filters, " AND "))
 		}
@@ -733,9 +914,22 @@ func (c *VirtualClusterClient) ListSSPQueueWorkloads(ctx context.Context, profil
 		if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
 			return nil, err
 		}
-		result = append(result, payload.Workloads...)
+		reachedCutoff := false
+		for _, workload := range payload.Workloads {
+			if !query.CreatedAfter.IsZero() {
+				timestamp := workload.CreateTime
+				if strings.EqualFold(strings.TrimSpace(query.State), "failed") {
+					timestamp = firstNonEmpty(strings.TrimSpace(workload.EndTime), strings.TrimSpace(workload.UpdateTime))
+				}
+				if eventTime, ok := parsePlatformCreateTime(timestamp); ok && eventTime.Before(query.CreatedAfter) {
+					reachedCutoff = true
+					continue
+				}
+			}
+			result = append(result, workload)
+		}
 		count := len(payload.Workloads)
-		if count == 0 || (query.Limit > 0 && len(result) >= query.Limit) || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) || count < pageSize {
+		if reachedCutoff || count == 0 || (query.Limit > 0 && len(result) >= query.Limit) || (payload.TotalSize > 0 && skip+count >= payload.TotalSize) || count < pageSize {
 			break
 		}
 		skip += count
@@ -806,16 +1000,7 @@ func (c *VirtualClusterClient) ListSSPQueueNodes(ctx context.Context, profileNam
 		return added
 	}
 
-	initial := make(chan pageResult, 2)
-	for _, skip := range []int{0, pageSize} {
-		go func(offset int) { initial <- fetchPage(offset) }(skip)
-	}
-	pages := make(map[int]pageResult, 2)
-	for range 2 {
-		page := <-initial
-		pages[page.skip] = page
-	}
-	first := pages[0]
+	first := fetchPage(0)
 	if first.err != nil {
 		return nil, first.err
 	}
@@ -825,16 +1010,7 @@ func (c *VirtualClusterClient) ListSSPQueueNodes(ctx context.Context, profileNam
 	if !needSecond {
 		return result, nil
 	}
-	second := pages[pageSize]
-	if second.err != nil {
-		return nil, second.err
-	}
-	appendPage(second.payload)
-	if totalSize > 0 && len(result) >= totalSize {
-		return result, nil
-	}
-
-	for skip := pageSize * 2; ; skip += pageSize {
+	for skip := len(first.payload.Nodes); ; {
 		page := fetchPage(skip)
 		if page.err != nil {
 			return nil, page.err
@@ -843,6 +1019,7 @@ func (c *VirtualClusterClient) ListSSPQueueNodes(ctx context.Context, profileNam
 		if len(page.payload.Nodes) == 0 || added == 0 || (totalSize > 0 && len(result) >= totalSize) || (totalSize == 0 && len(page.payload.Nodes) < pageSize) {
 			break
 		}
+		skip += len(page.payload.Nodes)
 	}
 	return result, nil
 }
@@ -1178,6 +1355,18 @@ func (c *VirtualClusterClient) FindSSPTrainingJobsForProfile(ctx context.Context
 // Region-wide aggregation belongs in the service layer so workspace requests
 // can run concurrently.
 func (c *VirtualClusterClient) ListSSPTrainingJobsInWorkspace(ctx context.Context, workspace SSPWorkspace, state string, limit int) ([]SSPTrainingJob, error) {
+	return c.ListSSPTrainingJobsInWorkspaceSince(ctx, workspace, state, limit, time.Time{})
+}
+
+func (c *VirtualClusterClient) ListSSPTrainingJobsInWorkspaceSince(ctx context.Context, workspace SSPWorkspace, state string, limit int, createdAfter time.Time) ([]SSPTrainingJob, error) {
+	return c.listSSPTrainingJobsInWorkspace(ctx, workspace, state, "", limit, createdAfter)
+}
+
+func (c *VirtualClusterClient) ListSSPTrainingJobsForCreatorInWorkspace(ctx context.Context, workspace SSPWorkspace, creatorID string, limit int) ([]SSPTrainingJob, error) {
+	return c.listSSPTrainingJobsInWorkspace(ctx, workspace, "", creatorID, limit, time.Time{})
+}
+
+func (c *VirtualClusterClient) listSSPTrainingJobsInWorkspace(ctx context.Context, workspace SSPWorkspace, state string, creatorID string, limit int, createdAfter time.Time) ([]SSPTrainingJob, error) {
 	if limit == 0 {
 		limit = 50
 	}
@@ -1205,9 +1394,20 @@ func (c *VirtualClusterClient) ListSSPTrainingJobsInWorkspace(ctx context.Contex
 		query := endpoint.Query()
 		query.Set("page_size", strconv.Itoa(pageSize))
 		query.Set("skip", strconv.Itoa(skip))
-		query.Set("order_by", "created_at desc")
+		orderBy := "created_at desc"
+		if strings.EqualFold(strings.TrimSpace(state), "failed") {
+			orderBy = "updated_at desc"
+		}
+		query.Set("order_by", orderBy)
+		filters := make([]string, 0, 2)
 		if state = strings.TrimSpace(state); state != "" {
-			query.Set("filter", fmt.Sprintf(`state="%s"`, escapeSSPFilterValue(state)))
+			filters = append(filters, fmt.Sprintf(`state="%s"`, escapeSSPFilterValue(state)))
+		}
+		if creatorID = strings.TrimSpace(creatorID); creatorID != "" {
+			filters = append(filters, fmt.Sprintf(`creator_id="%s"`, escapeSSPFilterValue(creatorID)))
+		}
+		if len(filters) > 0 {
+			query.Set("filter", strings.Join(filters, " AND "))
 		}
 		endpoint.RawQuery = query.Encode()
 
@@ -1215,7 +1415,18 @@ func (c *VirtualClusterClient) ListSSPTrainingJobsInWorkspace(ctx context.Contex
 		if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
 			return nil, err
 		}
+		reachedCutoff := false
 		for _, item := range payload.TrainingJobs {
+			if !createdAfter.IsZero() {
+				timestamp := item.Status.CreateTime
+				if strings.EqualFold(strings.TrimSpace(state), "failed") {
+					timestamp = firstNonEmpty(strings.TrimSpace(item.Status.EndTime), strings.TrimSpace(item.Status.UpdateTime))
+				}
+				if eventTime, ok := parsePlatformCreateTime(timestamp); ok && eventTime.Before(createdAfter) {
+					reachedCutoff = true
+					continue
+				}
+			}
 			item.ProfileName = profile.Name
 			item.WorkspaceName = firstNonEmpty(strings.TrimSpace(item.WorkspaceName), strings.TrimSpace(workspace.Name))
 			item.SubscriptionName = firstNonEmpty(strings.TrimSpace(item.SubscriptionName), subscription)
@@ -1224,7 +1435,7 @@ func (c *VirtualClusterClient) ListSSPTrainingJobsInWorkspace(ctx context.Contex
 			items = append(items, item)
 		}
 		count := len(payload.TrainingJobs)
-		if count == 0 || count < pageSize || (payload.TotalSize > 0 && skip+count >= payload.TotalSize) {
+		if reachedCutoff || count == 0 || count < pageSize || (payload.TotalSize > 0 && skip+count >= payload.TotalSize) {
 			break
 		}
 		skip += count
@@ -1233,6 +1444,11 @@ func (c *VirtualClusterClient) ListSSPTrainingJobsInWorkspace(ctx context.Contex
 		items = items[:limit]
 	}
 	return items, nil
+}
+
+func parsePlatformCreateTime(value string) (time.Time, bool) {
+	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	return parsed, err == nil
 }
 
 func (c *VirtualClusterClient) ListSSPTrainingJobWorkers(ctx context.Context, job SSPTrainingJob, limit int) ([]SSPTrainingJobWorker, int, error) {

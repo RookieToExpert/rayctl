@@ -186,6 +186,7 @@ type IAMUser struct {
 	MFAState      string `json:"mfa_state"`
 	CreateTime    string `json:"create_time"`
 	LastLoginTime string `json:"last_login_time"`
+	JoinTime      string `json:"join_time"`
 }
 
 type IAMGroup struct {
@@ -793,6 +794,27 @@ func (c *VirtualClusterClient) CurrentProfileName() string {
 		return ""
 	}
 	return strings.TrimSpace(c.currentProfile)
+}
+
+// ProfileNames returns configured profile names in the selected environment.
+// An empty environment means the current profile's environment; "all" keeps
+// every configured profile.
+func (c *VirtualClusterClient) ProfileNames(environment string) []string {
+	if c == nil {
+		return nil
+	}
+	environment = normalizeProfileEnvironment(environment)
+	if environment == "" {
+		environment = c.ProfileEnvironment(c.CurrentProfileName())
+	}
+	names := make([]string, 0)
+	for _, profile := range c.orderedProfiles() {
+		if environment != "all" && profileEnvironment(profile) != environment {
+			continue
+		}
+		names = append(names, profile.Name)
+	}
+	return names
 }
 
 // ResolveProfileName maps a user-facing environment name to a configured
@@ -1878,6 +1900,41 @@ func (c *VirtualClusterClient) ListUserGroupsForProfile(ctx context.Context, pro
 	return result, nil
 }
 
+func (c *VirtualClusterClient) ListGroupUsersForProfile(ctx context.Context, profileName string, groupID string) ([]IAMUser, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return nil, fmt.Errorf("group id is required")
+	}
+
+	pageToken := "1"
+	result := make([]IAMUser, 0)
+	for {
+		u, _ := url.Parse(profile.IAMBaseURL)
+		u.Path = fmt.Sprintf("/iam/idp/v1/groups/%s:getUsers", url.PathEscape(groupID))
+		query := u.Query()
+		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		query.Set("page_token", pageToken)
+		query.Set("order_by", "join_time desc")
+		u.RawQuery = query.Encode()
+
+		var payload iamUserListResponse
+		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
+			return nil, err
+		}
+		result = append(result, payload.Users...)
+		nextToken := strings.TrimSpace(payload.NextPageToken)
+		if len(payload.Users) == 0 || nextToken == "" || nextToken == pageToken || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) {
+			break
+		}
+		pageToken = nextToken
+	}
+	return result, nil
+}
+
 func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile clientProfile) ([]IAMGroup, error) {
 	pageToken := "1"
 	result := make([]IAMGroup, 0)
@@ -2018,6 +2075,57 @@ func (c *VirtualClusterClient) ListIAMBindingPoliciesForResourceProfile(ctx cont
 		)
 	}
 	return c.listIAMBindingPoliciesWithProfile(ctx, profile, filter)
+}
+
+func (c *VirtualClusterClient) ListIAMBindingPoliciesForSubjectsProfile(ctx context.Context, profileName string, identifiers []string) ([]IAMBindingPolicy, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	unique := make([]string, 0, len(identifiers))
+	seenIdentifiers := make(map[string]struct{}, len(identifiers))
+	for _, identifier := range identifiers {
+		identifier = strings.TrimSpace(identifier)
+		key := strings.ToLower(identifier)
+		if key == "" {
+			continue
+		}
+		if _, exists := seenIdentifiers[key]; exists {
+			continue
+		}
+		seenIdentifiers[key] = struct{}{}
+		unique = append(unique, identifier)
+	}
+	if len(unique) == 0 {
+		return nil, nil
+	}
+
+	result := make([]IAMBindingPolicy, 0)
+	seenPolicies := make(map[string]struct{})
+	for start := 0; start < len(unique); start += 20 {
+		end := min(start+20, len(unique))
+		terms := make([]string, 0, (end-start)*2)
+		for _, identifier := range unique[start:end] {
+			escaped := escapeIAMFilterValue(identifier)
+			terms = append(terms,
+				fmt.Sprintf(`member_identify="*%s*"`, escaped),
+				fmt.Sprintf(`scope="*%s*"`, escaped),
+			)
+		}
+		items, err := c.listIAMBindingPoliciesWithProfile(ctx, profile, "("+strings.Join(terms, " OR ")+")")
+		if err != nil {
+			return nil, err
+		}
+		for _, policy := range items {
+			key := firstNonEmpty(strings.TrimSpace(policy.ID), strings.Join([]string{policy.Scope, policy.MemberType, policy.MemberValue, policy.MemberIdentify}, "|"))
+			if _, exists := seenPolicies[key]; exists {
+				continue
+			}
+			seenPolicies[key] = struct{}{}
+			result = append(result, policy)
+		}
+	}
+	return result, nil
 }
 
 func (c *VirtualClusterClient) listIAMBindingPoliciesWithProfile(ctx context.Context, profile clientProfile, filter string) ([]IAMBindingPolicy, error) {
@@ -2538,6 +2646,43 @@ func (c *VirtualClusterClient) ListAIComputeNodes(ctx context.Context) ([]AIComp
 	return nil, fmt.Errorf("no platform profile available")
 }
 
+// FindAIComputeNodes performs an exact lookup without loading the complete ECP
+// node inventory. The current environment is searched first so the returned
+// host belongs to the Kubernetes cluster selected by the caller.
+func (c *VirtualClusterClient) FindAIComputeNodes(ctx context.Context, identifier string) ([]AIComputeNode, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, nil
+	}
+
+	escaped := escapeSSPFilterValue(identifier)
+	filter := fmt.Sprintf(`name="%s" OR display_name="%s"`, escaped, escaped)
+	if looksLikeClusterUUID(identifier) {
+		filter = fmt.Sprintf(`uid="%s"`, escaped)
+	}
+
+	var lastErr error
+	succeeded := false
+	for _, profile := range c.currentEnvironmentProfiles() {
+		items, err := c.listAIComputeNodesWithProfileFilter(ctx, profile, filter)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		succeeded = true
+		if len(items) > 0 {
+			return items, nil
+		}
+	}
+	if succeeded {
+		return nil, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no platform profile available")
+}
+
 func (c *VirtualClusterClient) ListAIComputeNodesForProfile(ctx context.Context, profileName string) ([]AIComputeNode, error) {
 	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
@@ -2834,6 +2979,10 @@ func (c *VirtualClusterClient) ListVolcanoJobsForProfile(ctx context.Context, pr
 // apply server-side filtering and pagination without downloading Pods first.
 // A limit of zero reads every matching page.
 func (c *VirtualClusterClient) ListVolcanoJobsPageForProfile(ctx context.Context, profileName string, vclusterName string, filter string, limit int) ([]unstructured.Unstructured, error) {
+	return c.ListVolcanoJobsPageForProfileSince(ctx, profileName, vclusterName, filter, limit, time.Time{})
+}
+
+func (c *VirtualClusterClient) ListVolcanoJobsPageForProfileSince(ctx context.Context, profileName string, vclusterName string, filter string, limit int, createdAfter time.Time) ([]unstructured.Unstructured, error) {
 	profile, ok := c.clientProfileByName(profileName)
 	if !ok {
 		return nil, fmt.Errorf("platform profile %q not found", profileName)
@@ -2843,6 +2992,7 @@ func (c *VirtualClusterClient) ListVolcanoJobsPageForProfile(ctx context.Context
 	}
 
 	const maxPageSize = 100
+	failedFilter := strings.Contains(strings.ToLower(strings.TrimSpace(filter)), `state="failed"`)
 	items := make([]unstructured.Unstructured, 0)
 	for skip := 0; ; {
 		pageSize := maxPageSize
@@ -2857,17 +3007,32 @@ func (c *VirtualClusterClient) ListVolcanoJobsPageForProfile(ctx context.Context
 		query.Set("page_size", strconv.Itoa(pageSize))
 		query.Set("skip", strconv.Itoa(skip))
 		query.Set("filter", strings.TrimSpace(filter))
-		query.Set("order", "created_at desc")
+		order := "created_at desc"
+		if failedFilter {
+			order = "updated_at desc"
+		}
+		query.Set("order", order)
 		reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/apis/batch.volcano.sh/v1alpha1/jobs", query)
 
 		var page unstructured.UnstructuredList
 		if err := c.getJSONWithProfile(ctx, profile, reqURL, &page); err != nil {
 			return nil, err
 		}
-		items = append(items, page.Items...)
+		reachedCutoff := false
+		for _, item := range page.Items {
+			eventTime := item.GetCreationTimestamp().Time
+			if failedFilter {
+				eventTime = volcanoJobTerminalTime(item)
+			}
+			if !createdAfter.IsZero() && !eventTime.IsZero() && eventTime.Before(createdAfter) {
+				reachedCutoff = true
+				continue
+			}
+			items = append(items, item)
+		}
 		count := len(page.Items)
 		remaining := page.GetRemainingItemCount()
-		if count == 0 || count < pageSize || (remaining != nil && *remaining <= 0) || (limit > 0 && len(items) >= limit) {
+		if reachedCutoff || count == 0 || count < pageSize || (remaining != nil && *remaining <= 0) || (limit > 0 && len(items) >= limit) {
 			break
 		}
 		skip += count
@@ -2876,6 +3041,37 @@ func (c *VirtualClusterClient) ListVolcanoJobsPageForProfile(ctx context.Context
 		items = items[:limit]
 	}
 	return items, nil
+}
+
+func volcanoJobTerminalTime(job unstructured.Unstructured) time.Time {
+	latest := time.Time{}
+	for _, path := range [][]string{
+		{"status", "state", "lastTransitionTime"},
+		{"status", "completionTime"},
+		{"status", "finishedAt"},
+	} {
+		value, _, _ := unstructured.NestedString(job.Object, path...)
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil && parsed.After(latest) {
+			latest = parsed
+		}
+	}
+	conditions, _, _ := unstructured.NestedSlice(job.Object, "status", "conditions")
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, field := range []string{"lastTransitionTime", "transitionTime", "lastUpdateTime"} {
+			value, _, _ := unstructured.NestedString(condition, field)
+			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil && parsed.After(latest) {
+				latest = parsed
+			}
+		}
+	}
+	if latest.IsZero() {
+		return job.GetCreationTimestamp().Time
+	}
+	return latest
 }
 
 func (c *VirtualClusterClient) ListVolcanoJobMetadataForProfile(ctx context.Context, profileName string, vclusterName string, namespace string) ([]metav1.PartialObjectMetadata, error) {

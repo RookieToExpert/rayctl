@@ -36,6 +36,7 @@ type SSPAIDGetResult struct {
 	VCluster               string
 	Workspace              string
 	Namespace              string
+	HostNamespace          string
 	Queue                  string
 	QueueType              string
 	Priority               string
@@ -378,6 +379,7 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 		VCluster:          "-",
 		Workspace:         aid.Properties.Workload.WorkspaceName,
 		Namespace:         aidWorkspaceNamespace(pods, hostNamespace),
+		HostNamespace:     hostNamespace,
 		Queue:             queue,
 		QueueType:         aid.Properties.Workload.Queue.Type,
 		Priority:          aid.Properties.Workload.Priority,

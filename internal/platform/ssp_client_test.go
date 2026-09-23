@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type sspRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -104,6 +105,64 @@ func TestListSSPTrainingJobsInWorkspaceUsesStateAndLimit(t *testing.T) {
 	}
 	if requestPath != "/ait/data/v1/subscriptions/sub-1/resourceGroups/default/regions/cn-pj-03/workspaces/ws-demo/trainingJobs" || requestFilter != `state="Running"` || pageSize != "25" {
 		t.Fatalf("path=%q filter=%q page_size=%q", requestPath, requestFilter, pageSize)
+	}
+}
+
+func TestListSSPTrainingJobsInWorkspaceSinceFiltersOldItems(t *testing.T) {
+	client := &VirtualClusterClient{
+		profiles: map[string]clientProfile{"pt": {
+			Name: "pt", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.pjlab.org.cn", ResourceGroup: "default", Region: "cn-pj-03", Subscription: "sub-1",
+		}},
+		httpClient: &http.Client{Transport: sspRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"training_jobs":[{"name":"old","status":{"create_time":"2026-09-01T00:00:00Z"}}],"total_size":1}`)), Request: r}, nil
+		})},
+	}
+	items, err := client.ListSSPTrainingJobsInWorkspaceSince(context.Background(), SSPWorkspace{Name: "ws-demo", ProfileName: "pt"}, "", 5000, time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil || len(items) != 0 {
+		t.Fatalf("old items were not filtered: %#v, %v", items, err)
+	}
+}
+
+func TestListFailedSSPTrainingJobsUsesFailureTime(t *testing.T) {
+	var orderBy string
+	client := &VirtualClusterClient{
+		profiles: map[string]clientProfile{"pt": {
+			Name: "pt", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.pjlab.org.cn", ResourceGroup: "default", Region: "cn-pj-03", Subscription: "sub-1",
+		}},
+		httpClient: &http.Client{Transport: sspRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			orderBy = r.URL.Query().Get("order_by")
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"training_jobs":[{"name":"recent-failure","status":{"state":"FAILED","create_time":"2026-09-01T00:00:00Z","end_time":"2026-09-18T05:00:00Z"}},{"name":"old-failure","status":{"state":"FAILED","create_time":"2026-09-17T00:00:00Z","end_time":"2026-09-17T05:00:00Z"}}],"total_size":2}`)), Request: r}, nil
+		})},
+	}
+	items, err := client.ListSSPTrainingJobsInWorkspaceSince(context.Background(), SSPWorkspace{Name: "ws-demo", ProfileName: "pt"}, "FAILED", 50, time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("ListSSPTrainingJobsInWorkspaceSince() error = %v", err)
+	}
+	if orderBy != "updated_at desc" {
+		t.Fatalf("order_by = %q, want updated_at desc", orderBy)
+	}
+	if len(items) != 1 || items[0].Name != "recent-failure" {
+		t.Fatalf("failed items = %#v, want recent-failure", items)
+	}
+}
+
+func TestListSSPTrainingJobsForCreatorInWorkspaceUsesCreatorFilter(t *testing.T) {
+	var requestFilter string
+	client := &VirtualClusterClient{
+		profiles: map[string]clientProfile{"pt": {
+			Name: "pt", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.pjlab.org.cn", ResourceGroup: "default", Region: "cn-pj-03", Subscription: "sub-1",
+		}},
+		httpClient: &http.Client{Transport: sspRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requestFilter = r.URL.Query().Get("filter")
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"training_jobs":[],"total_size":0}`)), Request: r}, nil
+		})},
+	}
+	_, err := client.ListSSPTrainingJobsForCreatorInWorkspace(context.Background(), SSPWorkspace{Name: "ws-demo", ProfileName: "pt"}, "user-1", -1)
+	if err != nil {
+		t.Fatalf("ListSSPTrainingJobsForCreatorInWorkspace() error = %v", err)
+	}
+	if requestFilter != `creator_id="user-1"` {
+		t.Fatalf("filter = %q", requestFilter)
 	}
 }
 
@@ -419,7 +478,7 @@ func TestListSSPQueueNodesUsesClusterQueueEndpoint(t *testing.T) {
 		t.Fatalf("ListSSPQueueNodes returned error: %v", err)
 	}
 	wantPath := "/compute/ssp/v1/subscriptions/sub-1/resourceGroups/default/regions/cn-pj-01/clusters/cluster-a3/queues/queue-demo/nodes"
-	if requestPath != wantPath || len(pageSizes) != 2 {
+	if requestPath != wantPath || len(pageSizes) != 1 {
 		t.Fatalf("unexpected requests: path=%q page_sizes=%#v skips=%#v", requestPath, pageSizes, skips)
 	}
 	for _, pageSize := range pageSizes {
@@ -427,8 +486,7 @@ func TestListSSPQueueNodesUsesClusterQueueEndpoint(t *testing.T) {
 			t.Fatalf("unexpected page sizes: %#v", pageSizes)
 		}
 	}
-	sort.Strings(skips)
-	if skips[0] != "0" || skips[1] != "100" {
+	if skips[0] != "0" {
 		t.Fatalf("unexpected skips: %#v", skips)
 	}
 	if len(nodes) != 1 || nodes[0].UID != "acn-uid" || nodes[0].HostIP != "10.140.1.2" || len(nodes[0].SummaryData) != 1 {
@@ -437,13 +495,21 @@ func TestListSSPQueueNodesUsesClusterQueueEndpoint(t *testing.T) {
 }
 
 func TestListSSPQueueNodesContinuesWhenServerCapsPageSize(t *testing.T) {
+	skips := make([]string, 0, 3)
 	httpClient := &http.Client{Transport: sspRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		nodes := make([]map[string]string, 100)
-		for index := range nodes {
-			nodes[index] = map[string]string{"uid": fmt.Sprintf("node-%d", index), "host_ip": fmt.Sprintf("10.0.0.%d", index)}
+		skips = append(skips, r.URL.Query().Get("skip"))
+		offset, err := strconv.Atoi(r.URL.Query().Get("skip"))
+		if err != nil {
+			return nil, err
 		}
-		if r.URL.Query().Get("skip") == "100" {
-			nodes = []map[string]string{{"uid": "node-100", "host_ip": "10.0.1.0"}}
+		count := 50
+		if offset == 100 {
+			count = 1
+		}
+		nodes := make([]map[string]string, count)
+		for index := range nodes {
+			value := offset + index
+			nodes[index] = map[string]string{"uid": fmt.Sprintf("node-%d", value), "host_ip": fmt.Sprintf("10.0.%d.%d", value/255, value%255)}
 		}
 		body, _ := json.Marshal(map[string]any{"nodes": nodes, "total_size": 101})
 		return &http.Response{
@@ -465,6 +531,9 @@ func TestListSSPQueueNodesContinuesWhenServerCapsPageSize(t *testing.T) {
 	}
 	if len(nodes) != 101 || nodes[100].UID != "node-100" {
 		t.Fatalf("nodes = %#v, want both capped pages", nodes)
+	}
+	if strings.Join(skips, ",") != "0,50,100" {
+		t.Fatalf("skips = %#v, want server-capped offsets", skips)
 	}
 }
 
@@ -517,5 +586,74 @@ func TestSSPClusterAPIsUseClusterEndpointsAndNormalizeRelations(t *testing.T) {
 	}
 	if len(requests) != 4 {
 		t.Fatalf("request count = %d, want 4: %#v", len(requests), requests)
+	}
+}
+
+func TestListSSPQueuesForRegionUsesGlobalClusterQueueEndpoint(t *testing.T) {
+	httpClient := &http.Client{Transport: sspRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		wantPath := "/compute/ssp/v1/subscriptions/-/resourceGroups/-/regions/-/clusters/-/queues"
+		if request.URL.Path != wantPath {
+			return nil, fmt.Errorf("path = %q, want %q", request.URL.Path, wantPath)
+		}
+		if request.URL.Query().Get("page_size") != "10" || request.URL.Query().Get("skip") != "0" {
+			return nil, fmt.Errorf("unexpected query: %s", request.URL.RawQuery)
+		}
+		body := `{"queues":[{"uid":"queue-uid","name":"queue-demo","state":"RUNNING","region":"cn-pj-01","properties":{"workspace":{"name":"ws-demo"}}}],"total_size":1}`
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}
+	client := &VirtualClusterClient{
+		currentProfile: "d",
+		profiles: map[string]clientProfile{
+			"d": {Name: "d", AccessKey: "ak", SecretKey: "sk", BaseURL: "https://example.test", Region: "cn-pj-01"},
+		},
+		httpClient: httpClient,
+	}
+
+	queues, err := client.ListSSPQueuesForRegion(context.Background(), "cn-pj-01")
+	if err != nil {
+		t.Fatalf("ListSSPQueuesForRegion() error = %v", err)
+	}
+	if len(queues) != 1 || queues[0].State != "RUNNING" || queues[0].WorkspaceName != "ws-demo" || queues[0].ProfileName != "d" {
+		t.Fatalf("queues = %#v", queues)
+	}
+}
+
+func TestListSSPQueuesForRegionLoadsAllPages(t *testing.T) {
+	httpClient := &http.Client{Transport: sspRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		skip, err := strconv.Atoi(request.URL.Query().Get("skip"))
+		if err != nil {
+			return nil, err
+		}
+		count := 10
+		if skip == 20 {
+			count = 1
+		}
+		queues := make([]map[string]string, 0, count)
+		for index := range count {
+			value := skip + index
+			queues = append(queues, map[string]string{
+				"uid":    fmt.Sprintf("queue-%d", value),
+				"name":   fmt.Sprintf("queue-%d", value),
+				"state":  "RUNNING",
+				"region": "cn-pj-01",
+			})
+		}
+		body, _ := json.Marshal(map[string]any{"queues": queues, "total_size": 21})
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), Request: request}, nil
+	})}
+	client := &VirtualClusterClient{
+		currentProfile: "d",
+		profiles: map[string]clientProfile{
+			"d": {Name: "d", AccessKey: "ak", SecretKey: "sk", BaseURL: "https://example.test", Region: "cn-pj-01"},
+		},
+		httpClient: httpClient,
+	}
+
+	queues, err := client.ListSSPQueuesForRegion(context.Background(), "cn-pj-01")
+	if err != nil {
+		t.Fatalf("ListSSPQueuesForRegion() error = %v", err)
+	}
+	if len(queues) != 21 {
+		t.Fatalf("len(queues) = %d, want 21", len(queues))
 	}
 }

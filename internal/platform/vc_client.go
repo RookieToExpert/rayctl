@@ -133,6 +133,122 @@ func (c *VirtualClusterClient) FindExactVirtualClusterForProfile(ctx context.Con
 	return cluster, nil
 }
 
+// FindVirtualClusterResource resolves the IAM scope from the ECP detail API.
+// RMH name searches are comparatively slow and can time out even when the VC
+// detail endpoint is healthy.
+func (c *VirtualClusterClient) FindVirtualClusterResource(ctx context.Context, identifier string) (*StorageVolumeResource, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("virtual cluster identifier is required")
+	}
+
+	profiles := c.currentEnvironmentProfiles()
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("no platform profile available")
+	}
+
+	// Prefer a verified resource in the active tenant. A 403 still gives us a
+	// deterministic fallback scope, but must not hide a readable match in
+	// another tenant from the same environment.
+	var forbiddenFallback *StorageVolumeResource
+	if resource, err := c.findVirtualClusterResourceWithProfile(ctx, profiles[0], identifier); err == nil {
+		return resource, nil
+	} else if ctx.Err() != nil {
+		return nil, ctx.Err()
+	} else if isForbiddenVirtualClusterLookup(err) {
+		forbiddenFallback = virtualClusterResourceFromProfile(profiles[0], identifier, nil)
+	} else if len(profiles) == 1 {
+		return nil, err
+	}
+	if len(profiles) == 1 {
+		return forbiddenFallback, nil
+	}
+
+	type profileResult struct {
+		profile  clientProfile
+		resource *StorageVolumeResource
+		err      error
+	}
+	queryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resultCh := make(chan profileResult, len(profiles)-1)
+	for _, profile := range profiles[1:] {
+		profile := profile
+		go func() {
+			resource, err := c.findVirtualClusterResourceWithProfile(queryCtx, profile, identifier)
+			resultCh <- profileResult{profile: profile, resource: resource, err: err}
+		}()
+	}
+
+	var lastErr error
+	for range profiles[1:] {
+		result := <-resultCh
+		if result.resource != nil {
+			cancel()
+			return result.resource, nil
+		}
+		if forbiddenFallback == nil && isForbiddenVirtualClusterLookup(result.err) {
+			forbiddenFallback = virtualClusterResourceFromProfile(result.profile, identifier, nil)
+			continue
+		}
+		if result.err != nil {
+			lastErr = result.err
+		}
+	}
+	if forbiddenFallback != nil {
+		return forbiddenFallback, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("virtual cluster %q not found", identifier)
+}
+
+func (c *VirtualClusterClient) findVirtualClusterResourceWithProfile(ctx context.Context, profile clientProfile, identifier string) (*StorageVolumeResource, error) {
+	cluster, err := c.getVirtualClusterWithProfile(ctx, profile, identifier)
+	if err != nil {
+		return nil, err
+	}
+	return virtualClusterResourceFromProfile(profile, identifier, cluster), nil
+}
+
+func isForbiddenVirtualClusterLookup(err error) bool {
+	return err != nil && strings.Contains(err.Error(), " returned 403:")
+}
+
+func virtualClusterResourceFromProfile(profile clientProfile, identifier string, cluster *VirtualCluster) *StorageVolumeResource {
+	if cluster == nil {
+		cluster = &VirtualCluster{
+			Name:     strings.TrimSpace(identifier),
+			TenantID: strings.TrimSpace(profile.Subscription),
+			Region:   strings.TrimSpace(profile.Region),
+		}
+	}
+	resourceGroup := firstNonEmpty(strings.TrimSpace(profile.ResourceGroup), "default")
+	rid := strings.TrimSpace(cluster.ID)
+	if !strings.HasPrefix(rid, "/subscriptions/") {
+		rid = fmt.Sprintf(
+			"/subscriptions/%s/resourceGroups/%s/regions/%s/virtualClusters/%s",
+			firstNonEmpty(strings.TrimSpace(cluster.TenantID), strings.TrimSpace(profile.Subscription)),
+			resourceGroup,
+			firstNonEmpty(strings.TrimSpace(cluster.Region), strings.TrimSpace(profile.Region)),
+			strings.TrimSpace(cluster.Name),
+		)
+	}
+	return &StorageVolumeResource{
+		ID:                firstNonEmpty(strings.TrimSpace(cluster.UID), strings.TrimSpace(cluster.ID)),
+		RID:               rid,
+		Name:              strings.TrimSpace(cluster.Name),
+		DisplayName:       strings.TrimSpace(cluster.DisplayName),
+		Type:              "virtualClusters",
+		ResourceType:      "virtualClusters",
+		State:             strings.TrimSpace(cluster.State),
+		Region:            firstNonEmpty(strings.TrimSpace(cluster.Region), strings.TrimSpace(profile.Region)),
+		ResourceGroupName: resourceGroup,
+		ProfileName:       profile.Name,
+	}
+}
+
 func (c *VirtualClusterClient) getVirtualClusterWithProfile(ctx context.Context, profile clientProfile, name string) (*VirtualCluster, error) {
 	u, _ := url.Parse(profile.BaseURL)
 	u.Path = fmt.Sprintf(

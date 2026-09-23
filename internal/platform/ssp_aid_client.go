@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type SSPAID struct {
@@ -137,6 +138,10 @@ func (c *VirtualClusterClient) FindSSPAIDsForProfile(ctx context.Context, profil
 
 // ListSSPAIDsInWorkspace returns the newest AID instances in one workspace.
 func (c *VirtualClusterClient) ListSSPAIDsInWorkspace(ctx context.Context, workspace SSPWorkspace, state string, limit int) ([]SSPAID, error) {
+	return c.ListSSPAIDsInWorkspaceSince(ctx, workspace, state, limit, time.Time{})
+}
+
+func (c *VirtualClusterClient) ListSSPAIDsInWorkspaceSince(ctx context.Context, workspace SSPWorkspace, state string, limit int, createdAfter time.Time) ([]SSPAID, error) {
 	if limit == 0 {
 		limit = 50
 	}
@@ -174,13 +179,20 @@ func (c *VirtualClusterClient) ListSSPAIDsInWorkspace(ctx context.Context, works
 		if err := c.getJSONWithProfile(ctx, profile, endpoint.String(), &payload); err != nil {
 			return nil, err
 		}
+		reachedCutoff := false
 		for _, item := range payload.AIDs {
+			if !createdAfter.IsZero() {
+				if created, ok := parsePlatformCreateTime(item.CreateTime); ok && created.Before(createdAfter) {
+					reachedCutoff = true
+					continue
+				}
+			}
 			item.ProfileName = profile.Name
 			item.Properties.Workload.WorkspaceName = firstNonEmpty(strings.TrimSpace(item.Properties.Workload.WorkspaceName), strings.TrimSpace(workspace.Name))
 			items = append(items, item)
 		}
 		count := len(payload.AIDs)
-		if count == 0 || count < pageSize || (payload.TotalSize > 0 && skip+count >= payload.TotalSize) {
+		if reachedCutoff || count == 0 || count < pageSize || (payload.TotalSize > 0 && skip+count >= payload.TotalSize) {
 			break
 		}
 		skip += count
