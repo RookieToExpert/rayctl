@@ -125,7 +125,39 @@ func Save(path string, store *Store) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Clean(path), append(content, '\n'), 0o600)
+	return writeSessionAtomically(filepath.Clean(path), append(content, '\n'))
+}
+
+func writeSessionAtomically(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".session-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(content); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	if dirFile, err := os.Open(dir); err == nil {
+		defer dirFile.Close()
+		_ = dirFile.Sync()
+	}
+	return nil
 }
 
 func Login(ctx context.Context, signinURL string, iamBaseURL string, username string, password string, tenantCode string, opts ...LoginOption) (*ProfileSession, error) {
@@ -338,7 +370,10 @@ func requestLoginChallenge(ctx context.Context, client *http.Client, authURL str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("read auth challenge response: %w", err)
+		}
 		return "", fmt.Errorf("request auth challenge returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	location := resp.Header.Get("Location")
@@ -416,7 +451,10 @@ func fetchSigninPublicKey(ctx context.Context, client *http.Client, signinURL st
 		return nil, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read signin jwks response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("get signin jwks returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -521,7 +559,10 @@ func checkLoginChallenge(ctx context.Context, client *http.Client, iamBaseURL st
 		return false, "", err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, "", fmt.Errorf("read challenge response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, "", fmt.Errorf("check challenge returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -563,7 +604,10 @@ func checkAuthNeedCaptcha(ctx context.Context, client *http.Client, iamBaseURL s
 		return false, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Errorf("read captcha response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, fmt.Errorf("check captcha returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -625,7 +669,10 @@ func submitIAMLogin(ctx context.Context, client *http.Client, iamBaseURL string,
 		}
 		return location, nil
 	}
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read iam login response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("iam login returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -689,7 +736,10 @@ func exchangeAuthorizationCode(ctx context.Context, client *http.Client, tokenUR
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read authorization response: %w", err)
+	}
 	return respBody, resp.StatusCode, nil
 }
 

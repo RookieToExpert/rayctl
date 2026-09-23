@@ -94,3 +94,33 @@ func TestListKubernetesNodesForProfile(t *testing.T) {
 		t.Fatalf("allocatable accelerator = %s, want 7", got.String())
 	}
 }
+
+func TestVolcanoMetadataRequestsUsePartialObjectAccept(t *testing.T) {
+	requests := 0
+	client := &VirtualClusterClient{
+		currentProfile: "test",
+		profiles: map[string]clientProfile{
+			"test": {Name: "test", AccessKey: "ak", SecretKey: "sk", KubernetesBaseURL: "https://compute.example.test"},
+		},
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests++
+			if got := request.Header.Get("Accept"); got != "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io" {
+				t.Fatalf("Accept = %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"metadata":{"remainingItemCount":2},"items":[{"metadata":{"name":"job-1"}}]}`)),
+				Request:    request,
+			}, nil
+		})},
+	}
+	items, err := client.ListVolcanoJobMetadataForProfile(context.Background(), "test", "vc-test", "ns-test")
+	if err != nil || len(items) != 1 || items[0].Name != "job-1" {
+		t.Fatalf("metadata = %#v, err = %v", items, err)
+	}
+	count, err := client.CountVolcanoJobsForProfile(context.Background(), "test", "vc-test", "ns-test")
+	if err != nil || count != 3 || requests != 2 {
+		t.Fatalf("count = %d, requests = %d, err = %v", count, requests, err)
+	}
+}

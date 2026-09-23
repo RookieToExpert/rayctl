@@ -102,9 +102,9 @@ func runVCGet(cmd *cobra.Command, identifier string, platformOnly bool) error {
 }
 
 func newVCPlatformService() (*platform.VirtualClusterClient, *service.VCService, error) {
-	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return nil, nil, fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	vcClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return nil, nil, platformErr
 	}
 	return vcClient, service.NewVCService(vcClient), nil
 }
@@ -128,9 +128,9 @@ func newVCNodeListCmd() *cobra.Command {
 		Short: "并行列出一个或多个 VC 当前包含的 ACN 节点",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			vcService := service.NewVCService(vcClient)
 			if clientset, err := kube.NewClientset(kubeconfig); err == nil {
@@ -179,9 +179,9 @@ func newVCNodeUsageCmd() *cobra.Command {
 		}, "\n"),
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			clientset, err := kube.NewClientset(kubeconfig)
 			if err != nil {
@@ -237,9 +237,9 @@ func newVCNodeAddCmd() *cobra.Command {
 		Short: "向指定 VC 添加一个或多个 ACN 节点",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			vcService := service.NewVCService(vcClient)
 			result, err := vcService.PrepareNodeAdd(cmd.Context(), args[0], args[1:])
@@ -294,9 +294,9 @@ func newVCNodeRemoveCmd() *cobra.Command {
 		Short: "从指定 VC 移除一个或多个 ACN 节点",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			vcService := service.NewVCService(vcClient)
 			result, err := vcService.PrepareNodeRemove(cmd.Context(), args[0], args[1:])

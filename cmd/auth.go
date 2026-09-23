@@ -180,9 +180,9 @@ func newAuthSSPCheckCmd() *cobra.Command {
 		Short: "查看 SSP 工作空间成员和角色",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			profileName, err := vcClient.ResolveProfileName("")
 			if err != nil {
@@ -221,9 +221,9 @@ func newAuthSSPGrantCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			profileName, err := vcClient.ResolveProfileName("")
 			if err != nil {
@@ -346,9 +346,9 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 				return fmt.Errorf("请使用 --user 或 --group 指定授权对象")
 			}
 
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			token := ""
 			tokenSource := ""
@@ -485,9 +485,9 @@ func newAuthRemoveResourceCmd(resourceType string, use string, short string, rol
 				return fmt.Errorf("请使用 --user 或 --group 指定授权对象")
 			}
 
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 
 			token, source, err := bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
@@ -568,9 +568,9 @@ func newAuthRolesResourceCmd(resourceType string, use string, short string) *cob
 		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 
 			authService := service.NewAuthService(vcClient)
@@ -596,9 +596,9 @@ func newAuthLoginCmd() *cobra.Command {
 		Use:   "login",
 		Short: "登录控制台并缓存 Bearer token",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			if strings.TrimSpace(bearerToken) != "" {
 				item, err := saveBearerSessionForCommand(cmd, vcClient, username, tenantCode, bearerToken)
@@ -631,9 +631,9 @@ func newAuthLogoutCmd() *cobra.Command {
 		Use:   "logout",
 		Short: "删除当前 profile 的登录缓存",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			store, err := authsession.Load("")
 			if err != nil {
@@ -655,9 +655,9 @@ func newAuthTokenCmd() *cobra.Command {
 		Use:   "token",
 		Short: "查看当前 profile 的登录态状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			store, err := authsession.Load("")
 			if err != nil {
@@ -687,9 +687,9 @@ func runAuthCheckResource(cmd *cobra.Command, resourceType string, resourceName 
 }
 
 func runAuthCheckResources(cmd *cobra.Command, resourceType string, resourceNames []string, explicitToken string, long bool) error {
-	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	vcClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return platformErr
 	}
 
 	bearerToken := ""
@@ -741,9 +741,9 @@ func authResourceScopeRequiresBearer(resourceType string) bool {
 }
 
 func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool) error {
-	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	vcClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return platformErr
 	}
 
 	authService := service.NewAuthService(vcClient)
@@ -783,9 +783,9 @@ func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool) error {
 }
 
 func runAuthCheckUser(cmd *cobra.Command, args []string, long bool, tenant string, allTenants bool) error {
-	vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	vcClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return platformErr
 	}
 
 	authService := service.NewAuthService(vcClient)

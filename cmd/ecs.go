@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -57,7 +56,10 @@ func newECSQueryCmd(use string, short string, example string) *cobra.Command {
 				return err
 			}
 
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			ecsService := service.NewECSService(dynamicClient, vcClient)
 			results := ecsService.CheckMany(cmd.Context(), args, 4)
 			printed := false
@@ -91,7 +93,10 @@ func newECSLoginCmd() *cobra.Command {
 				return err
 			}
 
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			ecsService := service.NewECSService(dynamicClient, vcClient)
 			item, err := ecsService.ResolveSingle(cmd.Context(), args[0])
 			if err != nil {

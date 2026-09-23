@@ -53,9 +53,9 @@ func newRBACGrantCmd() *cobra.Command {
 				return fmt.Errorf("请至少使用一个 --user 或 --group 指定授权对象")
 			}
 
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			iamToken, computeToken, source, err := bearerTokensForRBACGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
 			if err != nil {
@@ -142,9 +142,9 @@ func newRBACRemoveCmd() *cobra.Command {
 				return fmt.Errorf("请使用 --binding 精确指定要删除的 Binding 名")
 			}
 
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			computeToken, source, err := bearerTokenForRBACComputeCommand(cmd.Context(), cmd, vcClient, bearerToken)
 			if err != nil {
@@ -216,9 +216,9 @@ func newRBACGetCmd() *cobra.Command {
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			environment := explicitEnvironmentFilter()
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 
 			ctx := cmd.Context()

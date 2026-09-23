@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -50,7 +49,10 @@ func newPVCQueryCmd(use string, short string) *cobra.Command {
 				return err
 			}
 
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			storageService := service.NewStorageService(clientset, vcClient)
 			type queryResult struct {
 				identifier string

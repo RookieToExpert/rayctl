@@ -17,7 +17,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -55,7 +54,10 @@ func newECPJobGetCmd() *cobra.Command {
 				return err
 			}
 
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			jobService := service.NewJobService(clientset, dynamicClient, vcClient)
 			return runParallelECPJobGet(
 				getCmd.Context(), args, jobService, vcClient,
@@ -109,9 +111,9 @@ func newECPJobListCmd() *cobra.Command {
 				includeInactive = true
 			}
 
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			jobService := service.NewJobService(nil, nil, vcClient)
 			queryLimit := limit
@@ -187,9 +189,9 @@ func newJobListClusterCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			jobService := service.NewJobService(nil, nil, vcClient)
 			var result *service.JobClusterListResult

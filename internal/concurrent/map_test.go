@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestMapStopsDispatchAfterCancellation(t *testing.T) {
+func TestMapFillsResultsAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var calls atomic.Int32
@@ -15,7 +15,23 @@ func TestMapStopsDispatchAfterCancellation(t *testing.T) {
 		cancel()
 		return value
 	})
-	if calls.Load() != 1 || results[0] != 1 || results[1] != 0 || results[2] != 0 {
+	if calls.Load() != 4 || results[0] != 1 || results[1] != 2 || results[2] != 3 || results[3] != 4 {
 		t.Fatalf("calls = %d, results = %v", calls.Load(), results)
+	}
+}
+
+func TestMapCallsEveryInputWhenAlreadyCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	results := Map(ctx, []int{1, 2, 3}, 2, func(ctx context.Context, value int) int {
+		if ctx.Err() == nil {
+			t.Fatal("expected canceled context")
+		}
+		return value
+	})
+	for i, value := range results {
+		if value != i+1 {
+			t.Fatalf("results = %v", results)
+		}
 	}
 }

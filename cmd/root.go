@@ -4,20 +4,18 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
-	"rayctl/internal/platform"
 )
 
 var kubeconfig string
 
 var rootCmd = &cobra.Command{
-	Use:   "rayctl",
-	Short: "rayctl is a lightweight Kubernetes CLI for high-frequency queries",
-	Long:  "rayctl is a custom Kubernetes CLI built with Cobra and client-go to simplify daily cluster inspection tasks.",
+	Use:           "rayctl",
+	Short:         "rayctl is a lightweight Kubernetes CLI for high-frequency queries",
+	Long:          "rayctl is a custom Kubernetes CLI built with Cobra and client-go to simplify daily cluster inspection tasks.",
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if err := prepareEnvironmentSelection(); err != nil {
-			return err
-		}
-		return platform.ValidateConfigFile(platform.DefaultConfigPath())
+		return prepareEnvironmentSelection()
 	},
 }
 

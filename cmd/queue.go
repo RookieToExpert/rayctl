@@ -16,7 +16,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -274,9 +273,9 @@ func newSSPResourceQueryService() (*service.SSPResourceService, error) {
 	if err != nil {
 		return nil, err
 	}
-	platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return nil, fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+	platformClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return nil, platformErr
 	}
 	resourceService := service.NewSSPResourceService(clientset, platformClient)
 	resourceService.SetQueueNodeClientResolver(localQueueVClusterClient)

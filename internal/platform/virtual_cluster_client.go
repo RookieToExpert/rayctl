@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -54,6 +55,9 @@ type VirtualClusterClient struct {
 	subscription      string
 	resourceGroup     string
 	region            string
+	metricsBaseURL    string
+	metricsUsername   string
+	metricsPassword   string
 	currentProfile    string
 	profiles          map[string]clientProfile
 	httpClient        *http.Client
@@ -679,6 +683,9 @@ func NewVirtualClusterClientFromEnvWithError() (*VirtualClusterClient, error) {
 		subscription:      subscription,
 		resourceGroup:     resourceGroup,
 		region:            region,
+		metricsBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_METRICS_BASE_URL")), "/"),
+		metricsUsername:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_USERNAME")),
+		metricsPassword:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_PASSWORD")),
 		currentProfile:    "env",
 		profiles: map[string]clientProfile{
 			"env": {
@@ -727,11 +734,15 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		}
 		current, ok := profiles[currentProfile]
 		if !ok {
-			for name, profile := range profiles {
-				currentProfile = name
-				current = profile
+			names := make([]string, 0, len(profiles))
+			for name := range profiles {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			if len(names) > 0 {
+				currentProfile = names[0]
+				current = profiles[currentProfile]
 				ok = true
-				break
 			}
 		}
 		if !ok {
@@ -753,6 +764,13 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		selected, ok := applyProcessEnvironmentSelection(client)
 		if !ok {
 			return nil, fmt.Errorf("platform config %s has no profile for the selected environment", configPath)
+		}
+		if requested := strings.TrimSpace(multiCfg.CurrentProfile); requested != currentProfile {
+			if requested == "" {
+				fmt.Fprintf(os.Stderr, "Warning: platform config %s has no current_profile; using profile %q\n", configPath, selected.CurrentProfileName())
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: platform config %s current_profile %q is unavailable; using profile %q\n", configPath, requested, selected.CurrentProfileName())
+			}
 		}
 		return selected, nil
 	}
@@ -1516,9 +1534,6 @@ func normalizeCurrentProfileName(current string, profiles map[string]config) str
 			return current
 		}
 	}
-	if _, ok := profiles["ailabdev"]; ok {
-		return "ailabdev"
-	}
 	names := make([]string, 0, len(profiles))
 	for name := range profiles {
 		names = append(names, name)
@@ -1604,9 +1619,9 @@ func (c *VirtualClusterClient) orderedProfiles() []clientProfile {
 			BaseURL:           c.baseURL,
 			KubernetesBaseURL: c.kubernetesBaseURL,
 			IAMBaseURL:        c.iamBaseURL,
-			MetricsBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_METRICS_BASE_URL")), "/"),
-			MetricsUsername:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_USERNAME")),
-			MetricsPassword:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_PASSWORD")),
+			MetricsBaseURL:    c.metricsBaseURL,
+			MetricsUsername:   c.metricsUsername,
+			MetricsPassword:   c.metricsPassword,
 			Subscription:      c.subscription,
 			ResourceGroup:     c.resourceGroup,
 			Region:            c.region,
@@ -1667,9 +1682,9 @@ func (c *VirtualClusterClient) currentClientProfile() (clientProfile, bool) {
 			BaseURL:           c.baseURL,
 			KubernetesBaseURL: c.kubernetesBaseURL,
 			IAMBaseURL:        c.iamBaseURL,
-			MetricsBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("RAYCTL_METRICS_BASE_URL")), "/"),
-			MetricsUsername:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_USERNAME")),
-			MetricsPassword:   strings.TrimSpace(os.Getenv("RAYCTL_METRICS_PASSWORD")),
+			MetricsBaseURL:    c.metricsBaseURL,
+			MetricsUsername:   c.metricsUsername,
+			MetricsPassword:   c.metricsPassword,
 			Subscription:      c.subscription,
 			ResourceGroup:     c.resourceGroup,
 			Region:            c.region,
@@ -3221,30 +3236,11 @@ func (c *VirtualClusterClient) ListVolcanoJobMetadataForProfile(ctx context.Cont
 		return nil, fmt.Errorf("platform profile %q not found", profileName)
 	}
 	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, fmt.Sprintf("/apis/batch.volcano.sh/v1alpha1/namespaces/%s/jobs", namespace), nil)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build volcano job metadata request: %w", err)
-	}
-	headers, err := c.authHeadersForProfile(profile, reqURL, http.MethodGet)
+	body, err := c.doSignedRequest(ctx, profile, http.MethodGet, reqURL, "", nil, false, "", map[string]string{
+		"Accept": "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io",
+	})
 	if err != nil {
 		return nil, err
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	req.Header.Set("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io")
-
-	resp, err := doPlatformRequest(c.httpClient, req)
-	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", reqURL, err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if readErr != nil {
-		return nil, fmt.Errorf("read response from %s: %w", reqURL, readErr)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var list metav1.PartialObjectMetadataList
@@ -3265,30 +3261,11 @@ func (c *VirtualClusterClient) CountVolcanoJobsForProfile(ctx context.Context, p
 	query.Set("filter", "")
 	query.Set("order", "created_at desc")
 	reqURL := c.kubernetesResourceURLForProfile(profile, vclusterName, "/apis/batch.volcano.sh/v1alpha1/jobs", query)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return 0, fmt.Errorf("build volcano job count request: %w", err)
-	}
-	headers, err := c.authHeadersForProfile(profile, reqURL, http.MethodGet)
+	body, err := c.doSignedRequest(ctx, profile, http.MethodGet, reqURL, "", nil, false, "", map[string]string{
+		"Accept": "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io",
+	})
 	if err != nil {
 		return 0, err
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	req.Header.Set("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io")
-
-	resp, err := doPlatformRequest(c.httpClient, req)
-	if err != nil {
-		return 0, fmt.Errorf("request %s: %w", reqURL, err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if readErr != nil {
-		return 0, fmt.Errorf("read response from %s: %w", reqURL, readErr)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return 0, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var list metav1.PartialObjectMetadataList
@@ -4758,14 +4735,7 @@ func authHeadersForCredentials(accessKey string, secretKey string, reqURL string
 }
 
 func (c *VirtualClusterClient) getJSONWithProfile(ctx context.Context, profile clientProfile, reqURL string, out any) error {
-	body, err := c.doRequestWithProfile(ctx, profile, http.MethodGet, reqURL, "", nil)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("decode response from %s: %w", reqURL, err)
-	}
-	return nil
+	return c.getJSONWithAuth(ctx, profile, reqURL, false, "", out)
 }
 
 func (c *VirtualClusterClient) postJSONWithProfile(ctx context.Context, profile clientProfile, reqURL string, payload any, out any) error {
@@ -4817,29 +4787,19 @@ func (c *VirtualClusterClient) getTextWithProfile(ctx context.Context, profile c
 }
 
 func (c *VirtualClusterClient) getJSONWithCMSProfile(ctx context.Context, profile clientProfile, reqURL string, out any) error {
-	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("decode response from %s: %w", reqURL, err)
-	}
-	return nil
+	return c.getJSONWithAuth(ctx, profile, reqURL, true, "", out)
 }
 
 func (c *VirtualClusterClient) getJSONWithCMSProfileToken(ctx context.Context, profile clientProfile, reqURL string, bearerToken string, out any) error {
-	body, err := c.doRequestWithCMSProfile(ctx, profile, http.MethodGet, reqURL, "", nil, bearerToken)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("decode response from %s: %w", reqURL, err)
-	}
-	return nil
+	return c.getJSONWithAuth(ctx, profile, reqURL, true, bearerToken, out)
 }
 
 func (c *VirtualClusterClient) getJSONWithBearerProfile(ctx context.Context, profile clientProfile, reqURL string, bearerToken string, out any) error {
-	body, err := c.doSignedRequest(ctx, profile, http.MethodGet, reqURL, "", nil, false, bearerToken)
+	return c.getJSONWithAuth(ctx, profile, reqURL, false, bearerToken, out)
+}
+
+func (c *VirtualClusterClient) getJSONWithAuth(ctx context.Context, profile clientProfile, reqURL string, useCMS bool, bearerToken string, out any) error {
+	body, err := c.doSignedRequest(ctx, profile, http.MethodGet, reqURL, "", nil, useCMS, bearerToken)
 	if err != nil {
 		return err
 	}
@@ -4869,7 +4829,7 @@ func (c *VirtualClusterClient) doRequestWithCMSProfile(ctx context.Context, prof
 	return c.doSignedRequest(ctx, profile, method, reqURL, contentType, requestBody, true, token)
 }
 
-func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clientProfile, method string, reqURL string, contentType string, requestBody []byte, useCMS bool, bearerToken string) ([]byte, error) {
+func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clientProfile, method string, reqURL string, contentType string, requestBody []byte, useCMS bool, bearerToken string, extraHeaders ...map[string]string) ([]byte, error) {
 	var bodyReader io.Reader
 	if len(requestBody) > 0 {
 		bodyReader = bytes.NewReader(requestBody)
@@ -4898,6 +4858,11 @@ func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clie
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
+	for _, extra := range extraHeaders {
+		for key, value := range extra {
+			req.Header.Set(key, value)
+		}
+	}
 	if strings.TrimSpace(contentType) != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -4913,9 +4878,21 @@ func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clie
 		return nil, fmt.Errorf("read response from %s: %w", reqURL, readErr)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, responseBodyExcerpt(body))
 	}
 	return body, nil
+}
+
+func responseBodyExcerpt(body []byte) string {
+	const limit = 512
+	if len(body) > limit {
+		prefix := body[:limit]
+		for len(prefix) > 0 && !utf8.Valid(prefix) {
+			prefix = prefix[:len(prefix)-1]
+		}
+		return strings.TrimSpace(string(prefix)) + "..."
+	}
+	return strings.TrimSpace(string(body))
 }
 
 func (c *VirtualClusterClient) kubernetesResourceURLForProfile(profile clientProfile, vclusterName string, path string, query url.Values) string {

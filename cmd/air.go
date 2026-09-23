@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -176,9 +175,9 @@ func newAIRGatewayGetCmd() *cobra.Command {
 }
 
 func newAIRQueryService() (*service.SSPAIRService, error) {
-	platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return nil, fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+	platformClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return nil, platformErr
 	}
 	return service.NewSSPAIRService(platformClient), nil
 }

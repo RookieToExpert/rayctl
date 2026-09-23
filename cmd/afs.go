@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -42,9 +41,9 @@ func newAFSCreateCmd() *cobra.Command {
 		Short: "创建个人 AFS 并完成订单支付",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
+			client, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			createService := service.NewAFSCreateService(client)
 			plan, err := createService.Prepare(cmd.Context(), service.AFSCreateOptions{
@@ -126,7 +125,10 @@ func runAFSQueries(cmd *cobra.Command, args []string, longOutput bool) error {
 	if err != nil {
 		return err
 	}
-	vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+	vcClient, platformErr := optionalPlatformClient()
+	if platformErr != nil {
+		return platformErr
+	}
 	results := service.NewStorageService(clientset, vcClient).CheckAFSMany(cmd.Context(), args, longOutput, 4)
 	valid := make([]*service.AFSCheckResult, 0, len(results))
 	queryErrors := make([]error, 0)

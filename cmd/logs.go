@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 
@@ -55,9 +54,9 @@ func newLogsCloudAuditCmd() *cobra.Command {
 		}, "\n"),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform config not found; please configure ~/.rayctl/platform.json")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 
 			if limit <= 0 {
@@ -123,9 +122,9 @@ func newLogsECPWorkloadCmd() *cobra.Command {
 		}, "\n"),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vcClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform config not found; please configure ~/.rayctl/platform.json")
+			vcClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 
 			duration, err := time.ParseDuration(strings.TrimSpace(since))

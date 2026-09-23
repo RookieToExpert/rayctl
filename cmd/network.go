@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -183,9 +182,9 @@ func newNATGatewayGetCmd() *cobra.Command {
 }
 
 func newNetworkResourceService() (*service.NetworkResourceService, error) {
-	client, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return nil, fmt.Errorf("platform client is unavailable, please configure platform.json first")
+	client, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return nil, platformErr
 	}
 	return service.NewNetworkResourceService(client), nil
 }

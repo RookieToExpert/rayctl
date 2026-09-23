@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -61,7 +60,10 @@ func newPolicyGetCmd() *cobra.Command {
 				return err
 			}
 
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			clusterService := service.NewClusterService(clientset, vcClient)
 			policyService := service.NewPolicyService(dynamicClient, clusterService)
 
@@ -112,7 +114,10 @@ func newPolicyUpdateCmd() *cobra.Command {
 				return err
 			}
 
-			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			clusterService := service.NewClusterService(clientset, vcClient)
 			policyService := service.NewPolicyService(dynamicClient, clusterService)
 

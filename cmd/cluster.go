@@ -34,9 +34,9 @@ func newClusterListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			platformClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			result, err := service.NewSSPResourceService(nil, platformClient).ListClusters(cmd.Context(), region)
 			if err != nil {
@@ -61,9 +61,9 @@ func newClusterGetCmd() *cobra.Command {
 		}, "\n"),
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			platformClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			resourceService := service.NewSSPResourceService(nil, platformClient)
 			region, err := selectedSSPRegionForLookup()

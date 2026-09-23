@@ -298,9 +298,9 @@ func validateMetricsOutput(value string) error {
 }
 
 func newMetricsClient(ctx context.Context) (*metricsquery.Client, string, *platform.VirtualClusterClient, func(), error) {
-	platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return nil, "", nil, nil, fmt.Errorf("platform config not found; please configure ~/.rayctl/platform.json")
+	platformClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return nil, "", nil, nil, platformErr
 	}
 	config, err := platformClient.CurrentMetricsConfig()
 	if err != nil {

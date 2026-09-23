@@ -93,7 +93,10 @@ func newNodeListCmd() *cobra.Command {
 				listTarget = ""
 			}
 
-			vcClient, hasVCClient := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil && (queueFilter != "" || workspaceFilter != "" || clusterFilter != "") {
+				return platformErr
+			}
 			type nodeFilterLookup struct {
 				queue *service.SSPQueueNodeListResult
 				scope *service.SSPNodeScopeListResult
@@ -103,7 +106,7 @@ func newNodeListCmd() *cobra.Command {
 			var workspaceLookup <-chan nodeFilterLookup
 			var clusterLookup <-chan nodeFilterLookup
 			if queueFilter != "" || workspaceFilter != "" || clusterFilter != "" {
-				if !hasVCClient {
+				if vcClient == nil {
 					return fmt.Errorf("--queue/--workspace/--cluster requires platform configuration in ~/.rayctl/platform.json")
 				}
 				region, regionErr := selectedSSPRegionForLookup()
@@ -151,7 +154,7 @@ func newNodeListCmd() *cobra.Command {
 				resolvedSelector = fmt.Sprintf("InternalIP matches %s", strings.Join(ipFilters, " | "))
 			}
 
-			if hasVCClient {
+			if vcClient != nil {
 				if longOutput {
 					if computeNodes, err := vcClient.ListAIComputeNodes(cmd.Context()); err == nil {
 						byHostName := make(map[string]platform.AIComputeNode, len(computeNodes))
@@ -430,13 +433,16 @@ func newNodeGetCmd() *cobra.Command {
 			clientDuration := time.Since(clientBegin)
 
 			nodeService := service.NewNodeService(clientset)
-			vcClient, hasVCClient := platform.NewVirtualClusterClientFromEnv()
+			vcClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			normalizedNames := make([]string, len(args))
 			for i, nodeName := range args {
 				normalizedNames[i] = normalizeNodeIdentifier(nodeName)
 			}
 			results := nodeService.DescribeMany(cmd.Context(), normalizedNames, 4)
-			if hasVCClient {
+			if vcClient != nil {
 				resolveFailedPlatformNodeNames(cmd.Context(), vcClient, nodeService, args, normalizedNames, results, 4)
 				resolveNodeVCNames(cmd.Context(), vcClient, results, 4)
 			}

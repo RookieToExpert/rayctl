@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"rayctl/internal/kube"
-	"rayctl/internal/platform"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -88,9 +87,9 @@ func newSSPAIDGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			platformClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 			aidService := service.NewSSPAIDService(clientset, platformClient)
 			type queryResult struct {
@@ -213,9 +212,9 @@ func parseListDuration(value string) (time.Duration, error) {
 }
 
 func newSSPCatalogQueryService() (*service.SSPCatalogService, error) {
-	platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-	if !ok {
-		return nil, fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+	platformClient, platformErr := requirePlatformClient()
+	if platformErr != nil {
+		return nil, platformErr
 	}
 	return service.NewSSPCatalogService(platformClient), nil
 }
@@ -238,9 +237,9 @@ func newSSPJobGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			platformClient, ok := platform.NewVirtualClusterClientFromEnv()
-			if !ok {
-				return fmt.Errorf("platform configuration is unavailable; configure ~/.rayctl/platform.json first")
+			platformClient, platformErr := requirePlatformClient()
+			if platformErr != nil {
+				return platformErr
 			}
 
 			jobService := service.NewSSPJobService(clientset, platformClient)

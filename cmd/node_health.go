@@ -57,9 +57,12 @@ func newNodeHealthCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create kubernetes clientset: %w", err)
 			}
-			platformClient, hasPlatform := platform.NewVirtualClusterClientFromEnv()
+			platformClient, platformErr := optionalPlatformClient()
+			if platformErr != nil {
+				return platformErr
+			}
 			environment := effectiveEnvironmentSelection()
-			if hasPlatform {
+			if platformClient != nil {
 				if config, configErr := platformClient.CurrentMetricsConfig(); configErr == nil {
 					environment = config.Environment
 				}
@@ -72,7 +75,7 @@ func newNodeHealthCmd() *cobra.Command {
 
 			var metricsClient *metricsquery.Client
 			if nodehealth.HasCheck(checks, nodehealth.CheckDisk) {
-				if !hasPlatform {
+				if platformClient == nil {
 					return fmt.Errorf("disk check requires platform configuration in ~/.rayctl/platform.json")
 				}
 				config, configErr := platformClient.CurrentMetricsConfig()
@@ -105,7 +108,7 @@ func newNodeHealthCmd() *cobra.Command {
 				Checks: checks, NoExec: noExec, MaxParallel: 4,
 			})
 			result.Batch = batch
-			if hasPlatform {
+			if platformClient != nil {
 				resolveNodeHealthVCNames(cmd.Context(), platformClient, result)
 			}
 			if printErr := output.PrintNodeHealth(result, outputFormat); printErr != nil {
