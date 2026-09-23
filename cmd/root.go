@@ -1,16 +1,24 @@
 package cmd
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
+	"rayctl/internal/platform"
 )
 
 var kubeconfig string
 
 var rootCmd = &cobra.Command{
-	Use:               "rayctl",
-	Short:             "rayctl is a lightweight Kubernetes CLI for high-frequency queries",
-	Long:              "rayctl is a custom Kubernetes CLI built with Cobra and client-go to simplify daily cluster inspection tasks.",
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return prepareEnvironmentSelection() },
+	Use:   "rayctl",
+	Short: "rayctl is a lightweight Kubernetes CLI for high-frequency queries",
+	Long:  "rayctl is a custom Kubernetes CLI built with Cobra and client-go to simplify daily cluster inspection tasks.",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := prepareEnvironmentSelection(); err != nil {
+			return err
+		}
+		return platform.ValidateConfigFile(platform.DefaultConfigPath())
+	},
 }
 
 func init() {
@@ -43,6 +51,10 @@ func init() {
 }
 
 func Execute() error {
+	return ExecuteContext(context.Background())
+}
+
+func ExecuteContext(ctx context.Context) error {
 	resetRequestedProcessExitCode()
-	return rootCmd.Execute()
+	return rootCmd.ExecuteContext(ctx)
 }

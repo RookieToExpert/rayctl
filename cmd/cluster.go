@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -108,21 +107,13 @@ func newClusterSetCmd() *cobra.Command {
 				return fmt.Errorf("unsupported cluster %q, expected d or dcloud", args[0])
 			}
 
-			configPath := platform.DefaultConfigPath()
-			cfg, err := platform.LoadConfigSnapshot(configPath)
-			if err != nil {
-				if !os.IsNotExist(err) {
-					return fmt.Errorf("load platform config: %w", err)
-				}
-				cfg = &platform.ConfigSnapshot{}
-			}
-
-			cfg.Cluster = cluster
-			cfg.Subscription = ""
-			cfg.BaseURL = ""
-			cfg.KubernetesBaseURL = ""
-
-			if err := platform.SaveConfigSnapshot(configPath, cfg); err != nil {
+			if err := platform.UpdateConfigSnapshot(platform.DefaultConfigPath(), func(cfg *platform.ConfigSnapshot) error {
+				cfg.Cluster = cluster
+				cfg.Subscription = ""
+				cfg.BaseURL = ""
+				cfg.KubernetesBaseURL = ""
+				return nil
+			}); err != nil {
 				return fmt.Errorf("save platform config: %w", err)
 			}
 

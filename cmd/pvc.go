@@ -111,7 +111,7 @@ func newPVCCreateCmd() *cobra.Command {
 				return err
 			}
 			storageService := service.NewStorageService(clientset, nil)
-			created, err := storageService.CreatePVC(context.Background(), req)
+			created, err := storageService.CreatePVC(cmd.Context(), req)
 			if err != nil {
 				return err
 			}

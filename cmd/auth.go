@@ -355,7 +355,7 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 			tokenDebugPrinted := false
 			if authResourceScopeRequiresBearer(resourceType) && strings.TrimSpace(scope) == "" {
 				var tokenErr error
-				token, tokenSource, tokenErr = bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+				token, tokenSource, tokenErr = bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
 				if tokenErr != nil {
 					return tokenErr
 				}
@@ -379,7 +379,7 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 			authService := service.NewAuthService(vcClient)
 			preflightReq := req
 			preflightReq.DryRun = true
-			result, err := authService.GrantAFS(context.Background(), preflightReq)
+			result, err := authService.GrantAFS(cmd.Context(), preflightReq)
 			if err != nil {
 				return err
 			}
@@ -411,7 +411,7 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 			req.DryRun = false
 			if token == "" {
 				var tokenErr error
-				token, tokenSource, tokenErr = bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+				token, tokenSource, tokenErr = bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
 				if tokenErr != nil {
 					return tokenErr
 				}
@@ -420,7 +420,7 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 			if debugAuth && !tokenDebugPrinted {
 				fmt.Fprintf(cmd.ErrOrStderr(), "auth grant debug: bearer source=%s %s\n", tokenSource, bearerDebugSummary(token))
 			}
-			result, err = authService.GrantAFS(context.Background(), req)
+			result, err = authService.GrantAFS(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
@@ -490,7 +490,7 @@ func newAuthRemoveResourceCmd(resourceType string, use string, short string, rol
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
 
-			token, source, err := bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+			token, source, err := bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
 			if err != nil {
 				return err
 			}
@@ -510,7 +510,7 @@ func newAuthRemoveResourceCmd(resourceType string, use string, short string, rol
 			}
 
 			authService := service.NewAuthService(vcClient)
-			result, err := authService.RemoveAFS(context.Background(), req)
+			result, err := authService.RemoveAFS(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
@@ -541,7 +541,7 @@ func newAuthRemoveResourceCmd(resourceType string, use string, short string, rol
 			}
 
 			req.DryRun = false
-			result, err = authService.RemoveAFS(context.Background(), req)
+			result, err = authService.RemoveAFS(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
@@ -574,7 +574,7 @@ func newAuthRolesResourceCmd(resourceType string, use string, short string) *cob
 			}
 
 			authService := service.NewAuthService(vcClient)
-			result, err := authService.GetResourceRoles(context.Background(), resourceType)
+			result, err := authService.GetResourceRoles(cmd.Context(), resourceType)
 			if err != nil {
 				return err
 			}
@@ -609,7 +609,7 @@ func newAuthLoginCmd() *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "登录成功: profile=%s username=%s expires=%s\n", sessionProfileName(vcClient), firstNonEmptyAuthValue(item.Username), expires)
 				return nil
 			}
-			item, err := loginForCommand(context.Background(), cmd, vcClient, username, tenantCode, debugLogin, passwordStdin)
+			item, err := loginForCommand(cmd.Context(), cmd, vcClient, username, tenantCode, debugLogin, passwordStdin)
 			if err != nil {
 				return err
 			}
@@ -695,7 +695,7 @@ func runAuthCheckResources(cmd *cobra.Command, resourceType string, resourceName
 	bearerToken := ""
 	if authResourceScopeRequiresBearer(resourceType) {
 		var err error
-		bearerToken, _, err = bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, explicitToken)
+		bearerToken, _, err = bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, explicitToken)
 		if err != nil {
 			return err
 		}

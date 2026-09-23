@@ -142,7 +142,7 @@ func newNodeListCmd() *cobra.Command {
 			// service.NewNodeService 定义于 internal/service/node_service.go
 			nodeService := service.NewNodeService(clientset)
 			// nodeService.List 定义于 internal/service/node_service.go
-			nodes, resolvedSelector, err := nodeService.List(context.Background(), listTarget, "")
+			nodes, resolvedSelector, err := nodeService.List(cmd.Context(), listTarget, "")
 			if err != nil {
 				return err
 			}
@@ -153,7 +153,7 @@ func newNodeListCmd() *cobra.Command {
 
 			if hasVCClient {
 				if longOutput {
-					if computeNodes, err := vcClient.ListAIComputeNodes(context.Background()); err == nil {
+					if computeNodes, err := vcClient.ListAIComputeNodes(cmd.Context()); err == nil {
 						byHostName := make(map[string]platform.AIComputeNode, len(computeNodes))
 						byHostIP := make(map[string]platform.AIComputeNode, len(computeNodes))
 						for _, item := range computeNodes {
@@ -199,7 +199,7 @@ func newNodeListCmd() *cobra.Command {
 					}
 				}
 
-				displayNames, profileNames, err := vcClient.ResolveDisplayNamesWithProfiles(context.Background(), clusterUIDs)
+				displayNames, profileNames, err := vcClient.ResolveDisplayNamesWithProfiles(cmd.Context(), clusterUIDs)
 				if err == nil {
 					for i := range nodes {
 						if displayName, ok := displayNames[nodes[i].ClusterUID]; ok {

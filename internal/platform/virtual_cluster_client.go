@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -618,8 +619,17 @@ type ConfigSnapshot struct {
 }
 
 func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
-	if client, ok := newVirtualClusterClientFromFile(DefaultConfigPath()); ok {
-		return client, true
+	client, err := NewVirtualClusterClientFromEnvWithError()
+	return client, err == nil && client != nil
+}
+
+func NewVirtualClusterClientFromEnvWithError() (*VirtualClusterClient, error) {
+	client, err := newVirtualClusterClientFromFile(DefaultConfigPath())
+	if err == nil {
+		return client, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
 	}
 
 	accessKey := strings.TrimSpace(os.Getenv("RAYCTL_PLATFORM_ACCESS_KEY"))
@@ -630,7 +640,7 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 		subscription = defaultSubscriptionForCluster(cluster)
 	}
 	if accessKey == "" || secretKey == "" || subscription == "" {
-		return nil, false
+		return nil, nil
 	}
 
 	baseURL, kubernetesBaseURL := defaultBaseURLsForCluster(cluster)
@@ -660,7 +670,7 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 	}
 	iamBaseURL = normalizeIAMBaseURLForRegion(iamBaseURL, region)
 
-	client := &VirtualClusterClient{
+	client = &VirtualClusterClient{
 		accessKey:         accessKey,
 		secretKey:         secretKey,
 		baseURL:           baseURL,
@@ -691,13 +701,17 @@ func NewVirtualClusterClientFromEnv() (*VirtualClusterClient, bool) {
 		},
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
-	return applyProcessEnvironmentSelection(client)
+	selected, ok := applyProcessEnvironmentSelection(client)
+	if !ok {
+		return nil, fmt.Errorf("platform environment selection failed")
+	}
+	return selected, nil
 }
 
-func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, bool) {
+func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, error) {
 	content, err := os.ReadFile(filepath.Clean(configPath))
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 
 	var multiCfg multiProfileConfig
@@ -721,7 +735,7 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 			}
 		}
 		if !ok {
-			return nil, false
+			return nil, fmt.Errorf("platform config %s has no usable profiles", configPath)
 		}
 		client := &VirtualClusterClient{
 			accessKey:         current.AccessKey,
@@ -736,16 +750,20 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 			profiles:          profiles,
 			httpClient:        &http.Client{Timeout: 10 * time.Second},
 		}
-		return applyProcessEnvironmentSelection(client)
+		selected, ok := applyProcessEnvironmentSelection(client)
+		if !ok {
+			return nil, fmt.Errorf("platform config %s has no profile for the selected environment", configPath)
+		}
+		return selected, nil
 	}
 
 	var cfg config
 	if err := json.Unmarshal(content, &cfg); err != nil {
-		return nil, false
+		return nil, fmt.Errorf("parse platform config %s: %w", configPath, err)
 	}
 	profile, ok := makeClientProfile("default", cfg)
 	if !ok {
-		return nil, false
+		return nil, fmt.Errorf("platform config %s has no usable profile", configPath)
 	}
 
 	client := &VirtualClusterClient{
@@ -761,7 +779,11 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		profiles:          map[string]clientProfile{profile.Name: profile},
 		httpClient:        &http.Client{Timeout: 10 * time.Second},
 	}
-	return applyProcessEnvironmentSelection(client)
+	selected, ok := applyProcessEnvironmentSelection(client)
+	if !ok {
+		return nil, fmt.Errorf("platform config %s has no profile for the selected environment", configPath)
+	}
+	return selected, nil
 }
 
 func applyProcessEnvironmentSelection(client *VirtualClusterClient) (*VirtualClusterClient, bool) {
@@ -1105,7 +1127,7 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 
 	var cfg ConfigSnapshot
 	if err := json.Unmarshal(content, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse platform config %s: %w", configPath, err)
 	}
 	cfg.Cluster = normalizeClusterName(cfg.Cluster)
 	if strings.TrimSpace(cfg.Subscription) == "" {
@@ -1130,6 +1152,100 @@ func LoadConfigSnapshot(configPath string) (*ConfigSnapshot, error) {
 }
 
 func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
+	return withConfigLock(configPath, func() error {
+		return saveConfigSnapshot(configPath, cfg)
+	})
+}
+
+// UpdateConfigSnapshot keeps the read-modify-write cycle under the same lock.
+func UpdateConfigSnapshot(configPath string, update func(*ConfigSnapshot) error) error {
+	return withConfigLock(configPath, func() error {
+		cfg, err := LoadConfigSnapshot(configPath)
+		if os.IsNotExist(err) {
+			cfg = &ConfigSnapshot{}
+		} else if err != nil {
+			return err
+		}
+		if err := update(cfg); err != nil {
+			return err
+		}
+		return saveConfigSnapshot(configPath, cfg)
+	})
+}
+
+func ValidateConfigFile(configPath string) error {
+	content, err := os.ReadFile(filepath.Clean(configPath))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read platform config %s: %w", configPath, err)
+	}
+	var value json.RawMessage
+	if err := json.Unmarshal(content, &value); err != nil {
+		return fmt.Errorf("parse platform config %s: %w", configPath, err)
+	}
+	if trimmed := bytes.TrimSpace(value); len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("platform config %s must be a JSON object", configPath)
+	}
+	return nil
+}
+
+func withConfigLock(configPath string, fn func() error) error {
+	dir := filepath.Dir(configPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if filepath.Base(dir) == ".rayctl" {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	lock, err := os.OpenFile(configPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+func writeConfigAtomically(configPath string, content []byte) error {
+	dir := filepath.Dir(configPath)
+	f, err := os.CreateTemp(dir, ".platform-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(content); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), configPath); err != nil {
+		return err
+	}
+	if dirFile, err := os.Open(dir); err == nil {
+		defer dirFile.Close()
+		_ = dirFile.Sync()
+	}
+	return nil
+}
+
+func saveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 	if cfg == nil {
 		return fmt.Errorf("platform config is required")
 	}
@@ -1216,11 +1332,7 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 		if err != nil {
 			return err
 		}
-		dir := filepath.Dir(configPath)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-		return os.WriteFile(filepath.Clean(configPath), append(content, '\n'), 0o600)
+		return writeConfigAtomically(configPath, append(content, '\n'))
 	}
 
 	cfg.Cluster = normalizeClusterName(cfg.Cluster)
@@ -1246,11 +1358,7 @@ func SaveConfigSnapshot(configPath string, cfg *ConfigSnapshot) error {
 		return err
 	}
 
-	dir := filepath.Dir(configPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Clean(configPath), append(content, '\n'), 0o600)
+	return writeConfigAtomically(configPath, append(content, '\n'))
 }
 
 func normalizeClusterName(value string) string {

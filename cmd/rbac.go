@@ -57,7 +57,7 @@ func newRBACGrantCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
-			iamToken, computeToken, source, err := bearerTokensForRBACGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+			iamToken, computeToken, source, err := bearerTokensForRBACGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
 			if err != nil {
 				return err
 			}
@@ -66,7 +66,7 @@ func newRBACGrantCmd() *cobra.Command {
 			}
 
 			rbacService := service.NewRBACService(vcClient)
-			result, err := rbacService.PrepareGrant(context.Background(), service.RBACGrantRequest{
+			result, err := rbacService.PrepareGrant(cmd.Context(), service.RBACGrantRequest{
 				ClusterIdentifier:  args[0],
 				Namespace:          namespace,
 				Role:               role,
@@ -103,7 +103,7 @@ func newRBACGrantCmd() *cobra.Command {
 				}
 			}
 
-			if err := rbacService.ApplyGrant(context.Background(), result, computeToken); err != nil {
+			if err := rbacService.ApplyGrant(cmd.Context(), result, computeToken); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "授权完成: binding=%s result=%s\n", result.BindingName, result.Result)
@@ -146,7 +146,7 @@ func newRBACRemoveCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
-			computeToken, source, err := bearerTokenForRBACComputeCommand(context.Background(), cmd, vcClient, bearerToken)
+			computeToken, source, err := bearerTokenForRBACComputeCommand(cmd.Context(), cmd, vcClient, bearerToken)
 			if err != nil {
 				return err
 			}
@@ -155,7 +155,7 @@ func newRBACRemoveCmd() *cobra.Command {
 			}
 
 			rbacService := service.NewRBACService(vcClient)
-			result, err := rbacService.PrepareRemove(context.Background(), service.RBACRemoveRequest{
+			result, err := rbacService.PrepareRemove(cmd.Context(), service.RBACRemoveRequest{
 				ClusterIdentifier:  args[0],
 				Namespace:          namespace,
 				BindingName:        bindingName,
@@ -189,7 +189,7 @@ func newRBACRemoveCmd() *cobra.Command {
 				}
 			}
 
-			if err := rbacService.ApplyRemove(context.Background(), result, computeToken); err != nil {
+			if err := rbacService.ApplyRemove(cmd.Context(), result, computeToken); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "移除完成: binding=%s result=%s\n", result.BindingName, result.Result)
@@ -221,7 +221,7 @@ func newRBACGetCmd() *cobra.Command {
 				return fmt.Errorf("platform client is unavailable, please configure platform.json first")
 			}
 
-			ctx := context.Background()
+			ctx := cmd.Context()
 			profileTokens, bearerToken, err := rbacGetBearerTokens(ctx, cmd, vcClient)
 			if err != nil {
 				return err

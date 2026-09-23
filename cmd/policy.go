@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -117,7 +116,7 @@ func newPolicyUpdateCmd() *cobra.Command {
 			clusterService := service.NewClusterService(clientset, vcClient)
 			policyService := service.NewPolicyService(dynamicClient, clusterService)
 
-			result, err := policyService.UpdateClusterPolicy(context.Background(), args[0], args[1])
+			result, err := policyService.UpdateClusterPolicy(cmd.Context(), args[0], args[1])
 			if err != nil {
 				return err
 			}

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -64,13 +63,13 @@ func newLogsCloudAuditCmd() *cobra.Command {
 			if limit <= 0 {
 				return fmt.Errorf("--limit must be greater than 0")
 			}
-			token, _, err := bearerTokenForAuthGrantCommand(context.Background(), cmd, vcClient, bearerToken)
+			token, _, err := bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
 			if err != nil {
 				return err
 			}
 
 			svc := service.NewLogsService(vcClient)
-			result, err := svc.GetCloudAuditLogs(context.Background(), service.CloudAuditLogOptions{
+			result, err := svc.GetCloudAuditLogs(cmd.Context(), service.CloudAuditLogOptions{
 				Since:         since,
 				Start:         start,
 				End:           end,
@@ -138,7 +137,7 @@ func newLogsECPWorkloadCmd() *cobra.Command {
 			}
 
 			svc := service.NewLogsService(vcClient)
-			result, err := svc.GetECPWorkloadLogs(context.Background(), service.ECPWorkloadLogOptions{
+			result, err := svc.GetECPWorkloadLogs(cmd.Context(), service.ECPWorkloadLogOptions{
 				VCluster:     args[0],
 				Since:        duration,
 				WorkloadType: workloadType,

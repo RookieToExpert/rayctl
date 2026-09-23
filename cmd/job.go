@@ -524,7 +524,7 @@ func newJobCreate910CMultiCmd() *cobra.Command {
 				return nil
 			}
 
-			created, err := jobService.CreateJob(context.Background(), request)
+			created, err := jobService.CreateJob(cmd.Context(), request)
 			if err != nil {
 				return err
 			}
@@ -866,7 +866,7 @@ func newSingleTemplateJobCreateCmd(cfg jobCreateTemplateConfig) *cobra.Command {
 				}
 				return nil
 			}
-			created, err := jobService.CreateJob(context.Background(), request)
+			created, err := jobService.CreateJob(cmd.Context(), request)
 			if err != nil {
 				return err
 			}
@@ -1067,7 +1067,7 @@ func newMultiTemplateJobCreateCmd(cfg jobCreateTemplateConfig) *cobra.Command {
 				}
 				return nil
 			}
-			created, err := jobService.CreateJob(context.Background(), request)
+			created, err := jobService.CreateJob(cmd.Context(), request)
 			if err != nil {
 				return err
 			}

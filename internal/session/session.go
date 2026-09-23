@@ -129,6 +129,21 @@ func Save(path string, store *Store) error {
 }
 
 func Login(ctx context.Context, signinURL string, iamBaseURL string, username string, password string, tenantCode string, opts ...LoginOption) (*ProfileSession, error) {
+	return loginWithClient(ctx, newLoginHTTPClient(), signinURL, iamBaseURL, username, password, tenantCode, opts...)
+}
+
+func newLoginHTTPClient() *http.Client {
+	jar, _ := cookiejar.New(nil)
+	return &http.Client{
+		Jar:     jar,
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func loginWithClient(ctx context.Context, client *http.Client, signinURL string, iamBaseURL string, username string, password string, tenantCode string, opts ...LoginOption) (*ProfileSession, error) {
 	options := resolveLoginOptions(opts...)
 	signinURL = strings.TrimSpace(signinURL)
 	iamBaseURL = strings.TrimRight(strings.TrimSpace(iamBaseURL), "/")
@@ -149,13 +164,6 @@ func Login(ctx context.Context, signinURL string, iamBaseURL string, username st
 		return nil, err
 	}
 	debugf(options, "auth urls: signin=%s iam=%s redirect_uri=%s", strings.TrimRight(signinURL, "/"), iamBaseURL, redirectURI)
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{
-		Jar: jar,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 
 	challenge, err := requestLoginChallenge(ctx, client, authURL)
 	if err != nil {

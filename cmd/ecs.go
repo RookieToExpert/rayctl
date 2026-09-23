@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -94,7 +93,7 @@ func newECSLoginCmd() *cobra.Command {
 
 			vcClient, _ := platform.NewVirtualClusterClientFromEnv()
 			ecsService := service.NewECSService(dynamicClient, vcClient)
-			item, err := ecsService.ResolveSingle(context.Background(), args[0])
+			item, err := ecsService.ResolveSingle(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -107,7 +106,7 @@ func newECSLoginCmd() *cobra.Command {
 				return fmt.Errorf("缺少 virtctl 命令，请先安装 virtctl 后再执行")
 			}
 
-			consoleCmd := exec.CommandContext(context.Background(), virtctlPath, "console", item.VMName, "-n", item.Namespace)
+			consoleCmd := exec.CommandContext(cmd.Context(), virtctlPath, "console", item.VMName, "-n", item.Namespace)
 			consoleCmd.Stdin = os.Stdin
 			consoleCmd.Stdout = os.Stdout
 			consoleCmd.Stderr = os.Stderr
