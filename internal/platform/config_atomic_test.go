@@ -42,7 +42,7 @@ func TestInvalidCurrentProfileFallsBackDeterministically(t *testing.T) {
 			}
 		}
 	})
-	if count := strings.Count(warnings, `using profile "a"`); count != 20 {
+	if count := strings.Count(warnings, `falling back to "a"`); count != 20 {
 		t.Fatalf("fallback warnings = %d, want 20: %q", count, warnings)
 	}
 }
@@ -62,6 +62,13 @@ func TestResponseBodyExcerptPreservesUTF8Boundary(t *testing.T) {
 	}
 }
 
+func TestResponseBodyExcerptChineseLimit(t *testing.T) {
+	got := responseBodyExcerpt([]byte(strings.Repeat("错", 400)))
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "...") || len(got) > 515 {
+		t.Fatalf("invalid Chinese excerpt: %q (%d bytes)", got, len(got))
+	}
+}
+
 func TestMissingCurrentProfileWarnsButExplicitProfileDoesNot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "platform.json")
 	content := `{"profiles":{"z":{"access_key":"ak","secret_key":"sk","subscription_id":"sub"},"a":{"access_key":"ak","secret_key":"sk","subscription_id":"sub"}}}`
@@ -74,7 +81,7 @@ func TestMissingCurrentProfileWarnsButExplicitProfileDoesNot(t *testing.T) {
 			t.Fatalf("fallback client = %v, err = %v", client, err)
 		}
 	})
-	if !strings.Contains(warning, "has no current_profile") || !strings.Contains(warning, `using profile "a"`) {
+	if warning != "Warning: current_profile \"\" not found in platform.json; falling back to \"a\"\n" {
 		t.Fatalf("missing-profile warning = %q", warning)
 	}
 	if err := os.WriteFile(path, []byte(`{"current_profile":"z","profiles":{"z":{"access_key":"ak","secret_key":"sk","subscription_id":"sub"}}}`), 0o600); err != nil {

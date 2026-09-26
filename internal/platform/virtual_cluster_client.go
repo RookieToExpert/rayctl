@@ -723,28 +723,18 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 
 	var multiCfg multiProfileConfig
 	if err := json.Unmarshal(content, &multiCfg); err == nil && len(multiCfg.Profiles) > 0 {
-		currentProfile := normalizeCurrentProfileName(multiCfg.CurrentProfile, multiCfg.Profiles)
 		profiles := make(map[string]clientProfile, len(multiCfg.Profiles))
+		usableProfiles := make(map[string]config, len(multiCfg.Profiles))
 		for name, raw := range multiCfg.Profiles {
 			profile, ok := makeClientProfile(name, raw)
 			if !ok {
 				continue
 			}
 			profiles[name] = profile
+			usableProfiles[name] = raw
 		}
+		currentProfile := normalizeCurrentProfileName(multiCfg.CurrentProfile, usableProfiles)
 		current, ok := profiles[currentProfile]
-		if !ok {
-			names := make([]string, 0, len(profiles))
-			for name := range profiles {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			if len(names) > 0 {
-				currentProfile = names[0]
-				current = profiles[currentProfile]
-				ok = true
-			}
-		}
 		if !ok {
 			return nil, fmt.Errorf("platform config %s has no usable profiles", configPath)
 		}
@@ -764,13 +754,6 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		selected, ok := applyProcessEnvironmentSelection(client)
 		if !ok {
 			return nil, fmt.Errorf("platform config %s has no profile for the selected environment", configPath)
-		}
-		if requested := strings.TrimSpace(multiCfg.CurrentProfile); requested != currentProfile {
-			if requested == "" {
-				fmt.Fprintf(os.Stderr, "Warning: platform config %s has no current_profile; using profile %q\n", configPath, selected.CurrentProfileName())
-			} else {
-				fmt.Fprintf(os.Stderr, "Warning: platform config %s current_profile %q is unavailable; using profile %q\n", configPath, requested, selected.CurrentProfileName())
-			}
 		}
 		return selected, nil
 	}
@@ -1544,6 +1527,7 @@ func normalizeCurrentProfileName(current string, profiles map[string]config) str
 	if len(names) == 0 {
 		return ""
 	}
+	fmt.Fprintf(os.Stderr, "Warning: current_profile %q not found in platform.json; falling back to %q\n", current, names[0])
 	return names[0]
 }
 
