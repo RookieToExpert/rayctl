@@ -19,6 +19,7 @@ func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
 		{name: "vc node list", root: newVCCmd(), path: []string{"node", "list"}},
 		{name: "workspace node usage", root: newWorkspaceCmd(), path: []string{"node", "usage"}},
 		{name: "user get", root: newUserCmd(), path: []string{"get"}},
+		{name: "group get", root: newGroupCmd(), path: []string{"get"}},
 		{name: "aid get", root: newAIDCmd(), path: []string{"get"}},
 		{name: "ait get", root: newAITCmd(), path: []string{"get"}},
 		{name: "ate get", root: newATECmd(), path: []string{"get"}},
@@ -31,6 +32,7 @@ func TestReadOnlyQueryCommandsAcceptMultipleIdentifiers(t *testing.T) {
 		{name: "pv get", root: newPVCmd(), path: []string{"get"}},
 		{name: "pvc get", root: newPVCCmd(), path: []string{"get"}},
 		{name: "ecs get", root: newECSCmd(), path: []string{"get"}},
+		{name: "group get", root: newGroupCmd(), path: []string{"get"}},
 	}
 
 	for _, tt := range tests {

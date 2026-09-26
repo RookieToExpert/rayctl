@@ -52,6 +52,44 @@ type AuthSSPGrantResult struct {
 	Payload     string
 }
 
+func (s *AuthService) GetSSPWorkspaceRoles(ctx context.Context, profileName string, workspaceName string, bearerToken string) (*AuthRolesResult, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, fmt.Errorf("platform client is required for SSP workspace roles")
+	}
+	result := &AuthRolesResult{ResourceType: "WS"}
+	var roles []platform.IAMRoleInfo
+	var err error
+	if strings.TrimSpace(workspaceName) == "" {
+		roles, err = s.vcClient.ListIAMRoles(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list SSP roles: %w", err)
+		}
+	} else {
+		workspace, lookupErr := s.vcClient.FindSSPWorkspaceForProfile(ctx, profileName, workspaceName)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		result.ResourceName = workspace.Name
+		result.Scope = sspWorkspaceScope(*workspace)
+		roles, err = s.vcClient.ListOwnIAMRolesForProfile(ctx, workspace.ProfileName, result.Scope, bearerToken)
+		if err != nil {
+			return nil, fmt.Errorf("list SSP workspace roles: %w", err)
+		}
+	}
+	for _, role := range roles {
+		if result.Scope == "" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(role.RoleName)), "ssp.") {
+			continue
+		}
+		result.Items = append(result.Items, AuthRoleItem{
+			Alias: firstNonEmpty(sspRoleAlias(role.RoleName), role.ID), RoleName: role.RoleName,
+			DisplayName: role.DisplayName, Description: role.Description,
+			RoleID: role.ID, Service: role.AvailableService,
+		})
+	}
+	sort.Slice(result.Items, func(i, j int) bool { return result.Items[i].Alias < result.Items[j].Alias })
+	return result, nil
+}
+
 func (s *AuthService) GetSSPWorkspaceAuth(ctx context.Context, profileName string, environment string, workspaceName string, bearerToken string) (*AuthSSPResult, error) {
 	if s == nil || s.vcClient == nil {
 		return nil, fmt.Errorf("platform client is required for SSP auth lookup")

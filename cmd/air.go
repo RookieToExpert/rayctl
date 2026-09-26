@@ -27,6 +27,7 @@ func newAIRJobCmd() *cobra.Command {
 
 func newAIRJobListCmd() *cobra.Command {
 	var workspace string
+	var state string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出 AIR 推理任务",
@@ -40,7 +41,7 @@ func newAIRJobListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := airService.ListJobs(cmd.Context(), region, workspace)
+			result, err := airService.ListJobs(cmd.Context(), region, workspace, state)
 			if err != nil {
 				return err
 			}
@@ -49,6 +50,7 @@ func newAIRJobListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "只查询指定 workspace")
+	cmd.Flags().StringVarP(&state, "state", "s", "", "按状态筛选，例如 Running、Pending")
 	return cmd
 }
 

@@ -59,6 +59,7 @@ type SSPAIRJobItem struct {
 	Queue         string
 	QueueType     string
 	Cluster       string
+	VCluster      string
 	Namespace     string
 	HostNamespace string
 	Priority      string
@@ -114,7 +115,7 @@ func NewSSPAIRService(platformClient *platform.VirtualClusterClient) *SSPAIRServ
 	return &SSPAIRService{platform: platformClient}
 }
 
-func (s *SSPAIRService) ListJobs(ctx context.Context, region string, workspace string) (*SSPAIRJobListResult, error) {
+func (s *SSPAIRService) ListJobs(ctx context.Context, region string, workspace string, state string) (*SSPAIRJobListResult, error) {
 	workspaces, err := s.resolveWorkspaces(ctx, region, workspace)
 	if err != nil {
 		return nil, err
@@ -143,8 +144,23 @@ func (s *SSPAIRService) ListJobs(ctx context.Context, region string, workspace s
 	if len(items) == 0 && firstErr != nil {
 		return nil, firstErr
 	}
+	items = filterAIRJobsByState(items, state)
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
 	return &SSPAIRJobListResult{Items: items}, nil
+}
+
+func filterAIRJobsByState(items []SSPAIRJobItem, state string) []SSPAIRJobItem {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return items
+	}
+	filtered := make([]SSPAIRJobItem, 0, len(items))
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.State), state) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, region string, workspace string, includeWorkers bool, workerLimit int) ([]*SSPAIRJobItem, []error) {
@@ -212,6 +228,10 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 			return detailResult{err: fmt.Errorf("AIR job %q: %w", identifiers[index], queryErr)}
 		}
 		item := s.airJobItem(*detail)
+		vcNameCh := make(chan string, 1)
+		go func() {
+			vcNameCh <- s.resolveAIRJobVCluster(ctx, item)
+		}()
 		pods, podErr := s.findAIRPods(ctx, item.UID)
 		setAIRNamespaces(&item.Namespace, &item.HostNamespace, pods)
 		if includeWorkers {
@@ -239,6 +259,7 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 				item.PodEvidence = &podevidence.Result{Warnings: []string{"Kubernetes client unavailable; platform worker data retained"}}
 			}
 		}
+		item.VCluster = <-vcNameCh
 		return detailResult{item: &item}
 	})
 	result := make([]*SSPAIRJobItem, len(identifiers))
@@ -434,6 +455,19 @@ func (s *SSPAIRService) airJobItem(job platform.SSPAIRJob) SSPAIRJobItem {
 		})
 	}
 	return item
+}
+
+func (s *SSPAIRService) resolveAIRJobVCluster(ctx context.Context, item SSPAIRJobItem) string {
+	if s == nil || s.platform == nil || strings.TrimSpace(item.Queue) == "" {
+		return ""
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	queue, err := s.platform.GetSSPQueueResource(lookupCtx, item.Profile, item.Queue)
+	if err != nil || queue == nil {
+		return ""
+	}
+	return strings.TrimSpace(queue.VClusterName)
 }
 
 func airVolumeEndpoint(volume platform.SSPAIRVolumeMount) string {

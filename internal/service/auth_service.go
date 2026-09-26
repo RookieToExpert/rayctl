@@ -52,12 +52,21 @@ type AuthGroupResult struct {
 	Name           string
 	DisplayName    string
 	PosixGroupName string
-	TenantCode     string
+	TenantID       string
+	Status         string
+	Permissions    []AuthPermissionItem
+}
+
+type GroupGetResult struct {
+	ID             string
+	Name           string
+	DisplayName    string
+	PosixGroupName string
+	TenantID       string
 	Status         string
 	Members        []AuthGroupMemberItem
 	MemberCount    int
 	AdminCount     int
-	Permissions    []AuthPermissionItem
 }
 
 type AuthGroupMemberItem struct {
@@ -358,21 +367,30 @@ func (s *AuthService) GetGroups(ctx context.Context, identifier string) ([]*Auth
 }
 
 func (s *AuthService) GetGroupsForProfile(ctx context.Context, identifier string, profileName string) ([]*AuthGroupResult, error) {
-	if s == nil || s.vcClient == nil {
-		return nil, fmt.Errorf("platform client is required for auth lookup")
-	}
-	identifier = strings.TrimSpace(identifier)
-	if identifier == "" {
-		return nil, fmt.Errorf("group identifier is required")
-	}
-
-	groups, err := s.vcClient.FindGroupsForProfile(ctx, profileName, identifier)
+	groups, policyIdentifiers, err := s.findGroupsAndPolicyIdentifiers(ctx, identifier, profileName)
 	if err != nil {
 		return nil, err
 	}
-	policyIdentifiers := make([]string, 0, len(groups)*4)
+	policies, err := s.vcClient.ListIAMBindingPoliciesForSubjectsProfile(ctx, profileName, policyIdentifiers)
+	if err != nil {
+		return nil, fmt.Errorf("list binding policies: %w", err)
+	}
+	results := make([]*AuthGroupResult, 0, len(groups))
 	for _, group := range groups {
-		policyIdentifiers = append(policyIdentifiers, group.ID, group.Name, group.DisplayName, group.PosixGroupName)
+		item := authGroupItem(group)
+		results = append(results, &AuthGroupResult{
+			ID: item.ID, Name: item.Name, DisplayName: item.DisplayName,
+			PosixGroupName: item.PosixGroupName, TenantID: strings.TrimSpace(group.TenantID),
+			Status: item.Status, Permissions: collectGroupPermissions(item, policies),
+		})
+	}
+	return results, nil
+}
+
+func (s *AuthService) GetGroupMembersForProfile(ctx context.Context, identifier string, profileName string) ([]*GroupGetResult, error) {
+	groups, policyIdentifiers, err := s.findGroupsAndPolicyIdentifiers(ctx, identifier, profileName)
+	if err != nil {
+		return nil, err
 	}
 	type groupUsers struct {
 		users []platform.IAMUser
@@ -390,35 +408,49 @@ func (s *AuthService) GetGroupsForProfile(ctx context.Context, identifier string
 	if policyErr != nil {
 		return nil, fmt.Errorf("list binding policies: %w", policyErr)
 	}
-
-	results := make([]*AuthGroupResult, 0, len(groups))
-	for groupIndex, group := range groups {
-		item := AuthGroupItem{
-			ID:             strings.TrimSpace(group.ID),
-			Name:           strings.TrimSpace(group.Name),
-			DisplayName:    strings.TrimSpace(group.DisplayName),
-			PosixGroupName: strings.TrimSpace(group.PosixGroupName),
-			Status:         strings.TrimSpace(group.Status),
+	results := make([]*GroupGetResult, 0, len(groups))
+	for index, group := range groups {
+		item := authGroupItem(group)
+		if userLoads[index].err != nil {
+			return nil, fmt.Errorf("list members for group %q: %w", groupDisplayName(item), userLoads[index].err)
 		}
-		if userLoads[groupIndex].err != nil {
-			return nil, fmt.Errorf("list members for group %q: %w", groupDisplayName(item), userLoads[groupIndex].err)
-		}
-		users := userLoads[groupIndex].users
+		users := userLoads[index].users
 		members, adminCount := collectAuthGroupMembers(item, users, policies)
-		results = append(results, &AuthGroupResult{
-			ID:             item.ID,
-			Name:           item.Name,
-			DisplayName:    item.DisplayName,
-			PosixGroupName: item.PosixGroupName,
-			TenantCode:     strings.TrimSpace(group.TenantCode),
-			Status:         item.Status,
-			Members:        members,
-			MemberCount:    len(users),
-			AdminCount:     adminCount,
-			Permissions:    collectGroupPermissions(item, policies),
+		results = append(results, &GroupGetResult{
+			ID: item.ID, Name: item.Name, DisplayName: item.DisplayName,
+			PosixGroupName: item.PosixGroupName, TenantID: strings.TrimSpace(group.TenantID),
+			Status: item.Status, Members: members, MemberCount: len(users), AdminCount: adminCount,
 		})
 	}
 	return results, nil
+}
+
+func (s *AuthService) findGroupsAndPolicyIdentifiers(ctx context.Context, identifier string, profileName string) ([]platform.IAMGroup, []string, error) {
+	if s == nil || s.vcClient == nil {
+		return nil, nil, fmt.Errorf("platform client is required for group lookup")
+	}
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, nil, fmt.Errorf("group identifier is required")
+	}
+
+	groups, err := s.vcClient.FindGroupsForProfile(ctx, profileName, identifier)
+	if err != nil {
+		return nil, nil, err
+	}
+	policyIdentifiers := make([]string, 0, len(groups)*4)
+	for _, group := range groups {
+		policyIdentifiers = append(policyIdentifiers, group.ID, group.Name, group.DisplayName, group.PosixGroupName)
+	}
+	return groups, policyIdentifiers, nil
+}
+
+func authGroupItem(group platform.IAMGroup) AuthGroupItem {
+	return AuthGroupItem{
+		ID: strings.TrimSpace(group.ID), Name: strings.TrimSpace(group.Name),
+		DisplayName: strings.TrimSpace(group.DisplayName), PosixGroupName: strings.TrimSpace(group.PosixGroupName),
+		Status: strings.TrimSpace(group.Status),
+	}
 }
 
 func collectAuthGroupMembers(group AuthGroupItem, users []platform.IAMUser, policies []platform.IAMBindingPolicy) ([]AuthGroupMemberItem, int) {

@@ -1,14 +1,12 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
@@ -62,6 +60,7 @@ func newAuthCheckCmd() *cobra.Command {
 	checkCmd.AddCommand(newAuthCheckResourceCmd("natgateway", "查看 NAT Gateway 归属的用户/用户组授权"))
 	checkCmd.AddCommand(newAuthCheckGroupsCmd())
 	checkCmd.AddCommand(newAuthCheckUserCmd())
+	checkCmd.AddCommand(newAuthSSPCheckCmd("ws <workspace>"))
 	return checkCmd
 }
 
@@ -78,6 +77,7 @@ func newAuthGrantCmd() *cobra.Command {
 	grantCmd.AddCommand(newAuthGrantResourceCmd("vpc", "vpc <vpc-name>", "给 VPC 授权用户或用户组", "VPC 角色: reader/editor 或完整 role_name"))
 	grantCmd.AddCommand(newAuthGrantResourceCmd("eip", "eip <eip-name>", "给 EIP 授权用户或用户组", "EIP 角色: reader/editor 或完整 role_name"))
 	grantCmd.AddCommand(newAuthGrantResourceCmd("natgateway", "natgateway <natgateway-name>", "给 NAT Gateway 授权用户或用户组", "NAT Gateway 角色: operator 或完整 role id/name"))
+	grantCmd.AddCommand(newAuthSSPGrantCmd("ws <workspace>"))
 	return grantCmd
 }
 
@@ -107,6 +107,7 @@ func newAuthRolesCmd() *cobra.Command {
 	rolesCmd.AddCommand(newAuthRolesResourceCmd("vpc", "vpc", "查看 VPC 可授权角色"))
 	rolesCmd.AddCommand(newAuthRolesResourceCmd("eip", "eip", "查看 EIP 可授权角色"))
 	rolesCmd.AddCommand(newAuthRolesResourceCmd("natgateway", "natgateway", "查看 NAT Gateway 可授权角色"))
+	rolesCmd.AddCommand(newAuthRolesWSCmd())
 	return rolesCmd
 }
 
@@ -135,13 +136,13 @@ func newAuthCheckGroupsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "groups <group-name-or-id> [group-name-or-id...]",
 		Aliases: []string{"group"},
-		Short:   "查看用户组成员、协管员和组自身拥有的权限",
+		Short:   "查看用户组拥有的权限",
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAuthCheckGroups(cmd, args, long)
 		},
 	}
-	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示成员 ID、是否在组内以及完整权限信息")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示完整权限信息")
 	return cmd
 }
 
@@ -165,18 +166,20 @@ func newAuthCheckUserCmd() *cobra.Command {
 
 func newAuthSSPCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "ssp",
-		Short: "查看和授予 SSP 工作空间成员权限",
+		Use:        "ssp",
+		Short:      "查看和授予 SSP 工作空间成员权限（旧入口）",
+		Hidden:     true,
+		Deprecated: "请使用 rayctl auth check ws 或 rayctl auth grant ws",
 	}
-	cmd.AddCommand(newAuthSSPCheckCmd())
-	cmd.AddCommand(newAuthSSPGrantCmd())
+	cmd.AddCommand(newAuthSSPCheckCmd("check <workspace>"))
+	cmd.AddCommand(newAuthSSPGrantCmd("grant <workspace>"))
 	return cmd
 }
 
-func newAuthSSPCheckCmd() *cobra.Command {
+func newAuthSSPCheckCmd(use string) *cobra.Command {
 	var bearerToken string
 	cmd := &cobra.Command{
-		Use:   "check <workspace>",
+		Use:   use,
 		Short: "查看 SSP 工作空间成员和角色",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -188,7 +191,7 @@ func newAuthSSPCheckCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			token, _, err := bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, bearerToken)
+			token, _, err := bearerTokenForAuthReadCommand(cmd.Context(), cmd, vcClient, bearerToken)
 			if err != nil {
 				return err
 			}
@@ -204,7 +207,7 @@ func newAuthSSPCheckCmd() *cobra.Command {
 	return cmd
 }
 
-func newAuthSSPGrantCmd() *cobra.Command {
+func newAuthSSPGrantCmd(use string) *cobra.Command {
 	var user string
 	var group string
 	var roles []string
@@ -213,7 +216,7 @@ func newAuthSSPGrantCmd() *cobra.Command {
 	var dryRun bool
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "grant <workspace>",
+		Use:   use,
 		Short: "给 SSP 工作空间授权用户或用户组",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -255,7 +258,7 @@ func newAuthSSPGrantCmd() *cobra.Command {
 			}
 			if !yes {
 				fmt.Fprintf(cmd.OutOrStdout(), "将给 SSP 工作空间 %s 授权 %s %s，角色 %s，优先级 %s，是否继续? (y/N): ", result.Workspace, result.MemberType, result.MemberName, result.Roles, result.Priority)
-				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				line, err := readLineWithContext(cmd.Context(), cmd.InOrStdin())
 				if err != nil {
 					return err
 				}
@@ -398,7 +401,7 @@ func newAuthGrantResourceCmd(resourceType string, use string, short string, role
 					firstNonEmptyAuthValue(result.MemberIdentify, result.MemberName, result.MemberValue),
 					result.RoleName,
 				)
-				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				line, err := readLineWithContext(cmd.Context(), cmd.InOrStdin())
 				if err != nil {
 					return err
 				}
@@ -530,7 +533,7 @@ func newAuthRemoveResourceCmd(resourceType string, use string, short string, rol
 					result.RoleName,
 					result.PolicyID,
 				)
-				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				line, err := readLineWithContext(cmd.Context(), cmd.InOrStdin())
 				if err != nil {
 					return err
 				}
@@ -582,6 +585,42 @@ func newAuthRolesResourceCmd(resourceType string, use string, short string) *cob
 			return nil
 		},
 	}
+	return cmd
+}
+
+func newAuthRolesWSCmd() *cobra.Command {
+	var bearerToken string
+	cmd := &cobra.Command{
+		Use:   "ws [workspace]",
+		Short: "查看 SSP 工作空间可授权角色；指定 workspace 时按实际 scope 查询",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vcClient, err := requirePlatformClient()
+			if err != nil {
+				return err
+			}
+			profileName, err := vcClient.ResolveProfileName("")
+			if err != nil {
+				return err
+			}
+			workspace := ""
+			token := ""
+			if len(args) > 0 {
+				workspace = args[0]
+				token, _, err = bearerTokenForAuthReadCommand(cmd.Context(), cmd, vcClient, bearerToken)
+				if err != nil {
+					return err
+				}
+			}
+			result, err := service.NewAuthService(vcClient).GetSSPWorkspaceRoles(cmd.Context(), profileName, workspace, token)
+			if err != nil {
+				return err
+			}
+			output.PrintAuthRolesResult(result)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&bearerToken, "bearer-token", "t", "", "控制台 Bearer token；指定 workspace 时默认使用当前 auth login session")
 	return cmd
 }
 
@@ -695,7 +734,7 @@ func runAuthCheckResources(cmd *cobra.Command, resourceType string, resourceName
 	bearerToken := ""
 	if authResourceScopeRequiresBearer(resourceType) {
 		var err error
-		bearerToken, _, err = bearerTokenForAuthGrantCommand(cmd.Context(), cmd, vcClient, explicitToken)
+		bearerToken, _, err = bearerTokenForAuthReadCommand(cmd.Context(), cmd, vcClient, explicitToken)
 		if err != nil {
 			return err
 		}
@@ -769,7 +808,7 @@ func runAuthCheckGroups(cmd *cobra.Command, args []string, long bool) error {
 		}
 		valid = append(valid, query.results...)
 	}
-	if long && len(args) == 1 {
+	if long {
 		for i, result := range valid {
 			if i > 0 {
 				fmt.Fprintln(cmd.OutOrStdout())
@@ -867,7 +906,7 @@ func bearerTokenForCommand(ctx context.Context, cmd *cobra.Command, vcClient *pl
 		return "", err
 	}
 	profile := sessionProfileName(vcClient)
-	if token, ok := authsession.ValidIDToken(store.Profiles[profile]); ok {
+	if token, ok := validIDTokenForProfile(store, vcClient, profile); ok {
 		return token, nil
 	}
 
@@ -883,6 +922,14 @@ func bearerTokenForCommand(ctx context.Context, cmd *cobra.Command, vcClient *pl
 }
 
 func bearerTokenForAuthGrantCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, explicitToken string) (string, string, error) {
+	return bearerTokenForAuthCommand(ctx, cmd, vcClient, explicitToken)
+}
+
+func bearerTokenForAuthReadCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, explicitToken string) (string, string, error) {
+	return bearerTokenForAuthCommand(ctx, cmd, vcClient, explicitToken)
+}
+
+func bearerTokenForAuthCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform.VirtualClusterClient, explicitToken string) (string, string, error) {
 	if token := strings.TrimSpace(explicitToken); token != "" {
 		return strings.TrimPrefix(token, "Bearer "), "--bearer-token", nil
 	}
@@ -897,6 +944,11 @@ func bearerTokenForAuthGrantCommand(ctx context.Context, cmd *cobra.Command, vcC
 	profile := sessionProfileName(vcClient)
 	if token, ok := authsession.ValidAccessToken(store.Profiles[profile]); ok {
 		return token, "session/access_token", nil
+	}
+	if baseProfile := pairedDProfileName(vcClient, profile); baseProfile != "" {
+		if token, ok := authsession.ValidAccessToken(store.Profiles[baseProfile]); ok {
+			return token, "session/paired-d-access_token", nil
+		}
 	}
 
 	item, err := loginForCommand(ctx, cmd, vcClient, "", "", false, false)
@@ -918,24 +970,37 @@ func bearerTokensForRBACGrantCommand(ctx context.Context, cmd *cobra.Command, vc
 	profile := sessionProfileName(vcClient)
 	item := store.Profiles[profile]
 	iamToken, iamOK := authsession.ValidAccessToken(item)
-	computeToken, computeOK := authsession.ValidIDToken(item)
+	computeToken, computeOK := validIDTokenForProfile(store, vcClient, profile)
+	iamSource := "session/access_token"
+	computeSource := "session/id_token"
+	if _, ownOK := authsession.ValidIDToken(item); !ownOK && computeOK {
+		computeSource = "session/paired-d-id_token"
+	}
+	if !iamOK {
+		if baseProfile := pairedDProfileName(vcClient, profile); baseProfile != "" {
+			iamToken, iamOK = authsession.ValidAccessToken(store.Profiles[baseProfile])
+			if iamOK {
+				iamSource = "session/paired-d-access_token"
+			}
+		}
+	}
 
 	if token := strings.TrimSpace(explicitComputeToken); token != "" {
 		computeToken = strings.TrimPrefix(token, "Bearer ")
 		computeOK = true
 		if iamOK {
-			return iamToken, computeToken, "session/access_token + --bearer-token", nil
+			return iamToken, computeToken, iamSource + " + --bearer-token", nil
 		}
 	}
 	if token := strings.TrimSpace(os.Getenv("RAYCTL_BEARER_TOKEN")); token != "" && !computeOK {
 		computeToken = strings.TrimPrefix(token, "Bearer ")
 		computeOK = true
 		if iamOK {
-			return iamToken, computeToken, "session/access_token + RAYCTL_BEARER_TOKEN", nil
+			return iamToken, computeToken, iamSource + " + RAYCTL_BEARER_TOKEN", nil
 		}
 	}
 	if iamOK && computeOK {
-		return iamToken, computeToken, "session/access_token + session/id_token", nil
+		return iamToken, computeToken, iamSource + " + " + computeSource, nil
 	}
 
 	loggedIn, err := loginForCommand(ctx, cmd, vcClient, "", "", false, false)
@@ -960,7 +1025,7 @@ func bearerTokenForRBACComputeCommand(ctx context.Context, cmd *cobra.Command, v
 		return "", "", err
 	}
 	profile := sessionProfileName(vcClient)
-	if token, ok := authsession.ValidIDToken(store.Profiles[profile]); ok {
+	if token, ok := validIDTokenForProfile(store, vcClient, profile); ok {
 		return token, "session/id_token", nil
 	}
 	if token := strings.TrimSpace(os.Getenv("RAYCTL_BEARER_TOKEN")); token != "" {
@@ -1036,10 +1101,9 @@ func loginForCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform
 	username = firstNonEmptyAuthValueNoDash(username, os.Getenv("PJLAB_USERNAME"))
 	tenantCode = firstNonEmptyAuthValueNoDash(tenantCode, os.Getenv("PJLAB_TENANT_CODE"))
 	password := strings.TrimSpace(os.Getenv("PJLAB_PASSWORD"))
-	reader := bufio.NewReader(cmd.InOrStdin())
 	if username == "" {
 		fmt.Fprint(cmd.OutOrStdout(), "Username: ")
-		line, err := reader.ReadString('\n')
+		line, err := readLineWithContext(ctx, cmd.InOrStdin())
 		if err != nil {
 			return nil, err
 		}
@@ -1047,7 +1111,7 @@ func loginForCommand(ctx context.Context, cmd *cobra.Command, vcClient *platform
 	}
 	if password == "" {
 		if passwordStdin {
-			bytes, err := io.ReadAll(cmd.InOrStdin())
+			bytes, err := readAllWithContext(ctx, cmd.InOrStdin())
 			if err != nil {
 				return nil, err
 			}
@@ -1110,6 +1174,31 @@ func sessionProfileName(vcClient *platform.VirtualClusterClient) string {
 		return name
 	}
 	return "default"
+}
+
+func validIDTokenForProfile(store *authsession.Store, vcClient *platform.VirtualClusterClient, profile string) (string, bool) {
+	if store == nil {
+		return "", false
+	}
+	if token, ok := authsession.ValidIDToken(store.Profiles[profile]); ok {
+		return token, true
+	}
+	baseProfile := pairedDProfileName(vcClient, profile)
+	if baseProfile == "" {
+		return "", false
+	}
+	return authsession.ValidIDToken(store.Profiles[baseProfile])
+}
+
+func pairedDProfileName(vcClient *platform.VirtualClusterClient, profile string) string {
+	if vcClient == nil || vcClient.ProfileEnvironment(profile) != "pt" || !strings.HasSuffix(profile, "-pt") {
+		return ""
+	}
+	baseProfile := strings.TrimSuffix(profile, "-pt")
+	if vcClient.ProfileEnvironment(baseProfile) != "d" {
+		return ""
+	}
+	return baseProfile
 }
 
 func firstNonEmptyAuthValue(values ...string) string {

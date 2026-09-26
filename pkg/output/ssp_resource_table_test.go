@@ -66,8 +66,13 @@ func TestPrintSSPWorkspaceDetailShowsQueueRuntimeAndLongUID(t *testing.T) {
 
 func TestPrintAIRDetailsShowVirtualAndHostNamespaces(t *testing.T) {
 	jobText := captureTableOutput(t, func() {
-		PrintSSPAIRJobDetail(&service.SSPAIRJobItem{Namespace: "virtual-ns", HostNamespace: "host-ns"}, false)
+		PrintSSPAIRJobDetail(&service.SSPAIRJobItem{Cluster: "cluster-muxi", VCluster: "vc-muxi-c550-ailab", Namespace: "virtual-ns", HostNamespace: "host-ns"}, false)
 	})
+	for _, expected := range []string{"CLUSTER", "cluster-muxi", "VC", "vc-muxi-c550-ailab"} {
+		if !strings.Contains(jobText, expected) {
+			t.Fatalf("AIR job output missing %q:\n%s", expected, jobText)
+		}
+	}
 	gatewayText := captureTableOutput(t, func() {
 		PrintSSPAIRGatewayDetail(&service.SSPAIRGatewayItem{Namespace: "virtual-ns", HostNamespace: "host-ns"}, false)
 	})

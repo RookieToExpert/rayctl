@@ -199,7 +199,7 @@ type IAMGroup struct {
 	Name           string `json:"name"`
 	DisplayName    string `json:"display_name"`
 	PosixGroupName string `json:"posix_group_name"`
-	TenantCode     string `json:"tenant_code"`
+	TenantID       string `json:"tenant_id"`
 	Status         string `json:"status"`
 	CreateTime     string `json:"create_time"`
 }
@@ -1438,6 +1438,8 @@ func signinURLFromIAMBaseURL(iamBaseURL string) string {
 	}
 	host := parsed.Host
 	switch {
+	case strings.EqualFold(parsed.Hostname(), "iam-api.pjlab.org.cn"):
+		host = "signin.pjlab.org.cn"
 	case strings.HasPrefix(host, "iam."):
 		host = "signin." + strings.TrimPrefix(host, "iam.")
 	case strings.HasPrefix(host, "iam-"):
@@ -1793,6 +1795,18 @@ func escapeIAMFilterValue(value string) string {
 }
 
 func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile clientProfile) ([]IAMUser, error) {
+	return c.listUsersForProfileLimit(ctx, profile, 0, true)
+}
+
+func (c *VirtualClusterClient) ListIAMUsersForProfile(ctx context.Context, profileName string, limit int) ([]IAMUser, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listUsersForProfileLimit(ctx, profile, limit, false)
+}
+
+func (c *VirtualClusterClient) listUsersForProfileLimit(ctx context.Context, profile clientProfile, limit int, validOnly bool) ([]IAMUser, error) {
 	pageToken := "1"
 	cursor := newPageCursor(pageToken)
 	users := make([]IAMUser, 0)
@@ -1800,9 +1814,15 @@ func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile 
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/idp/v1/users"
 		query := u.Query()
-		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		pageSize := defaultPageLimit
+		if limit > 0 && limit-len(users) < pageSize {
+			pageSize = limit - len(users)
+		}
+		query.Set("page_size", fmt.Sprintf("%d", pageSize))
 		query.Set("page_token", pageToken)
-		query.Set("filter", `(status="valid")`)
+		if validOnly {
+			query.Set("filter", `(status="valid")`)
+		}
 		u.RawQuery = query.Encode()
 
 		var payload iamUserListResponse
@@ -1813,6 +1833,9 @@ func (c *VirtualClusterClient) listUsersForProfile(ctx context.Context, profile 
 			break
 		}
 		users = append(users, payload.Users...)
+		if limit > 0 && len(users) >= limit {
+			return users[:limit], nil
+		}
 		if !cursor.advance(payload.NextPageToken) {
 			break
 		}
@@ -2062,6 +2085,18 @@ func (c *VirtualClusterClient) ListGroupUsersForProfile(ctx context.Context, pro
 }
 
 func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile clientProfile) ([]IAMGroup, error) {
+	return c.listGroupsForProfileLimit(ctx, profile, 0)
+}
+
+func (c *VirtualClusterClient) ListIAMGroupsForProfile(ctx context.Context, profileName string, limit int) ([]IAMGroup, error) {
+	profile, ok := c.clientProfileByName(profileName)
+	if !ok {
+		return nil, fmt.Errorf("platform profile %q not found", profileName)
+	}
+	return c.listGroupsForProfileLimit(ctx, profile, limit)
+}
+
+func (c *VirtualClusterClient) listGroupsForProfileLimit(ctx context.Context, profile clientProfile, limit int) ([]IAMGroup, error) {
 	pageToken := "1"
 	cursor := newPageCursor(pageToken)
 	result := make([]IAMGroup, 0)
@@ -2069,7 +2104,11 @@ func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/idp/v1/groups"
 		query := u.Query()
-		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
+		pageSize := defaultPageLimit
+		if limit > 0 && limit-len(result) < pageSize {
+			pageSize = limit - len(result)
+		}
+		query.Set("page_size", fmt.Sprintf("%d", pageSize))
 		query.Set("page_token", pageToken)
 		query.Set("order_by", "create_time desc")
 		u.RawQuery = query.Encode()
@@ -2082,6 +2121,9 @@ func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile
 			break
 		}
 		result = append(result, payload.Groups...)
+		if limit > 0 && len(result) >= limit {
+			return result[:limit], nil
+		}
 		nextToken := strings.TrimSpace(payload.NextPageToken)
 		if !cursor.advance(nextToken) {
 			break

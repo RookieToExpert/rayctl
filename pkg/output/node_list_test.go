@@ -17,7 +17,20 @@ func captureNodeListOutput(t *testing.T, long bool) string {
 	}
 	old := os.Stdout
 	os.Stdout = write
-	t.Cleanup(func() { os.Stdout = old })
+	defer func() {
+		os.Stdout = old
+		write.Close()
+		read.Close()
+	}()
+	type captured struct {
+		data []byte
+		err  error
+	}
+	done := make(chan captured, 1)
+	go func() {
+		data, err := io.ReadAll(read)
+		done <- captured{data, err}
+	}()
 	PrintNodeList([]service.NodeListItem{{
 		Name: "host-1", Ready: "True", Schedulable: "Yes", Repair: true,
 		ProdRole: "ecp-private", InternalIP: "10.0.0.1", ClusterName: "vc-demo",
@@ -27,11 +40,11 @@ func captureNodeListOutput(t *testing.T, long bool) string {
 		t.Fatal(err)
 	}
 	os.Stdout = old
-	data, err := io.ReadAll(read)
-	if err != nil {
-		t.Fatal(err)
+	result := <-done
+	if result.err != nil {
+		t.Fatal(result.err)
 	}
-	return string(data)
+	return string(result.data)
 }
 
 func TestNodeListDefaultColumns(t *testing.T) {

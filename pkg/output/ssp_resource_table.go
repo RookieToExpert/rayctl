@@ -462,7 +462,7 @@ func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {
 	rows := [][]string{
 		{"TYPE", "AIR JOB"}, {"NAME", emptyDash(result.Name)}, {"UID", emptyDash(result.UID)},
 		{"STATE", emptyDash(result.State)}, {"WORKSPACE", emptyDash(result.Workspace)}, {"QUEUE", emptyDash(result.Queue)},
-		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)},
+		{"QUEUE TYPE", emptyDash(result.QueueType)}, {"CLUSTER", emptyDash(result.Cluster)}, {"VC", emptyDash(result.VCluster)},
 		{"VC NAMESPACE", emptyDash(result.Namespace)}, {"HOST NAMESPACE", emptyDash(result.HostNamespace)}, {"PRIORITY", emptyDash(result.Priority)},
 		{"READY / TOTAL", fmt.Sprintf("%d / %d", result.ReadyReplicas, result.Replicas)}, {"CREATOR", emptyDash(result.Creator)},
 		{"INTERNAL IP", emptyDash(result.InternalIP)}, {"REGION", emptyDash(result.Region)}, {"PROFILE", emptyDash(result.Profile)},

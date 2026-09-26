@@ -118,18 +118,26 @@ func captureTableOutput(t *testing.T, render func()) string {
 	os.Stdout = writer
 	defer func() {
 		os.Stdout = original
+		writer.Close()
+		reader.Close()
+	}()
+	type captured struct {
+		content []byte
+		err     error
+	}
+	done := make(chan captured, 1)
+	go func() {
+		content, err := io.ReadAll(reader)
+		done <- captured{content, err}
 	}()
 
 	render()
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close output writer: %v", err)
 	}
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read output: %v", err)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("read output: %v", result.err)
 	}
-	if err := reader.Close(); err != nil {
-		t.Fatalf("close output reader: %v", err)
-	}
-	return string(content)
+	return string(result.content)
 }

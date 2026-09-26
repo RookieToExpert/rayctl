@@ -19,7 +19,40 @@ func newUserCmd() *cobra.Command {
 	}
 
 	userCmd.AddCommand(newUserGetCmd())
+	userCmd.AddCommand(newUserListCmd())
 	return userCmd
+}
+
+func newUserListCmd() *cobra.Command {
+	var limit int
+	var long bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出当前 profile 的平台用户",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if limit < 0 {
+				return fmt.Errorf("--limit must be 0 or greater")
+			}
+			client, err := requirePlatformClient()
+			if err != nil {
+				return err
+			}
+			profileName, err := client.ResolveProfileName("")
+			if err != nil {
+				return err
+			}
+			items, err := service.NewDirectoryService(client).ListUsers(cmd.Context(), profileName, limit)
+			if err != nil {
+				return err
+			}
+			output.PrintUserList(items, long)
+			return nil
+		},
+	}
+	cmd.Flags().IntVarP(&limit, "limit", "n", 0, "最多显示的用户数；0 表示全部")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示用户 ID、租户代码和创建时间")
+	return cmd
 }
 
 func newUserGetCmd() *cobra.Command {

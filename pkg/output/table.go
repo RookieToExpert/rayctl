@@ -885,6 +885,35 @@ func PrintUserDetail(result *service.UserGetResult) {
 	printUserWorkloadWarnings(result.WorkloadWarnings)
 }
 
+func PrintUserList(items []service.UserListItem, long bool) {
+	if captureJSON(items) {
+		return
+	}
+	headers := []string{"USERNAME", "NAME", "STATUS", "SOURCE"}
+	widths := []int{30, 24, 10, 12}
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		row := []string{emptyDash(item.Username), emptyDash(item.Name), emptyDash(item.Status), emptyDash(item.Source)}
+		if long {
+			row = append(row, emptyDash(item.ID), emptyDash(item.TenantCode), emptyDash(item.CreateTime))
+		}
+		rows = append(rows, row)
+	}
+	if long {
+		headers = append(headers, "ID", "TENANT CODE", "CREATED")
+		widths = append(widths, 36, 18, 22)
+	}
+	if len(rows) == 0 {
+		row := make([]string, len(headers))
+		for i := range row {
+			row[i] = "-"
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{})
+	fmt.Fprintf(os.Stdout, "\n共 %d 个用户。\n", len(items))
+}
+
 func userGroupNames(groups []service.AuthGroupItem) string {
 	names := make([]string, 0, len(groups))
 	for _, group := range groups {
@@ -1196,7 +1225,6 @@ func PrintAuthGroupSummary(results []*service.AuthGroupResult) {
 			}
 		}
 		printBoxTableWithOptions([]string{"SCOPE", "ROLES"}, rows, []int{56, 64}, tableOptions{minWidths: []int{18, 12}})
-		printAuthGroupMembers(result, false)
 	}
 }
 
@@ -1468,32 +1496,31 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 	if !long {
 		permissions = deduplicateAuthPermissions(permissions)
 	}
+	fields := [][]string{
+		{"ID", emptyDash(result.ID)},
+		{"NAME", emptyDash(result.Name)},
+		{"DISPLAY NAME", emptyDash(result.DisplayName)},
+	}
+	if long {
+		if result.PosixGroupName != "" {
+			fields = append(fields, []string{"POSIX", result.PosixGroupName})
+		}
+		if result.TenantID != "" {
+			fields = append(fields, []string{"TENANT ID", result.TenantID})
+		}
+		if result.Status != "" {
+			fields = append(fields, []string{"STATUS", result.Status})
+		}
+	}
+	fields = append(fields, []string{"权限数量", strconv.Itoa(len(permissions))})
 
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
-		[][]string{
-			{"ID", emptyDash(result.ID)},
-			{"NAME", emptyDash(result.Name)},
-			{"DISPLAY NAME", emptyDash(result.DisplayName)},
-			{"POSIX", emptyDash(result.PosixGroupName)},
-			{"TENANT CODE", emptyDash(result.TenantCode)},
-			{"STATUS", emptyDash(result.Status)},
-			{"成员数量", strconv.Itoa(result.MemberCount)},
-			{"协管员数量", strconv.Itoa(result.AdminCount)},
-			{"权限数量", strconv.Itoa(len(permissions))},
-		},
+		fields,
 		[]int{14, 72},
 		tableOptions{
-			noWrapCells: makeNoWrapCells(
-				[2]int{0, 1},
-				[2]int{1, 1},
-				[2]int{2, 1},
-				[2]int{3, 1},
-				[2]int{4, 1},
-				[2]int{5, 1},
-				[2]int{6, 1},
-			),
-			minWidths: []int{10, 20},
+			noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(fields), 1)...),
+			minWidths:   []int{10, 20},
 		},
 	)
 
@@ -1518,7 +1545,6 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 				minWidths: []int{18, 10},
 			},
 		)
-		printAuthGroupMembers(result, false)
 		return
 	}
 
@@ -1549,10 +1575,83 @@ func PrintAuthGroupResult(result *service.AuthGroupResult, long bool) {
 			minWidths:   []int{6, 8, 18, 10, 12, 19},
 		},
 	)
-	printAuthGroupMembers(result, true)
 }
 
-func printAuthGroupMembers(result *service.AuthGroupResult, long bool) {
+func PrintGroupGetResult(result *service.GroupGetResult, long bool) {
+	if captureJSON(result) || result == nil {
+		return
+	}
+	fields := [][]string{
+		{"ID", emptyDash(result.ID)},
+		{"NAME", emptyDash(result.Name)},
+		{"DISPLAY NAME", emptyDash(result.DisplayName)},
+	}
+	if long {
+		if result.PosixGroupName != "" {
+			fields = append(fields, []string{"POSIX", result.PosixGroupName})
+		}
+		if result.TenantID != "" {
+			fields = append(fields, []string{"TENANT ID", result.TenantID})
+		}
+		if result.Status != "" {
+			fields = append(fields, []string{"STATUS", result.Status})
+		}
+	}
+	fields = append(fields,
+		[]string{"成员数量", strconv.Itoa(result.MemberCount)},
+		[]string{"协管员数量", strconv.Itoa(result.AdminCount)},
+	)
+	printBoxTableWithOptions(
+		[]string{"FIELD", "VALUE"},
+		fields,
+		[]int{14, 72},
+		tableOptions{minWidths: []int{10, 20}},
+	)
+	printAuthGroupMembers(result, long)
+}
+
+func PrintGroupList(items []service.GroupListItem, long bool) {
+	if captureJSON(items) {
+		return
+	}
+	headers := []string{"GROUP", "DISPLAY NAME"}
+	widths := []int{40, 40}
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		row := []string{emptyDash(item.Name), emptyDash(item.DisplayName)}
+		if long {
+			row = append(row, emptyDash(item.ID), emptyDash(item.PosixGroupName), emptyDash(item.TenantID), emptyDash(item.CreateTime))
+		}
+		rows = append(rows, row)
+	}
+	if long {
+		headers = append(headers, "ID", "POSIX", "TENANT ID", "CREATED")
+		widths = append(widths, 36, 28, 36, 22)
+	}
+	if len(rows) == 0 {
+		row := make([]string, len(headers))
+		for i := range row {
+			row[i] = "-"
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{})
+	fmt.Fprintf(os.Stdout, "\n共 %d 个用户组。\n", len(items))
+}
+
+func PrintGroupGetSummary(results []*service.GroupGetResult, long bool) {
+	if captureJSON(results) {
+		return
+	}
+	for index, result := range results {
+		if index > 0 {
+			fmt.Fprintln(os.Stdout)
+		}
+		PrintGroupGetResult(result, long)
+	}
+}
+
+func printAuthGroupMembers(result *service.GroupGetResult, long bool) {
 	if result == nil {
 		return
 	}

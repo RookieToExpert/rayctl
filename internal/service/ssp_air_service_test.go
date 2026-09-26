@@ -1,6 +1,12 @@
 package service
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -8,6 +14,34 @@ import (
 
 	"rayctl/internal/platform"
 )
+
+func TestAIRJobVClusterComesFromQueueResource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rmh/v1/resources:page" {
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"resources":[{"id":"cluster-uid","name":"cluster-muxi","type":"compute.ssp.v1.cluster","properties":"{\"source\":{\"name\":\"vc-muxi-c550-ailab\"}}","related_resources":[{"resource":{"id":"queue-uid","name":"queue-d-reserved-muxi-h3c-data-producer","type":"compute.ssp.v1.queue","rid":"/subscriptions/sub/resourceGroups/default/regions/cn-pj-01/clusters/cluster-muxi/queues/queue-d-reserved-muxi-h3c-data-producer"}}]}]}`)
+	}))
+	defer server.Close()
+	configPath := filepath.Join(t.TempDir(), "platform.json")
+	config := fmt.Sprintf(`{"current_profile":"test","profiles":{"test":{"access_key":"ak","secret_key":"sk","subscription_id":"sub","base_url":%q}}}`, server.URL)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RAYCTL_PLATFORM_CONFIG", configPath)
+	t.Setenv("RAYCTL_PLATFORM_ENVIRONMENT", "")
+	client, err := platform.NewVirtualClusterClientFromEnvWithError()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := SSPAIRJobItem{Queue: "queue-d-reserved-muxi-h3c-data-producer", Cluster: "cluster-muxi", Profile: "test"}
+	vc := NewSSPAIRService(client).resolveAIRJobVCluster(context.Background(), item)
+	if vc != "vc-muxi-c550-ailab" || item.Cluster != "cluster-muxi" {
+		t.Fatalf("VC = %q, cluster = %q", vc, item.Cluster)
+	}
+}
 
 func TestAIRJobItemUsesLeaderResourceAndQueueCluster(t *testing.T) {
 	var job platform.SSPAIRJob
@@ -31,6 +65,21 @@ func TestAIRJobItemUsesLeaderResourceAndQueueCluster(t *testing.T) {
 	}
 	if len(item.Volumes) != 1 || item.Volumes[0].Endpoint != "csi://019fabca-cb5e-7577-8dea-c09da02b0cb1" {
 		t.Fatalf("volumes = %#v", item.Volumes)
+	}
+}
+
+func TestFilterAIRJobsByStateIgnoresCaseAndWhitespace(t *testing.T) {
+	items := []SSPAIRJobItem{
+		{Name: "running", State: "RUNNING"},
+		{Name: "pending", State: "Pending"},
+		{Name: "running-two", State: "Running"},
+	}
+	filtered := filterAIRJobsByState(items, " running ")
+	if len(filtered) != 2 || filtered[0].Name != "running" || filtered[1].Name != "running-two" {
+		t.Fatalf("filtered AIR jobs = %#v", filtered)
+	}
+	if all := filterAIRJobsByState(items, ""); len(all) != 3 {
+		t.Fatalf("unfiltered AIR jobs = %#v", all)
 	}
 }
 

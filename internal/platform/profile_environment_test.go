@@ -165,6 +165,18 @@ func TestNormalizeIAMBaseURLForPT(t *testing.T) {
 	}
 }
 
+func TestSigninURLFromPTIAMBaseURL(t *testing.T) {
+	if got := signinURLFromIAMBaseURL("https://iam-api.pjlab.org.cn"); got != "https://signin.pjlab.org.cn/oauth2/token" {
+		t.Fatalf("PT signin URL = %q", got)
+	}
+	if got := signinURLFromIAMBaseURL("https://iam.d.pjlab.org.cn"); got != "https://signin.d.pjlab.org.cn/oauth2/token" {
+		t.Fatalf("D signin URL = %q", got)
+	}
+	if got := signinURLFromIAMBaseURL("https://iam-api.example.com"); got != "https://signin-api.example.com/oauth2/token" {
+		t.Fatalf("custom signin URL = %q", got)
+	}
+}
+
 func TestApplyProcessEnvironmentSelection(t *testing.T) {
 	t.Setenv("RAYCTL_PLATFORM_ENVIRONMENT", "pt")
 	client := &VirtualClusterClient{

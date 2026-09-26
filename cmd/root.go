@@ -31,6 +31,7 @@ func init() {
 	rootCmd.AddCommand(newAuthCmd())
 	rootCmd.AddCommand(newClusterCmd())
 	rootCmd.AddCommand(newECSCmd())
+	rootCmd.AddCommand(newGroupCmd())
 	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newMetricsCmd())
 	rootCmd.AddCommand(newNATGatewayCmd())
