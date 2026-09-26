@@ -74,13 +74,6 @@ func eventTimestamp(event corev1.Event) time.Time {
 	}
 }
 
-func min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func dashIfEmpty(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "-"
