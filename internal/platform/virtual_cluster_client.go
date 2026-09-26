@@ -39,39 +39,3 @@ type VirtualClusterClient struct {
 	profiles          map[string]clientProfile
 	httpClient        *http.Client
 }
-
-type ECSVirtualMachine struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	UID         string `json:"uid"`
-	DisplayName string `json:"display_name"`
-	CreatorID   string `json:"creator_id"`
-	State       string `json:"state"`
-	ProfileName string `json:"-"`
-	Properties  struct {
-		Hostname           string `json:"hostname"`
-		MachineType        string `json:"machine_type"`
-		VirtualMachineType string `json:"virtual_machine_type"`
-		ImageID            string `json:"image_id"`
-		Metadata           struct {
-			Items []struct {
-				Key   string `json:"key"`
-				Value string `json:"value"`
-			} `json:"items"`
-		} `json:"metadata"`
-		NetworkInterfaces []struct {
-			Properties struct {
-				IPv4Addr string `json:"ip_v4_addr"`
-				VPCInfo  struct {
-					UID         string `json:"uid"`
-					Name        string `json:"name"`
-					DisplayName string `json:"display_name"`
-				} `json:"vpc_info"`
-			} `json:"properties"`
-		} `json:"network_interfaces"`
-	} `json:"properties"`
-}
-
-type ecsVirtualMachineListResponse struct {
-	VirtualMachines []ECSVirtualMachine `json:"virtual_machines"`
-}
