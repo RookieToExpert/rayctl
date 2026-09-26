@@ -388,3 +388,52 @@ func (c *VirtualClusterClient) virtualClusterListURL(profile clientProfile, skip
 	u.RawQuery = query.Encode()
 	return u.String()
 }
+
+type VirtualCluster struct {
+	UID         string `json:"uid"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	TenantID    string `json:"tenant_id"`
+	Region      string `json:"region"`
+	State       string `json:"state"`
+	ProfileName string `json:"-"`
+}
+
+type AISpace struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	UID         string `json:"uid"`
+	DisplayName string `json:"display_name"`
+	CreatorID   string `json:"creator_id"`
+	State       string `json:"state"`
+	ProfileName string `json:"-"`
+	Properties  struct {
+		Type                     string `json:"type"`
+		ImagePath                string `json:"image_path"`
+		HostIP                   string `json:"host_ip"`
+		VirtualMachineProperties struct {
+			MachineType       string `json:"machine_type"`
+			NetworkInterfaces []struct {
+				Properties struct {
+					IPv4Addr string `json:"ip_v4_addr"`
+					VPCInfo  struct {
+						UID         string `json:"uid"`
+						Name        string `json:"name"`
+						DisplayName string `json:"display_name"`
+					} `json:"vpc_info"`
+				} `json:"properties"`
+			} `json:"network_interfaces"`
+		} `json:"virtual_machine_properties"`
+	} `json:"properties"`
+}
+
+type virtualClusterListResponse struct {
+	VirtualClusters []VirtualCluster `json:"virtual_clusters"`
+	Items           []VirtualCluster `json:"items"`
+	NextPageToken   string           `json:"next_page_token"`
+}
+
+type aiSpaceListResponse struct {
+	AISpaces []AISpace `json:"ai_spaces"`
+}
