@@ -239,15 +239,56 @@ func doPlatformRequest(client *http.Client, req *http.Request) (*http.Response, 
 
 func retryableGETResult(resp *http.Response, err error) bool {
 	if err != nil {
-		return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+		return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !poolExhaustionMessage(err.Error())
 	}
 	if resp == nil {
 		return false
 	}
 	switch resp.StatusCode {
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable:
-		return true
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return !platformPoolExhausted(resp)
 	default:
 		return false
 	}
+}
+
+type prefixedResponseBody struct {
+	io.Reader
+	io.Closer
+}
+
+func poolExhaustionMessage(message string) bool {
+	message = strings.ToLower(message)
+	for _, marker := range []string{"connection pool exhausted", "connection_pool_overflow", "connection pool overflow", "reset reason: overflow", "too many open files", "cannot assign requested address"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func platformPoolExhausted(resp *http.Response) bool {
+	for _, header := range []string{"X-Envoy-Overloaded", "X-Envoy-Local-Overloaded"} {
+		value := strings.TrimSpace(resp.Header.Get(header))
+		if value == "1" || strings.EqualFold(value, "true") {
+			return true
+		}
+	}
+	for _, flag := range strings.Split(resp.Header.Get("X-Envoy-Response-Flags"), ",") {
+		if strings.TrimSpace(flag) == "UO" {
+			return true
+		}
+	}
+	if poolExhaustionMessage(resp.Header.Get("X-Envoy-Response-Code-Details")) {
+		return true
+	}
+	if resp.Body == nil {
+		return false
+	}
+	// Inspect a bounded prefix, restoring it so the final error still contains
+	// the server's explanation. Never retry a body that failed to read.
+	body := resp.Body
+	prefix, err := io.ReadAll(io.LimitReader(body, 4096))
+	resp.Body = prefixedResponseBody{Reader: io.MultiReader(bytes.NewReader(prefix), body), Closer: body}
+	return err != nil || poolExhaustionMessage(string(prefix))
 }
