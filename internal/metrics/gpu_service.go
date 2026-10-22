@@ -84,11 +84,17 @@ func (s *Service) gpuForIdentity(ctx context.Context, options QueryOptions, iden
 	}
 	raw = canonicalGPUInventory(raw)
 	merged := mergeRawSeries(raw, acceleratorIdentity, "percent")
+	tolerance := 5 * time.Second
+	// query_range already aligns every series to the requested grid. Merging
+	// adjacent timestamps here would silently discard a user's short --step.
+	if options.UseStep {
+		tolerance = 0
+	}
 	// Collapse duplicate exporter timestamps per card BEFORE summing memory.
 	for _, card := range merged {
-		card.points = coalesceNearbyPoints(card.points, aggregateMax, 5*time.Second)
+		card.points = coalesceNearbyPoints(card.points, aggregateMax, tolerance)
 	}
-	grouped := aggregateSeries(merged, options.By, aggregateMax)
+	grouped := aggregateSeriesWithTolerance(merged, options.By, aggregateMax, tolerance)
 	result := buildResult("gpu", options, identity, grouped)
 	result.Warnings = append(result.Warnings, identity.Warnings...)
 	if len(result.Samples) == 0 {
@@ -140,9 +146,9 @@ func (s *Service) gpuForIdentity(ctx context.Context, options QueryOptions, iden
 				}
 				points := mergeRawSeries(values, acceleratorIdentity, "GiB")
 				for _, card := range points {
-					card.points = coalesceNearbyPoints(card.points, aggregateMax, 5*time.Second)
+					card.points = coalesceNearbyPoints(card.points, aggregateMax, tolerance)
 				}
-				memory[dimension] = aggregateSeries(points, options.By, aggregateSum)
+				memory[dimension] = aggregateSeriesWithTolerance(points, options.By, aggregateSum, tolerance)
 			} else {
 				allHealth[dimension] = append(allHealth[dimension], values...)
 			}

@@ -193,6 +193,23 @@ func TestGPUSummaryStatistics(t *testing.T) {
 	}
 }
 
+func TestGPUShortStepPreservesEveryRequestedTimestamp(t *testing.T) {
+	client := muxiFixture()
+	for i := range client.data {
+		if strings.Contains(client.data[i].Metric["__name__"], "gpu_usage") || strings.Contains(client.data[i].Metric["__name__"], "gpu_util") {
+			client.data[i].Timestamps = []int64{1000, 2000, 3000}
+			client.data[i].Values = []float64{0, 10, 20}
+		}
+	}
+	r, err := NewService(client).GPU(context.Background(), QueryOptions{Workload: "demo", By: "gpu", UseStep: true, Step: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Samples) != 24 || r.Series[0].Summary.SampleCount != 3 || r.Series[0].Summary.Average != 10 {
+		t.Fatalf("short grid collapsed: %+v", r.Summary)
+	}
+}
+
 func TestNPUHealthDeduplicatesSingleDoubleAndIsolatedPages(t *testing.T) {
 	labels := map[string]string{"pod": "p", "node": "n", "gpu": "0", "extended_resource__type": "npu.com/gpu"}
 	cards := []RawSeries{{Metric: labels}}

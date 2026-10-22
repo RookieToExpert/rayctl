@@ -536,6 +536,10 @@ const (
 )
 
 func aggregateSeries(input []*pointSeries, by string, mode aggregateMode) []*pointSeries {
+	return aggregateSeriesWithTolerance(input, by, mode, 5*time.Second)
+}
+
+func aggregateSeriesWithTolerance(input []*pointSeries, by string, mode aggregateMode, tolerance time.Duration) []*pointSeries {
 	result := map[string]*pointSeries{}
 	for _, source := range input {
 		labels := source.labels
@@ -574,7 +578,7 @@ func aggregateSeries(input []*pointSeries, by string, mode aggregateMode) []*poi
 	}
 	items := make([]*pointSeries, 0, len(result))
 	for _, item := range result {
-		item.points = coalesceNearbyPoints(item.points, mode, 5*time.Second)
+		item.points = coalesceNearbyPoints(item.points, mode, tolerance)
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].name < items[j].name })
