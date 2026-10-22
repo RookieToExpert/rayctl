@@ -603,7 +603,9 @@ func (s *AuthService) GrantAFS(ctx context.Context, req AuthGrantAFSRequest) (*A
 		RoleID:         roleID,
 	}
 
-	policies, err := s.vcClient.ListIAMBindingPolicies(ctx)
+	// Check the resolved resource scope so unrelated tenant-wide pagination
+	// cannot block a grant. Existing grants still require an exact scope match.
+	policies, err := s.vcClient.ListIAMBindingPoliciesForResourceProfile(ctx, s.vcClient.CurrentProfileName(), normalizeAuthScope(scope))
 	if err != nil {
 		return nil, fmt.Errorf("list binding policies: %w", err)
 	}

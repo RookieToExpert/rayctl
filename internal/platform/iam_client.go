@@ -728,7 +728,7 @@ func (c *VirtualClusterClient) ListIAMBindingPoliciesForSubjectsProfile(ctx cont
 }
 
 func (c *VirtualClusterClient) listIAMBindingPoliciesWithProfile(ctx context.Context, profile clientProfile, filter string) ([]IAMBindingPolicy, error) {
-	return collectIAMPages(ctx, defaultPageLimit, 0, true, func(token string, size int) (iamPage[IAMBindingPolicy], error) {
+	return collectIAMPagesWithRetrySize(ctx, defaultPageLimit, iamBindingPolicyRetryPageSize, 0, true, func(token string, size int) (iamPage[IAMBindingPolicy], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/authz/v1/bindingPolicies"
 		q := u.Query()
