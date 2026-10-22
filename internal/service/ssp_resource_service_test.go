@@ -345,7 +345,7 @@ func TestFilterFreeQueueNodesSupportsCPUOnlyNodes(t *testing.T) {
 		{HostName: "cpu-free", CPUAllocated: "8", CPUTotal: "16", MemoryAllocated: "16GiB", MemoryTotal: "32GiB"},
 		{HostName: "cpu-full", CPUAllocated: "16", CPUTotal: "16", MemoryAllocated: "16GiB", MemoryTotal: "32GiB"},
 		{HostName: "gpu-full", CPUAllocated: "0", CPUTotal: "16", MemoryAllocated: "0", MemoryTotal: "32GiB", AcceleratorTotal: 8},
-		{HostName: "gpu-free", AcceleratorTotal: 8, AcceleratorFree: 1},
+		{HostName: "gpu-free", AcceleratorTotal: 8, AcceleratorFree: 1, CPUAllocated: "0", CPUTotal: "16", MemoryAllocated: "0", MemoryTotal: "32GiB"},
 	}}
 
 	result.FilterFreeNodes()

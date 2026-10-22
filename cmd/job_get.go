@@ -13,6 +13,7 @@ import (
 func newECPJobGetCmd() *cobra.Command {
 	var debugTiming bool
 	var longOutput bool
+	var noImage bool
 	var queryTimeout time.Duration
 
 	getCmd := &cobra.Command{
@@ -39,6 +40,7 @@ func newECPJobGetCmd() *cobra.Command {
 				getCmd.Context(), args, jobService, vcClient,
 				jobGetOptions{
 					longOutput:  longOutput,
+					noImage:     noImage,
 					debugTiming: debugTiming,
 					timeout:     queryTimeout,
 				},
@@ -46,8 +48,9 @@ func newECPJobGetCmd() *cobra.Command {
 		},
 	}
 
+	getCmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
-	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 master Pod 的最新日志")
+	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示容器状态、当前/上次日志、镜像架构与挂载详情")
 	getCmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
 	return getCmd
 }

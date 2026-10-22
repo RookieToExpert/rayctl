@@ -17,6 +17,7 @@ const defaultJobGetParallelism = 4
 
 type jobGetOptions struct {
 	longOutput  bool
+	noImage     bool
 	debugTiming bool
 	timeout     time.Duration
 }
@@ -41,7 +42,7 @@ func runParallelECPJobGet(
 			queryCtx, cancel = context.WithTimeout(parent, options.timeout)
 		}
 		queryIdentifier := normalizeJobGetIdentifier(identifier)
-		jobs, err := jobService.GetJobsWithLogs(queryCtx, queryIdentifier, options.longOutput)
+		jobs, err := jobService.GetJobsWithLogs(service.WithPodEvidenceOptions(queryCtx, options.noImage, kubeconfig), queryIdentifier, options.longOutput)
 		if err == nil {
 			err = resolveECPJobVCNames(queryCtx, jobs, vcClient)
 		}

@@ -875,10 +875,16 @@ func runAuthCheckUser(cmd *cobra.Command, args []string, long bool, tenant strin
 	queryErrors := make([]error, 0)
 	for _, query := range queries {
 		if query.err != nil {
-			if allTenants && strings.Contains(strings.ToLower(query.err.Error()), "not found") {
+			var missing *platform.IAMUserNotFoundError
+			if allTenants && errors.As(query.err, &missing) {
+				output.PrintWarning(cmd.ErrOrStderr(), fmt.Sprintf("租户 %s: 该租户无此用户（%s）", query.profile, query.identifier))
 				continue
 			}
 			queryErrors = append(queryErrors, fmt.Errorf("user %q (tenant %s): %w", query.identifier, query.profile, query.err))
+			continue
+		}
+		if allTenants && len(query.results) == 0 {
+			output.PrintWarning(cmd.ErrOrStderr(), fmt.Sprintf("租户 %s: 该租户无此用户（%s）", query.profile, query.identifier))
 			continue
 		}
 		valid = append(valid, query.results...)

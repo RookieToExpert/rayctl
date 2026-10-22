@@ -131,7 +131,7 @@ func Collect(ctx context.Context, client kubernetes.Interface, pods []corev1.Pod
 }
 
 func collectPod(ctx context.Context, client kubernetes.Interface, pod corev1.Pod, options Options, images *imageCache) Pod {
-	result := Pod{Name: pod.Name, UID: string(pod.UID), Namespace: pod.Namespace, Phase: string(pod.Status.Phase), Node: pod.Spec.NodeName, Containers: []Container{}, Warnings: []string{}}
+	result := Pod{Name: pod.Name, UID: string(pod.UID), Namespace: pod.Namespace, Phase: string(pod.Status.Phase), Reason: pod.Status.Reason, Message: pod.Status.Message, Node: pod.Spec.NodeName, Containers: []Container{}, Warnings: []string{}}
 	if pod.Spec.NodeName != "" {
 		callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		node, err := client.CoreV1().Nodes().Get(callCtx, pod.Spec.NodeName, metav1.GetOptions{})
@@ -152,6 +152,7 @@ func collectPod(ctx context.Context, client kubernetes.Interface, pod corev1.Pod
 	for i, spec := range containers {
 		status, exists := statusByName[spec.Name]
 		item := Container{Name: spec.Name, Kind: "app", Ready: status.Ready, RestartCount: status.RestartCount, LastState: termination(status.LastTerminationState.Terminated), Image: Image{Ref: spec.Image, Digest: status.ImageID}, Comparison: Comparison{Item: "architecture", Right: result.NodeArchitecture}}
+		item.Mounts = containerMounts(pod, spec)
 		if i < len(pod.Spec.InitContainers) {
 			item.Kind = "init"
 		}

@@ -186,6 +186,9 @@ func publicJSON(v reflect.Value, path string, warnings *[]string) any {
 			if field.PkgPath != "" || field.Name == "Raw" {
 				continue
 			}
+			if field.Tag.Get("public") == "omitempty" && v.Field(i).IsZero() {
+				continue
+			}
 			key := jsonKey(field.Name)
 			if tag := strings.Split(field.Tag.Get("json"), ",")[0]; tag != "" {
 				if tag == "-" {

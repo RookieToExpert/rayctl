@@ -281,11 +281,6 @@ func nodeRDMAExtendedResources(node *corev1.Node, pods []corev1.Pod) []NodeExten
 		name := corev1.ResourceName(value)
 		capacity := node.Status.Capacity[name]
 		allocatable := node.Status.Allocatable[name]
-		// Some device plugins leave zero-valued resource keys behind. They do
-		// not represent a usable RDMA device and should not appear as hardware.
-		if capacity.IsZero() && allocatable.IsZero() {
-			continue
-		}
 		requested := resource.MustParse("0")
 		for index := range pods {
 			requested.Add(podNamedResourceRequest(pods[index].Spec, name))

@@ -109,6 +109,8 @@ func TestFilterFreeNodes(t *testing.T) {
 	acceleratorFree := platform.VirtualClusterNodeResourceUsage{}
 	acceleratorFree.Usage.Total.Device = "8"
 	acceleratorFree.Usage.Available.Device = "1"
+	acceleratorFree.Usage.Available.CPU = "4"
+	acceleratorFree.Usage.Available.Memory = "16GiB"
 	acceleratorFull := platform.VirtualClusterNodeResourceUsage{}
 	acceleratorFull.Usage.Total.Device = "8"
 	acceleratorFull.Usage.Available.Device = "0"

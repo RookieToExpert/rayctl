@@ -223,7 +223,7 @@ func filterFreeSSPNodeUsageItems(items []SSPQueueNodeUsageItem) []SSPQueueNodeUs
 	filtered := items[:0]
 	for _, item := range items {
 		if item.AcceleratorTotal > 0 {
-			if item.AcceleratorFree > 0 {
+			if item.AcceleratorFree > 0 && resourceAmountAvailable("", item.CPUTotal, item.CPUAllocated) && resourceAmountAvailable("", item.MemoryTotal, item.MemoryAllocated) {
 				filtered = append(filtered, item)
 			}
 			continue
@@ -616,7 +616,7 @@ func (s *SSPResourceService) ListQueues(ctx context.Context, region string) (*SS
 		}
 		expectedNames := make([]string, 0, len(staleDetails))
 		for _, detail := range staleDetails {
-			expectedNames = append(expectedNames, detail.Name)
+			expectedNames = append(expectedNames, queueStateIdentity(detail.ProfileName, detail.Name))
 		}
 		if err := mergeAuthoritativeQueueStates(items, expectedNames, authoritative); err != nil {
 			return nil, err
@@ -630,7 +630,7 @@ func (s *SSPResourceService) ListQueues(ctx context.Context, region string) (*SS
 func mergeAuthoritativeQueueStates(items []SSPQueueItem, expectedNames []string, authoritative []platform.SSPQueue) error {
 	byName := make(map[string]platform.SSPQueue, len(authoritative))
 	for _, queue := range authoritative {
-		byName[strings.ToLower(strings.TrimSpace(queue.Name))] = queue
+		byName[queueStateIdentity(queue.ProfileName, queue.Name)] = queue
 	}
 	missing := make([]string, 0)
 	for _, name := range expectedNames {
@@ -643,7 +643,7 @@ func mergeAuthoritativeQueueStates(items []SSPQueueItem, expectedNames []string,
 		return fmt.Errorf("authoritative SSP queue state missing for: %s", strings.Join(missing, ", "))
 	}
 	for index := range items {
-		queue, ok := byName[strings.ToLower(strings.TrimSpace(items[index].Name))]
+		queue, ok := byName[queueStateIdentity(items[index].Profile, items[index].Name)]
 		if !ok {
 			continue
 		}
@@ -652,6 +652,10 @@ func mergeAuthoritativeQueueStates(items []SSPQueueItem, expectedNames []string,
 		items[index].WorkspaceUID = firstNonEmpty(queue.Properties.Workspace.UID, items[index].WorkspaceUID)
 	}
 	return nil
+}
+
+func queueStateIdentity(profile, name string) string {
+	return strings.ToLower(strings.TrimSpace(profile) + "/" + strings.TrimSpace(name))
 }
 
 func deduplicateSSPQueueItems(items []SSPQueueItem) []SSPQueueItem {
@@ -764,6 +768,9 @@ func (s *SSPResourceService) GetQueue(ctx context.Context, identifier string, re
 
 func queueDetailReasons(details platform.SSPQueueResourceDetails, includeDetails bool) []string {
 	reasons := make([]string, 0, 3)
+	if details.State != "" && !strings.EqualFold(details.State, "RUNNING") {
+		reasons = append(reasons, "state")
+	}
 	if strings.TrimSpace(details.WorkspaceName) == "" {
 		reasons = append(reasons, "workspace")
 	}
@@ -889,6 +896,7 @@ func (s *SSPResourceService) enrichQueueSchedulingSettings(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("get queue %s detail: %w", item.Name, err)
 	}
+	item.State = firstNonEmpty(detail.State, item.State)
 	item.Workspace = firstNonEmpty(detail.WorkspaceName, detail.Properties.Workspace.Name, item.Workspace)
 	item.WorkspaceUID = firstNonEmpty(item.WorkspaceUID, detail.Properties.Workspace.UID)
 	if detail.Properties.NodeStatus.Total > 0 {

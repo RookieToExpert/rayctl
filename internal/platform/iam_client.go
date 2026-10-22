@@ -475,7 +475,7 @@ func (c *VirtualClusterClient) FindUsersForProfile(ctx context.Context, profileN
 		return strings.TrimSpace(result[i].ID) < strings.TrimSpace(result[j].ID)
 	})
 	if len(result) == 0 {
-		return nil, fmt.Errorf("user %q not found in current tenant", identifier)
+		return nil, &IAMUserNotFoundError{Identifier: identifier}
 	}
 	return result, nil
 }

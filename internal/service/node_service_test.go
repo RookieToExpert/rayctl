@@ -62,7 +62,7 @@ func TestDescribeIncludesRDMAExtendedResource(t *testing.T) {
 	}
 }
 
-func TestDescribeIgnoresZeroValuedRDMAResource(t *testing.T) {
+func TestDescribeRetainsZeroValuedRDMAResource(t *testing.T) {
 	clientset := fake.NewSimpleClientset(&corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "host-no-rdma"},
 		Status: corev1.NodeStatus{
@@ -75,8 +75,8 @@ func TestDescribeIgnoresZeroValuedRDMAResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Describe returned error: %v", err)
 	}
-	if len(result.RDMAResources) != 0 {
-		t.Fatalf("RDMAResources = %#v, want no usable RDMA resources", result.RDMAResources)
+	if len(result.RDMAResources) != 1 || result.RDMAResources[0].Capacity != "0" {
+		t.Fatalf("RDMAResources = %#v, want visible zero capacity", result.RDMAResources)
 	}
 }
 

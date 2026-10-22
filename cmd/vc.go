@@ -223,7 +223,7 @@ func newVCNodeUsageCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示仍有可用资源的节点；加速节点按卡数，CPU-only 节点按 CPU/内存")
+	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示 CPU、内存均有余量且加速卡未满的节点；CPU-only 节点检查 CPU/内存")
 	return cmd
 }
 

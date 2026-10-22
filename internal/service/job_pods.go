@@ -581,11 +581,8 @@ func isFailedPod(pod corev1.Pod) bool {
 
 func podFailureReason(pod corev1.Pod) string {
 	if pod.Status.Phase == corev1.PodFailed {
-		if strings.TrimSpace(pod.Status.Message) != "" {
-			return pod.Status.Message
-		}
-		if strings.TrimSpace(pod.Status.Reason) != "" {
-			return pod.Status.Reason
+		if reason := joinMessageReason(pod.Status.Message, pod.Status.Reason); reason != "" {
+			return reason
 		}
 	}
 	for _, status := range pod.Status.InitContainerStatuses {

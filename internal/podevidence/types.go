@@ -41,6 +41,16 @@ type Container struct {
 	Image        Image        `json:"image"`
 	Comparison   Comparison   `json:"comparison"`
 	Logs         Logs         `json:"logs"`
+	Mounts       []Mount      `json:"mounts"`
+}
+
+type Mount struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	SubPath  string `json:"sub_path,omitempty"`
+	ReadOnly bool   `json:"read_only"`
+	Type     string `json:"type"`
+	Source   string `json:"source"`
 }
 
 type Pod struct {
@@ -48,6 +58,8 @@ type Pod struct {
 	UID              string      `json:"uid"`
 	Namespace        string      `json:"namespace"`
 	Phase            string      `json:"phase"`
+	Reason           string      `json:"reason"`
+	Message          string      `json:"message"`
 	Node             string      `json:"node"`
 	NodeArchitecture *string     `json:"node_architecture"`
 	Containers       []Container `json:"containers"`

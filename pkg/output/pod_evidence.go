@@ -42,9 +42,24 @@ func printPodEvidence(result *podevidence.Result) {
 			}
 			images = append(images, []string{container.Name, container.Image.Ref, imageArch, pod.Node, nodeArch})
 		}
-		fmt.Fprintf(os.Stdout, "\nPod %s/%s (%s)\n", pod.Namespace, pod.Name, pod.UID)
+		fmt.Fprintf(os.Stdout, "\nPod %s/%s (%s), phase=%s\n", pod.Namespace, pod.Name, pod.UID, emptyDash(pod.Phase))
+		if pod.Reason != "" {
+			fmt.Fprintf(os.Stdout, "status.reason: %s\n", pod.Reason)
+		}
+		if pod.Message != "" {
+			fmt.Fprintf(os.Stdout, "status.message: %s\n", redactText(pod.Message))
+		}
 		printBoxTable([]string{"CONTAINER", "KIND", "READY", "RESTARTS", "STATE", "LAST TERMINATION", "EXIT", "INSTANT EXIT"}, rows)
 		printBoxTable([]string{"CONTAINER", "IMAGE", "IMAGE ARCH", "NODE", "NODE ARCH"}, images)
+		mountRows := [][]string{}
+		for _, container := range pod.Containers {
+			for _, mount := range container.Mounts {
+				mountRows = append(mountRows, []string{container.Name, mount.Name, mount.Type, emptyDash(mount.Source), mount.Path, emptyDash(mount.SubPath), fmt.Sprint(mount.ReadOnly)})
+			}
+		}
+		if len(mountRows) > 0 {
+			printBoxTable([]string{"CONTAINER", "VOLUME", "TYPE", "SOURCE", "MOUNT", "SUBPATH", "READ ONLY"}, mountRows)
+		}
 		for _, container := range pod.Containers {
 			for _, log := range []struct {
 				name      string

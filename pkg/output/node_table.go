@@ -2,6 +2,7 @@ package output
 
 import (
 	"fmt"
+	"golang.org/x/term"
 	"os"
 	"rayctl/internal/service"
 	"strings"
@@ -69,7 +70,7 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 	}
 }
 
-func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}) {
+func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}, longOutput ...bool) {
 	if captureJSON(details) {
 		return
 	}
@@ -84,7 +85,11 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 		details.GPUUsage,
 	}
 	maxWidths := []int{24, 20, 40, 3, 5, 5, 8}
+	colors := map[string]string{}
 	if len(details.RDMAResources) > 0 {
+		if nodeRDMACapacityZero(details.RDMAResources) && nodeColorEnabled() {
+			colors[cellKey(0, len(headers))] = "\x1b[31m"
+		}
 		headers = append(headers, "RDMA")
 		row = append(row, formatNodeRDMAUsage(details.RDMAResources))
 		maxWidths = append(maxWidths, 18)
@@ -98,6 +103,7 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 		[][]string{row},
 		maxWidths,
 		tableOptions{
+			cellColors: colors,
 			noWrapCells: makeNoWrapCells(
 				[2]int{0, 0},
 				[2]int{0, 1},
@@ -143,7 +149,7 @@ func formatNodeRDMAUsage(resources []service.NodeExtendedResource) string {
 	values := make([]string, 0, len(resources))
 	for _, item := range resources {
 		usage := fmt.Sprintf("%s/%s", emptyDash(item.Requested), emptyDash(item.Allocatable))
-		if item.Capacity != "" && item.Capacity != "0" && item.Capacity != item.Allocatable {
+		if item.Capacity != "" && item.Capacity != item.Allocatable {
 			usage += " cap=" + item.Capacity
 		}
 		values = append(values, usage)
@@ -352,4 +358,23 @@ func printUserWorkloadWarnings(warnings []string) {
 	for _, warning := range warnings {
 		fmt.Fprintf(os.Stdout, "Warning: %s\n", warning)
 	}
+}
+
+func nodeRDMACapacityZero(resources []service.NodeExtendedResource) bool {
+	for _, item := range resources {
+		if item.Capacity == "0" || item.Allocatable == "0" {
+			return true
+		}
+	}
+	return false
+}
+
+func nodeColorEnabled() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if forced := os.Getenv("CLICOLOR_FORCE"); forced != "" && forced != "0" {
+		return true
+	}
+	return os.Getenv("TERM") != "dumb" && term.IsTerminal(int(os.Stdout.Fd()))
 }

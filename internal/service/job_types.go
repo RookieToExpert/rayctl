@@ -5,6 +5,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"rayctl/internal/platform"
+	"rayctl/internal/podevidence"
 	"sort"
 	"strings"
 	"time"
@@ -80,6 +81,7 @@ type JobGetResult struct {
 	RecentEvents           []EventItem
 	RecentLogLines         []string
 	ResourceSpecs          []JobResourceSpecItem
+	PodEvidence            *podevidence.Result `json:"pod_evidence,omitempty" public:"omitempty"`
 	Timings                JobGetTimings
 }
 
@@ -218,6 +220,8 @@ type JobPodItem struct {
 	Namespace string
 	NodeName  string
 	Phase     string
+	Reason    string
+	Message   string
 	TaskSpec  string
 	TaskIndex string
 }

@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"rayctl/internal/podevidence"
 	"sort"
 	"strings"
 	"sync"
@@ -159,25 +160,15 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 	diagnosisDuration := time.Since(diagnosisBegin)
 
 	inspectPod := chooseInspectPod(pods)
-	logPod := chooseMasterLogPod(pods)
 	var recentLogLines []string
+	var podEvidence *podevidence.Result
 	var kubeLogsDuration time.Duration
 
 	if includeLogs {
-		if logPod != nil && podHasRunnableLogs(*logPod) {
-			logsBegin := time.Now()
-			lines, err := s.tailPodLogs(ctx, logPod.Namespace, logPod.Name, defaultTailLogLines)
-			kubeLogsDuration = time.Since(logsBegin)
-			if err != nil {
-				recentLogLines = []string{fmt.Sprintf("log unavailable: %v", err)}
-			} else {
-				recentLogLines = lines
-			}
-		} else if logPod != nil {
-			recentLogLines = []string{fmt.Sprintf("pod phase is %s, logs are not available yet", logPod.Status.Phase)}
-		} else {
-			recentLogLines = []string{"no pods found for this job"}
-		}
+		evidenceBegin := time.Now()
+		podEvidence = s.collectATEEvidence(ctx, identity, pods, false)
+		kubeLogsDuration = time.Since(evidenceBegin)
+		recentLogLines = ateRecentEvidenceLogs(podEvidence)
 	}
 
 	formatBegin := time.Now()
@@ -189,6 +180,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 			Namespace: pod.Namespace,
 			NodeName:  dashIfEmpty(pod.Spec.NodeName),
 			Phase:     string(pod.Status.Phase),
+			Reason:    pod.Status.Reason, Message: pod.Status.Message,
 			TaskSpec:  firstNonEmpty(pod.Labels["volcano.sh/task-spec"], pod.Annotations["volcano.sh/task-spec"]),
 			TaskIndex: firstNonEmpty(pod.Labels["volcano.sh/task-index"], pod.Annotations["volcano.sh/task-index"]),
 		})
@@ -253,6 +245,7 @@ func (s *JobService) buildJobGetResultFromCurrentCluster(ctx context.Context, id
 		InspectPod:             inspectPodName,
 		CheckEvidence:          detailEvidence,
 		RecentLogLines:         recentLogLines,
+		PodEvidence:            podEvidence,
 		ResourceSpecs:          jobResourceSpecsFromVolcanoJob(job),
 		Timings: JobGetTimings{
 			Locate:     locateDuration,
@@ -345,33 +338,14 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		"-",
 	)
 	inspectPod := chooseInspectPod(pods)
-	logPod := chooseMasterLogPod(pods)
 	var recentLogLines []string
+	var podEvidence *podevidence.Result
 	var platformLogsDuration time.Duration
 	if includeLogs {
-		if logPod != nil && podHasRunnableLogs(*logPod) {
-			logsBegin := time.Now()
-			logs, logErr := s.vcClient.GetPodLogs(ctx, identity.VClusterName, logPod.Namespace, logPod.Name, defaultTailLogLines)
-			platformLogsDuration = time.Since(logsBegin)
-			if logErr == nil {
-				recentLogLines = logs
-			} else if strings.TrimSpace(identity.HostNamespace) != "" {
-				fallbackBegin := time.Now()
-				fallbackLogs, fallbackErr := s.tailPodLogs(ctx, identity.HostNamespace, logPod.Name, defaultTailLogLines)
-				platformLogsDuration += time.Since(fallbackBegin)
-				if fallbackErr == nil {
-					recentLogLines = fallbackLogs
-				} else {
-					recentLogLines = []string{fmt.Sprintf("log unavailable: %v", logErr)}
-				}
-			} else {
-				recentLogLines = []string{fmt.Sprintf("log unavailable: %v", logErr)}
-			}
-		} else if logPod != nil {
-			recentLogLines = []string{fmt.Sprintf("pod phase is %s, logs are not available yet", logPod.Status.Phase)}
-		} else {
-			recentLogLines = []string{"no pods found for this job"}
-		}
+		evidenceBegin := time.Now()
+		podEvidence = s.collectATEEvidence(ctx, identity, pods, true)
+		platformLogsDuration = time.Since(evidenceBegin)
+		recentLogLines = ateRecentEvidenceLogs(podEvidence)
 	}
 
 	formatBegin := time.Now()
@@ -383,6 +357,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 			Namespace: pod.Namespace,
 			NodeName:  dashIfEmpty(pod.Spec.NodeName),
 			Phase:     string(pod.Status.Phase),
+			Reason:    pod.Status.Reason, Message: pod.Status.Message,
 			TaskSpec:  firstNonEmpty(pod.Labels["volcano.sh/task-spec"], pod.Annotations["volcano.sh/task-spec"]),
 			TaskIndex: firstNonEmpty(pod.Labels["volcano.sh/task-index"], pod.Annotations["volcano.sh/task-index"]),
 		})
@@ -447,6 +422,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		InspectPod:             inspectPodName,
 		CheckEvidence:          detailEvidence,
 		RecentLogLines:         recentLogLines,
+		PodEvidence:            podEvidence,
 		ResourceSpecs:          jobResourceSpecsFromVolcanoJob(job),
 		Timings: JobGetTimings{
 			Locate:       locateDuration,

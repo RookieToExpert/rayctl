@@ -12,6 +12,9 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 	if captureJSON(result) {
 		return
 	}
+	if longOutput {
+		defer func() { printPodEvidence(result.PodEvidence) }()
+	}
 	summaryRows := [][]string{
 		{"TYPE", "ECP VCJob"},
 		{"JOB", result.Name},
@@ -28,6 +31,13 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 		[]string{"PODGROUP", result.PodGroupName},
 		[]string{"IMAGE PULL SECRET", joinOrDash(result.ImagePullSecrets)},
 	)
+	failedShown := 0
+	for _, pod := range result.Pods {
+		if strings.EqualFold(pod.Phase, "Failed") && failedShown < 3 {
+			summaryRows = append(summaryRows, []string{"FAILED POD", fmt.Sprintf("%s: %s | %s", pod.Name, emptyDash(pod.Reason), emptyDash(pod.Message))})
+			failedShown++
+		}
+	}
 	summaryRows = append(summaryRows, jobResourceSpecRows(result.ResourceSpecs)...)
 	summaryRows = append(summaryRows,
 		[]string{"CREATED", emptyDash(result.CreatedAt)},
@@ -103,7 +113,7 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 		default:
 		}
 	}
-	if longOutput && shouldShowJobLogs(result) {
+	if longOutput && result.PodEvidence == nil && shouldShowJobLogs(result) {
 		fmt.Fprintln(os.Stdout)
 		logRows := make([][]string, 0, len(result.RecentLogLines))
 		for _, line := range result.RecentLogLines {

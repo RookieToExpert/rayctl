@@ -122,7 +122,7 @@ func (r *VCResourceUsageResult) FilterFreeNodes() {
 	for _, item := range r.Items {
 		usage := item.Usage.Usage
 		if hasAcceleratorResource(usage.Total.Device, usage.Allocated.Device, usage.Available.Device) {
-			if resourceAmountAvailable(usage.Available.Device, usage.Total.Device, usage.Allocated.Device) {
+			if resourceAmountAvailable(usage.Available.Device, usage.Total.Device, usage.Allocated.Device) && resourceAmountAvailable(usage.Available.CPU, usage.Total.CPU, usage.Allocated.CPU) && resourceAmountAvailable(usage.Available.Memory, usage.Total.Memory, usage.Allocated.Memory) {
 				filtered = append(filtered, item)
 			}
 			continue

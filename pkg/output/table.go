@@ -14,6 +14,7 @@ type tableOptions struct {
 	noWrapCells map[string]struct{}
 	minWidths   []int
 	rowDividers bool
+	cellColors  map[string]string
 }
 
 func cellKey(row int, col int) string {
@@ -214,6 +215,10 @@ func borderLine(left string, middle string, right string, widths []int) string {
 }
 
 func renderRow(row []string, widths []int) string {
+	return renderColoredRow(row, widths, nil)
+}
+
+func renderColoredRow(row []string, widths []int, colors map[int]string) string {
 	var b strings.Builder
 	b.WriteString("│")
 	for i, width := range widths {
@@ -227,7 +232,13 @@ func renderRow(row []string, widths []int) string {
 			padding = 0
 		}
 		b.WriteString(" ")
+		if colors[i] != "" {
+			b.WriteString(colors[i])
+		}
 		b.WriteString(cell)
+		if colors[i] != "" {
+			b.WriteString("\x1b[0m")
+		}
 		b.WriteString(strings.Repeat(" ", padding+1))
 		b.WriteString("│")
 	}
@@ -252,12 +263,16 @@ func renderWrappedRows(rowIdx int, row []string, widths []int, options tableOpti
 	rendered := make([]string, 0, maxLines)
 	for lineIdx := 0; lineIdx < maxLines; lineIdx++ {
 		current := make([]string, len(widths))
+		colors := map[int]string{}
 		for cellIdx := range widths {
 			if lineIdx < len(cellLines[cellIdx]) {
 				current[cellIdx] = cellLines[cellIdx][lineIdx]
 			}
+			if color := options.cellColors[cellKey(rowIdx, cellIdx)]; color != "" {
+				colors[cellIdx] = color
+			}
 		}
-		rendered = append(rendered, renderRow(current, widths))
+		rendered = append(rendered, renderColoredRow(current, widths, colors))
 	}
 	return rendered
 }
