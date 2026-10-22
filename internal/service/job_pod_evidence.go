@@ -11,6 +11,9 @@ import (
 )
 
 func (s *JobService) collectATEEvidence(ctx context.Context, identity jobIdentity, pods []corev1.Pod, viaPlatform bool) *podevidence.Result {
+	if len(pods) == 0 {
+		return &podevidence.Result{Pods: []podevidence.Pod{}, Warnings: []string{"未找到可检查的 Pod；容器状态与日志尚不可用"}}
+	}
 	options, _ := ctx.Value(evidenceOptionsKey{}).(podevidence.Options)
 	options.PodLimit = 3
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
@@ -21,7 +24,8 @@ func (s *JobService) collectATEEvidence(ctx context.Context, identity jobIdentit
 		hostPods := []corev1.Pod{}
 		missing := []corev1.Pod{}
 		for _, pod := range selected {
-			host, err := client.CoreV1().Pods(identity.HostNamespace).Get(ctx, pod.Name, metav1.GetOptions{})
+			hostName := firstNonEmpty(pod.Annotations["vcluster.loft.sh/object-host-name"], pod.Name)
+			host, err := client.CoreV1().Pods(identity.HostNamespace).Get(ctx, hostName, metav1.GetOptions{})
 			if err == nil && ateHostPodMatches(*host, pod) {
 				hostPods = append(hostPods, *host)
 			} else {
@@ -48,12 +52,12 @@ func (s *JobService) collectATEEvidence(ctx context.Context, identity jobIdentit
 }
 
 func ateHostPodMatches(host, virtual corev1.Pod) bool {
-	name := firstNonEmpty(host.Annotations["vcluster.loft.sh/object-name"], host.Name)
-	namespace := firstNonEmpty(host.Annotations["vcluster.loft.sh/namespace"], host.Labels["volcano.sh/job-namespace"])
+	name := firstNonEmpty(host.Annotations["vcluster.loft.sh/object-name"], host.Annotations["vcluster.loft.sh/name"], host.Name)
+	namespace := firstNonEmpty(host.Annotations["vcluster.loft.sh/object-namespace"], host.Annotations["vcluster.loft.sh/namespace"], host.Labels["volcano.sh/job-namespace"])
 	if name != virtual.Name || namespace != "" && namespace != virtual.Namespace {
 		return false
 	}
-	uid := host.Annotations["vcluster.loft.sh/object-uid"]
+	uid := firstNonEmpty(host.Annotations["vcluster.loft.sh/object-uid"], host.Annotations["vcluster.loft.sh/uid"])
 	return uid == "" || virtual.UID == "" || uid == string(virtual.UID)
 }
 

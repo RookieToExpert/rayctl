@@ -284,6 +284,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		return nil, err
 	}
 
+	identity.UID = firstNonEmpty(identity.UID, string(job.GetUID()))
 	podsBegin := time.Now()
 	var pods []corev1.Pod
 	if strings.TrimSpace(identity.ProfileName) != "" {
@@ -291,12 +292,15 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 	} else {
 		pods, err = s.vcClient.ListJobPods(ctx, identity.VClusterName, identity.Namespace, identity.Name)
 	}
+	var podLookupWarnings []string
+	if err != nil || len(pods) == 0 {
+		pods, podLookupWarnings, err = s.recoverATEJobPods(ctx, &identity, err)
+	}
 	platformPodsDuration := time.Since(podsBegin)
 	if err != nil {
 		return nil, err
 	}
 
-	identity.UID = firstNonEmpty(identity.UID, string(job.GetUID()))
 	if strings.TrimSpace(identity.PodGroupName) == "" && strings.TrimSpace(identity.UID) != "" {
 		identity.PodGroupName = fmt.Sprintf("%s-%s", identity.Name, identity.UID)
 	}
@@ -331,6 +335,9 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 		}
 	}
 	diagnosisDuration := time.Since(diagnosisBegin)
+	if strings.EqualFold(status, "Running") && len(pods) == 0 {
+		diagnosis = append(diagnosis, "任务状态为 Running，但未定位到对应 Pod；容器状态与日志尚未核实，请检查 Pod 查询和 HC kubeconfig")
+	}
 	identity.Submitter = firstNonEmpty(
 		identity.Submitter,
 		getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"),
@@ -344,6 +351,7 @@ func (s *JobService) getJobViaPlatformByIdentity(ctx context.Context, identity j
 	if includeLogs {
 		evidenceBegin := time.Now()
 		podEvidence = s.collectATEEvidence(ctx, identity, pods, true)
+		podEvidence.Warnings = append(podEvidence.Warnings, podLookupWarnings...)
 		platformLogsDuration = time.Since(evidenceBegin)
 		recentLogLines = ateRecentEvidenceLogs(podEvidence)
 	}
