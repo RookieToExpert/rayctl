@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"net/http"
 	"rayctl/internal/platform"
 	"reflect"
 	"sort"
@@ -100,7 +101,7 @@ func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string
 			return identity, nil
 		} else {
 			var ambiguousErr *ambiguousJobMatchError
-			if errors.As(err, &ambiguousErr) {
+			if errors.As(err, &ambiguousErr) || errors.Is(err, ErrPTATEUnavailable) {
 				return nil, err
 			}
 			lookupErrs = append(lookupErrs, err)
@@ -318,6 +319,9 @@ func (s *JobService) findSeedPodForJobName(ctx context.Context, jobName string) 
 
 func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier string) (*jobIdentity, error) {
 	currentProfile := strings.TrimSpace(s.vcClient.CurrentProfileName())
+	if s.vcClient.ProfileEnvironment(currentProfile) == "pt" {
+		return s.findPTPlatformJobIdentity(ctx, identifier)
+	}
 	currentClusters, currentErr := s.vcClient.ListCurrentProfileVirtualClusters(ctx)
 	var lookupErrs []error
 	if currentErr == nil {
@@ -360,8 +364,9 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 	}
 
 	type searchResult struct {
-		identity *jobIdentity
-		err      error
+		identity  *jobIdentity
+		err       error
+		available bool
 	}
 
 	scanCtx, cancel := context.WithTimeout(ctx, platformJobScanTimeout)
@@ -383,13 +388,19 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 				results <- searchResult{err: scanCtx.Err()}
 				return
 			}
-			for _, vcRef := range platformVCRefs(vc) {
+			refs := platformVCRefs(vc)
+			if len(refs) == 0 {
+				results <- searchResult{err: fmt.Errorf("profile %q has a VC without an API reference", vc.ProfileName)}
+				return
+			}
+			for _, vcRef := range refs {
 				// Names are not confined to default; preserve every namespace match.
 				jobs, getErr := s.vcClient.ListVolcanoJobsPageForProfile(scanCtx, vc.ProfileName, vcRef, "name="+strconv.Quote(identifier), 0)
 				if getErr != nil {
 					results <- searchResult{err: fmt.Errorf("profile %q VC %q: %w", vc.ProfileName, vcRef, getErr)}
 					continue
 				}
+				results <- searchResult{available: true}
 				for i := range jobs {
 					job := &jobs[i]
 					if job.GetName() != identifier {
@@ -422,12 +433,18 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 
 	matches := make([]jobIdentity, 0, len(vclusters))
 	var lookupErrs []error
+	available, only404 := false, true
 	seen := make(map[string]struct{}, len(vclusters))
 	for result := range results {
 		if result.err != nil {
 			lookupErrs = append(lookupErrs, result.err)
+			var status *platform.HTTPStatusError
+			if !errors.As(result.err, &status) || status.StatusCode != http.StatusNotFound {
+				only404 = false
+			}
 			continue
 		}
+		available = available || result.available
 		if result.identity != nil {
 			key := strings.Join([]string{
 				strings.TrimSpace(result.identity.VClusterName),
@@ -455,7 +472,11 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 			Matches:    matches,
 		}
 	}
-	return nil, jobLookupFailure(identifier, append(lookupErrs, scanCtx.Err())...)
+	err := jobLookupFailure(identifier, append(lookupErrs, scanCtx.Err())...)
+	if !available && only404 && len(lookupErrs) > 0 && scanCtx.Err() == nil {
+		return nil, &ateEndpointsUnavailableError{cause: err}
+	}
+	return nil, err
 }
 
 func (s *JobService) findVClusterHostNamespace(ctx context.Context, vclusterUID string, virtualNamespace string) string {

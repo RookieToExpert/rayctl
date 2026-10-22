@@ -59,6 +59,9 @@ func formatJobGetError(ctx context.Context, identifier string, timeout time.Dura
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("job %q 查询超过 %s，已自动停止；可能是平台 API、HC API 或 Pending 诊断请求响应较慢，请检查 kubeconfig 与 platform profile，也可通过 --timeout 临时增加查询时间", identifier, timeout)
 	}
+	if errors.Is(err, service.ErrPTATEUnavailable) {
+		return service.ErrPTATEUnavailable
+	}
 	return fmt.Errorf("job %q: %w", identifier, err)
 }
 

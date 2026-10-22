@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"rayctl/internal/service"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -47,6 +48,13 @@ func TestFormatJobGetPreservesBackendDeadlineBeforeCommandDeadline(t *testing.T)
 	err := formatJobGetError(ctx, "missing", 20*time.Second, backendErr)
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "platform scan") || strings.Contains(err.Error(), "查询超过 20s") {
 		t.Fatalf("backend deadline incorrectly reported as command timeout: %v", err)
+	}
+}
+
+func TestFormatJobGetPTUnavailableIsActionable(t *testing.T) {
+	err := formatJobGetError(context.Background(), "missing", 10*time.Second, fmt.Errorf("lookup: %w", service.ErrPTATEUnavailable))
+	if err.Error() != "PT 环境没有 ATE 服务，请用 ait" || !errors.Is(err, service.ErrPTATEUnavailable) {
+		t.Fatalf("unexpected no-service message: %v", err)
 	}
 }
 

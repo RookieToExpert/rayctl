@@ -53,7 +53,7 @@ func jobLookupFailure(identifier string, errs ...error) error {
 func isJobLookupFailure(err error) bool {
 	var missing *jobNotFoundError
 	var incomplete *jobLookupError
-	return errors.As(err, &missing) || errors.As(err, &incomplete)
+	return errors.As(err, &missing) || errors.As(err, &incomplete) || errors.Is(err, ErrPTATEUnavailable)
 }
 
 func (s *JobService) listJobLookupMetadata(ctx context.Context) ([]unstructured.Unstructured, error) {

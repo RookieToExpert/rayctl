@@ -195,7 +195,7 @@ func (c *VirtualClusterClient) doSignedRequest(ctx context.Context, profile clie
 		return nil, fmt.Errorf("read response from %s: %w", reqURL, readErr)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("request %s returned %d: %s", reqURL, resp.StatusCode, responseBodyExcerpt(body))
+		return nil, &HTTPStatusError{URL: reqURL, StatusCode: resp.StatusCode, Body: responseBodyExcerpt(body)}
 	}
 	return body, nil
 }

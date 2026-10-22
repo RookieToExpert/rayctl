@@ -2,6 +2,8 @@
 
 日期：2026-10-22。目标：AIS Linux ARM64 `/usr/local/bin/rayctl`；D 使用 `~/kubeconfig`，PT 使用 `~/kubeconfigpt`。所有集群操作均为只读。
 
+本文记录对应提交 `6d81a67`。后续已将 PT 整组接口 404 改成清晰的服务不可用提示，见 [PT ATE 提示优化验收](rayctl-pt-ate-unavailable-20261022.md)；以下 PT 的“查询未完成”属于提示优化前的结果。
+
 ## 改动与错误边界
 
 - 平台名称查找结束后，HC Pod 和 Job 各扫描一次；明确的不存在或查询未完成结果直接返回，不再重复进行当前集群回退。
