@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 type config struct {
@@ -158,7 +156,7 @@ func NewVirtualClusterClientFromEnvWithError() (*VirtualClusterClient, error) {
 				Region:            region,
 			},
 		},
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: newPlatformHTTPClient(),
 	}
 	selected, ok := applyProcessEnvironmentSelection(client)
 	if !ok {
@@ -201,7 +199,7 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 			region:            current.Region,
 			currentProfile:    currentProfile,
 			profiles:          profiles,
-			httpClient:        &http.Client{Timeout: 10 * time.Second},
+			httpClient:        newPlatformHTTPClient(),
 		}
 		selected, ok := applyProcessEnvironmentSelection(client)
 		if !ok {
@@ -230,7 +228,7 @@ func newVirtualClusterClientFromFile(configPath string) (*VirtualClusterClient, 
 		region:            profile.Region,
 		currentProfile:    profile.Name,
 		profiles:          map[string]clientProfile{profile.Name: profile},
-		httpClient:        &http.Client{Timeout: 10 * time.Second},
+		httpClient:        newPlatformHTTPClient(),
 	}
 	selected, ok := applyProcessEnvironmentSelection(client)
 	if !ok {
