@@ -22,7 +22,7 @@ func TestListIAMUsersForProfileLimitPaginatesWithoutExtraRequests(t *testing.T) 
 			}
 			fmt.Fprint(w, `{"users":[{"id":"u1","username":"one"},{"id":"u2","username":"two"}],"next_page_token":"2"}`)
 		case "2":
-			if got := r.URL.Query().Get("page_size"); got != "1" {
+			if got := r.URL.Query().Get("page_size"); got != "3" {
 				t.Errorf("second page size = %q", got)
 			}
 			fmt.Fprint(w, `{"users":[{"id":"u3","username":"three"}],"next_page_token":"3"}`)

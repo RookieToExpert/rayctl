@@ -24,7 +24,7 @@ func TestListUsersStopsOnTokenCycle(t *testing.T) {
 		})},
 	}
 	items, err := client.listUsersForProfile(context.Background(), clientProfile{Name: "test", AccessKey: "ak", SecretKey: "sk", IAMBaseURL: "https://iam.example.test"})
-	if err != nil || requests != 3 || len(items) != 3 {
+	if err == nil || !strings.Contains(err.Error(), "分页游标重复") || requests != 3 || len(items) != 0 {
 		t.Fatalf("items = %d, requests = %d, err = %v", len(items), requests, err)
 	}
 }

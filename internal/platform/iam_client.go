@@ -301,41 +301,22 @@ func (c *VirtualClusterClient) ListIAMUsersForProfile(ctx context.Context, profi
 }
 
 func (c *VirtualClusterClient) listUsersForProfileLimit(ctx context.Context, profile clientProfile, limit int, validOnly bool) ([]IAMUser, error) {
-	pageToken := "1"
-	cursor := newPageCursor(pageToken)
-	users := make([]IAMUser, 0)
-	for {
+	return collectIAMPages(ctx, defaultPageLimit, limit, false, func(token string, size int) (iamPage[IAMUser], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/idp/v1/users"
-		query := u.Query()
-		pageSize := defaultPageLimit
-		if limit > 0 && limit-len(users) < pageSize {
-			pageSize = limit - len(users)
-		}
-		query.Set("page_size", fmt.Sprintf("%d", pageSize))
-		query.Set("page_token", pageToken)
+		q := u.Query()
+		q.Set("page_size", strconv.Itoa(size))
+		q.Set("page_token", token)
 		if validOnly {
-			query.Set("filter", `(status="valid")`)
+			q.Set("filter", `(status="valid")`)
 		}
-		u.RawQuery = query.Encode()
-
+		u.RawQuery = q.Encode()
 		var payload iamUserListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return iamPage[IAMUser]{}, err
 		}
-		if len(payload.Users) == 0 {
-			break
-		}
-		users = append(users, payload.Users...)
-		if limit > 0 && len(users) >= limit {
-			return users[:limit], nil
-		}
-		if !cursor.advance(payload.NextPageToken) {
-			break
-		}
-		pageToken = payload.NextPageToken
-	}
-	return users, nil
+		return iamPage[IAMUser]{payload.Users, payload.NextPageToken, payload.TotalSize}, nil
+	})
 }
 
 func (c *VirtualClusterClient) findExactUsersForProfile(ctx context.Context, profile clientProfile, identifier string) ([]IAMUser, error) {
@@ -512,34 +493,20 @@ func (c *VirtualClusterClient) ListUserGroupsForProfile(ctx context.Context, pro
 	if userID == "" {
 		return nil, fmt.Errorf("user id is required")
 	}
-
-	pageToken := "1"
-	cursor := newPageCursor(pageToken)
-	result := make([]IAMGroup, 0)
-	for {
+	return collectIAMPages(ctx, defaultPageLimit, 0, false, func(token string, size int) (iamPage[IAMGroup], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = fmt.Sprintf("/iam/idp/v1/users/%s:getGroups", url.PathEscape(userID))
-		query := u.Query()
-		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
-		query.Set("page_token", pageToken)
-		query.Set("order_by", "create_time desc")
-		u.RawQuery = query.Encode()
-
+		q := u.Query()
+		q.Set("page_size", strconv.Itoa(size))
+		q.Set("page_token", token)
+		q.Set("order_by", "create_time desc")
+		u.RawQuery = q.Encode()
 		var payload iamGroupListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return iamPage[IAMGroup]{}, err
 		}
-		if len(payload.Groups) == 0 {
-			break
-		}
-		result = append(result, payload.Groups...)
-		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if !cursor.advance(nextToken) {
-			break
-		}
-		pageToken = nextToken
-	}
-	return result, nil
+		return iamPage[IAMGroup]{payload.Groups, payload.NextPageToken, payload.TotalSize}, nil
+	})
 }
 
 func (c *VirtualClusterClient) ListGroupUsersForProfile(ctx context.Context, profileName string, groupID string) ([]IAMUser, error) {
@@ -551,31 +518,20 @@ func (c *VirtualClusterClient) ListGroupUsersForProfile(ctx context.Context, pro
 	if groupID == "" {
 		return nil, fmt.Errorf("group id is required")
 	}
-
-	pageToken := "1"
-	cursor := newPageCursor(pageToken)
-	result := make([]IAMUser, 0)
-	for {
+	return collectIAMPages(ctx, defaultPageLimit, 0, false, func(token string, size int) (iamPage[IAMUser], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = fmt.Sprintf("/iam/idp/v1/groups/%s:getUsers", url.PathEscape(groupID))
-		query := u.Query()
-		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
-		query.Set("page_token", pageToken)
-		query.Set("order_by", "join_time desc")
-		u.RawQuery = query.Encode()
-
+		q := u.Query()
+		q.Set("page_size", strconv.Itoa(size))
+		q.Set("page_token", token)
+		q.Set("order_by", "join_time desc")
+		u.RawQuery = q.Encode()
 		var payload iamUserListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return iamPage[IAMUser]{}, err
 		}
-		result = append(result, payload.Users...)
-		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if len(payload.Users) == 0 || (payload.TotalSize > 0 && len(result) >= payload.TotalSize) || !cursor.advance(nextToken) {
-			break
-		}
-		pageToken = nextToken
-	}
-	return result, nil
+		return iamPage[IAMUser]{payload.Users, payload.NextPageToken, payload.TotalSize}, nil
+	})
 }
 
 func (c *VirtualClusterClient) listGroupsForProfile(ctx context.Context, profile clientProfile) ([]IAMGroup, error) {
@@ -591,40 +547,20 @@ func (c *VirtualClusterClient) ListIAMGroupsForProfile(ctx context.Context, prof
 }
 
 func (c *VirtualClusterClient) listGroupsForProfileLimit(ctx context.Context, profile clientProfile, limit int) ([]IAMGroup, error) {
-	pageToken := "1"
-	cursor := newPageCursor(pageToken)
-	result := make([]IAMGroup, 0)
-	for {
+	return collectIAMPages(ctx, defaultPageLimit, limit, false, func(token string, size int) (iamPage[IAMGroup], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/idp/v1/groups"
-		query := u.Query()
-		pageSize := defaultPageLimit
-		if limit > 0 && limit-len(result) < pageSize {
-			pageSize = limit - len(result)
-		}
-		query.Set("page_size", fmt.Sprintf("%d", pageSize))
-		query.Set("page_token", pageToken)
-		query.Set("order_by", "create_time desc")
-		u.RawQuery = query.Encode()
-
+		q := u.Query()
+		q.Set("page_size", strconv.Itoa(size))
+		q.Set("page_token", token)
+		q.Set("order_by", "create_time desc")
+		u.RawQuery = q.Encode()
 		var payload iamGroupListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return iamPage[IAMGroup]{}, err
 		}
-		if len(payload.Groups) == 0 {
-			break
-		}
-		result = append(result, payload.Groups...)
-		if limit > 0 && len(result) >= limit {
-			return result[:limit], nil
-		}
-		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if !cursor.advance(nextToken) {
-			break
-		}
-		pageToken = nextToken
-	}
-	return result, nil
+		return iamPage[IAMGroup]{payload.Groups, payload.NextPageToken, payload.TotalSize}, nil
+	})
 }
 
 func (c *VirtualClusterClient) FindGroups(ctx context.Context, identifier string) ([]IAMGroup, error) {
@@ -792,52 +728,23 @@ func (c *VirtualClusterClient) ListIAMBindingPoliciesForSubjectsProfile(ctx cont
 }
 
 func (c *VirtualClusterClient) listIAMBindingPoliciesWithProfile(ctx context.Context, profile clientProfile, filter string) ([]IAMBindingPolicy, error) {
-	pageToken := "1"
-	cursor := newPageCursor(pageToken)
-	result := make([]IAMBindingPolicy, 0)
-	for {
+	return collectIAMPages(ctx, defaultPageLimit, 0, true, func(token string, size int) (iamPage[IAMBindingPolicy], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/authz/v1/bindingPolicies"
-		query := u.Query()
-		query.Set("page_token", pageToken)
-		query.Set("pageSize", fmt.Sprintf("%d", defaultPageLimit))
+		q := u.Query()
+		q.Set("pageSize", strconv.Itoa(size))
+		q.Set("page_token", token)
+		q.Set("order_by", "create_time desc")
 		if strings.TrimSpace(filter) != "" {
-			query.Set("filter", filter)
+			q.Set("filter", filter)
 		}
-		query.Set("order_by", "create_time desc")
-		u.RawQuery = query.Encode()
-
+		u.RawQuery = q.Encode()
 		var payload iamBindingPolicyListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return iamPage[IAMBindingPolicy]{}, err
 		}
-		if len(payload.Policies) == 0 {
-			break
-		}
-		result = append(result, payload.Policies...)
-
-		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if nextToken != "" && nextToken != pageToken {
-			if !cursor.advance(nextToken) {
-				break
-			}
-			pageToken = nextToken
-			continue
-		}
-		if len(payload.Policies) < defaultPageLimit {
-			break
-		}
-		current, err := strconv.Atoi(pageToken)
-		if err != nil {
-			break
-		}
-		nextToken = strconv.Itoa(current + 1)
-		if !cursor.advance(nextToken) {
-			break
-		}
-		pageToken = nextToken
-	}
-	return result, nil
+		return iamPage[IAMBindingPolicy]{payload.Policies, payload.NextPageToken, payload.TotalSize}, nil
+	})
 }
 
 func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo, error) {
@@ -845,22 +752,17 @@ func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo,
 	if !ok {
 		return nil, fmt.Errorf("no current platform profile available")
 	}
-
-	pageToken := "1"
-	cursor := newPageCursor(pageToken)
-	result := make([]IAMRoleInfo, 0)
-	for {
+	return collectIAMPages(ctx, 200, 0, true, func(token string, size int) (iamPage[IAMRoleInfo], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/authz/v1/roles"
-		query := u.Query()
-		query.Set("page_size", "200")
-		query.Set("page_token", pageToken)
-		query.Set("filter", "")
-		u.RawQuery = query.Encode()
-
+		q := u.Query()
+		q.Set("page_size", strconv.Itoa(size))
+		q.Set("page_token", token)
+		q.Set("filter", "")
+		u.RawQuery = q.Encode()
 		var payload iamRoleListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return iamPage[IAMRoleInfo]{}, err
 		}
 		roles := payload.Roles
 		if len(roles) == 0 {
@@ -869,32 +771,8 @@ func (c *VirtualClusterClient) ListIAMRoles(ctx context.Context) ([]IAMRoleInfo,
 		if len(roles) == 0 {
 			roles = payload.Items
 		}
-		if len(roles) == 0 {
-			break
-		}
-		result = append(result, roles...)
-		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if nextToken != "" && nextToken != pageToken {
-			if !cursor.advance(nextToken) {
-				break
-			}
-			pageToken = nextToken
-			continue
-		}
-		if len(roles) < 200 {
-			break
-		}
-		current, err := strconv.Atoi(pageToken)
-		if err != nil {
-			break
-		}
-		nextToken = strconv.Itoa(current + 1)
-		if !cursor.advance(nextToken) {
-			break
-		}
-		pageToken = nextToken
-	}
-	return result, nil
+		return iamPage[IAMRoleInfo]{roles, payload.NextPageToken, payload.TotalSize}, nil
+	})
 }
 
 func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string, bearerToken string) ([]IAMRoleInfo, error) {
@@ -906,23 +784,18 @@ func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string
 	if scope == "" {
 		return nil, fmt.Errorf("scope is required")
 	}
-
-	pageToken := "1"
-	cursor := newPageCursor(pageToken)
-	result := make([]IAMRoleInfo, 0)
-	for {
+	return collectIAMPages(ctx, 100, 0, true, func(token string, size int) (iamPage[IAMRoleInfo], error) {
 		u, _ := url.Parse(profile.IAMBaseURL)
 		u.Path = "/iam/authz/v1/roles:own"
-		query := u.Query()
-		query.Set("page_size", "100")
-		query.Set("page_token", pageToken)
-		query.Set("scope", scope)
-		query.Set("level", "resources")
-		u.RawQuery = query.Encode()
-
+		q := u.Query()
+		q.Set("page_size", strconv.Itoa(size))
+		q.Set("page_token", token)
+		q.Set("scope", scope)
+		q.Set("level", "resources")
+		u.RawQuery = q.Encode()
 		var payload iamRoleListResponse
 		if err := c.getJSONWithBearerProfile(ctx, profile, u.String(), bearerToken, &payload); err != nil {
-			return nil, err
+			return iamPage[IAMRoleInfo]{}, err
 		}
 		roles := payload.Roles
 		if len(roles) == 0 {
@@ -931,32 +804,8 @@ func (c *VirtualClusterClient) ListOwnIAMRoles(ctx context.Context, scope string
 		if len(roles) == 0 {
 			roles = payload.Items
 		}
-		if len(roles) == 0 {
-			break
-		}
-		result = append(result, roles...)
-		nextToken := strings.TrimSpace(payload.NextPageToken)
-		if nextToken != "" && nextToken != pageToken {
-			if !cursor.advance(nextToken) {
-				break
-			}
-			pageToken = nextToken
-			continue
-		}
-		if len(roles) < 100 {
-			break
-		}
-		current, err := strconv.Atoi(pageToken)
-		if err != nil {
-			break
-		}
-		nextToken = strconv.Itoa(current + 1)
-		if !cursor.advance(nextToken) {
-			break
-		}
-		pageToken = nextToken
-	}
-	return result, nil
+		return iamPage[IAMRoleInfo]{roles, payload.NextPageToken, payload.TotalSize}, nil
+	})
 }
 
 func (c *VirtualClusterClient) FindIAMResourceScope(ctx context.Context, name string, searchTerm string, bearerToken string) (*StorageVolumeResource, error) {
