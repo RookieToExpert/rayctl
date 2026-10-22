@@ -33,7 +33,7 @@ var gpuVendors = []gpuVendor{
 		"util": {"npu_chip_info_utilization"}, "mem_used": {"container_npu_used_memory", "npu_chip_info_hbm_used_memory"},
 		"mem_total": {"container_npu_total_memory", "npu_chip_info_hbm_total_memory"}, "ras": nil,
 		"ecc":        {"npu_chip_info_hbm_ecc_single_bit_error_cnt", "npu_chip_info_hbm_ecc_double_bit_error_cnt"},
-		"error_code": {"npu_chip_info_error_code"}, "isolated_pages": {"npu_chip_info_hbm_ecc_isolated_pages_cnt"}, "power": nil, "temp": nil,
+		"error_code": {"npu_chip_info_error_code"}, "isolated_pages": {"npu_chip_info_hbm_ecc_single_bit_isolated_pages_cnt", "npu_chip_info_hbm_ecc_double_bit_isolated_pages_cnt"}, "power": nil, "temp": nil,
 	}},
 }
 
