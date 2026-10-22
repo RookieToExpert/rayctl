@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,6 +37,16 @@ func TestFormatJobGetTimeoutError(t *testing.T) {
 		if !strings.Contains(err.Error(), fragment) {
 			t.Fatalf("timeout error %q does not contain %q", err, fragment)
 		}
+	}
+}
+
+func TestFormatJobGetPreservesBackendDeadlineBeforeCommandDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	backendErr := fmt.Errorf("platform scan did not finish: %w", context.DeadlineExceeded)
+	err := formatJobGetError(ctx, "missing", 20*time.Second, backendErr)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "platform scan") || strings.Contains(err.Error(), "查询超过 20s") {
+		t.Fatalf("backend deadline incorrectly reported as command timeout: %v", err)
 	}
 }
 

@@ -80,7 +80,7 @@ func (s *JobService) getJob(ctx context.Context, identifier string, includeLogs 
 			return result, nil
 		} else {
 			var ambiguousErr *ambiguousJobMatchError
-			if errors.As(err, &ambiguousErr) {
+			if errors.As(err, &ambiguousErr) || isJobLookupFailure(err) {
 				return nil, err
 			}
 		}

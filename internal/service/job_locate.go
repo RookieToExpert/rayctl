@@ -94,6 +94,7 @@ func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string
 		return identity, nil
 	}
 
+	var lookupErrs []error
 	if s.vcClient != nil && shouldLookupJobByPlatform(identifier) {
 		if identity, err := s.findPlatformJobIdentity(ctx, identifier); err == nil {
 			return identity, nil
@@ -102,23 +103,29 @@ func (s *JobService) locateJobForPlatform(ctx context.Context, identifier string
 			if errors.As(err, &ambiguousErr) {
 				return nil, err
 			}
-		}
-	}
-
-	if looksLikePodBackedIdentifier(identifier) {
-		if pod, err := s.findSinglePodByJobName(ctx, identifier); err == nil && pod != nil {
-			return s.platformIdentityFromHostPod(ctx, *pod), nil
-		}
-		if pod, err := s.findSeedPodForJobName(ctx, identifier); err == nil && pod != nil {
-			return s.platformIdentityFromHostPod(ctx, *pod), nil
+			lookupErrs = append(lookupErrs, err)
 		}
 	}
 
 	if pod, err := s.findHostPodForIdentifier(ctx, identifier); err == nil && pod != nil {
 		return s.platformIdentityFromHostPod(ctx, *pod), nil
+	} else {
+		var ambiguousErr *ambiguousJobMatchError
+		if errors.As(err, &ambiguousErr) {
+			return nil, err
+		}
+		lookupErrs = append(lookupErrs, err)
 	}
 
-	identity, _, err := s.resolveJobIdentity(ctx, identifier)
+	job, err := s.findJob(ctx, identifier)
+	if err != nil {
+		var ambiguousErr *ambiguousJobMatchError
+		if errors.As(err, &ambiguousErr) {
+			return nil, err
+		}
+		return nil, jobLookupFailure(identifier, append(lookupErrs, err)...)
+	}
+	identity, _, err := s.resolveJobIdentityFromJobObject(ctx, job)
 	if err != nil {
 		return nil, err
 	}
@@ -168,21 +175,18 @@ func (s *JobService) locateJobByUID(ctx context.Context, uid string) (*jobIdenti
 		return nil, fmt.Errorf("kubernetes clients are required for job uid lookup")
 	}
 
-	errorsBySource := make([]string, 0, resultCount)
+	errorsBySource := make([]error, 0, resultCount)
 	for range resultCount {
 		result := <-results
 		if result.identity != nil {
 			cancel()
 			return result.identity, nil
 		}
-		if result.err != nil && !errors.Is(result.err, context.Canceled) {
-			errorsBySource = append(errorsBySource, result.err.Error())
+		if result.err != nil {
+			errorsBySource = append(errorsBySource, result.err)
 		}
 	}
-	if len(errorsBySource) > 0 {
-		return nil, fmt.Errorf("job uid %q not found: %s", uid, strings.Join(errorsBySource, "; "))
-	}
-	return nil, fmt.Errorf("job uid %q not found", uid)
+	return nil, jobLookupFailure(uid, errorsBySource...)
 }
 
 func (s *JobService) findPodIdentityByUID(ctx context.Context, uid string) (*jobIdentity, error) {
@@ -195,10 +199,10 @@ func (s *JobService) findPodIdentityByUID(ctx context.Context, uid string) (*job
 
 func (s *JobService) findPodIdentityByUIDAndSelector(ctx context.Context, uid string, labelSelector string) (*jobIdentity, error) {
 	options := metav1.ListOptions{
-		LabelSelector:   labelSelector,
-		Limit:           jobUIDLookupPageSize,
-		ResourceVersion: "0",
+		LabelSelector: labelSelector,
+		Limit:         jobUIDLookupPageSize,
 	}
+	seen := map[string]bool{}
 	for {
 		podMetadata, continueToken, err := s.listPodMetadataPage(ctx, options)
 		if err != nil {
@@ -219,10 +223,13 @@ func (s *JobService) findPodIdentityByUIDAndSelector(ctx context.Context, uid st
 		if strings.TrimSpace(continueToken) == "" {
 			break
 		}
+		if seen[continueToken] {
+			return nil, fmt.Errorf("HC Pod UID metadata pagination cursor repeated; lookup incomplete")
+		}
+		seen[continueToken] = true
 		options.Continue = continueToken
-		options.ResourceVersion = ""
 	}
-	return nil, fmt.Errorf("pod for job uid not found")
+	return nil, &jobNotFoundError{identifier: uid}
 }
 
 func (s *JobService) listPodMetadataPage(ctx context.Context, options metav1.ListOptions) ([]metav1.PartialObjectMetadata, string, error) {
@@ -233,7 +240,7 @@ func (s *JobService) listPodMetadataPage(ctx context.Context, options metav1.Lis
 		err := restClient.Get().
 			Resource("pods").
 			VersionedParams(&options, metav1.ParameterCodec).
-			SetHeader("Accept", "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io").
+			SetHeader("Accept", jobLookupMetadataAccept).
 			Do(ctx).
 			Into(list)
 		if err != nil {
@@ -254,44 +261,33 @@ func (s *JobService) listPodMetadataPage(ctx context.Context, options metav1.Lis
 }
 
 func (s *JobService) findHostJobIdentityByUID(ctx context.Context, uid string) (*jobIdentity, error) {
-	options := metav1.ListOptions{
-		Limit:           jobUIDLookupPageSize,
-		ResourceVersion: "0",
+	jobs, err := s.listJobLookupMetadata(ctx)
+	if err != nil {
+		return nil, err
 	}
-	for {
-		jobs, err := s.dynamicClient.Resource(volcanoJobGVR).Namespace(metav1.NamespaceAll).List(ctx, options)
-		if err != nil {
-			return nil, fmt.Errorf("list volcano jobs for uid: %w", err)
+	for i := range jobs {
+		job := &jobs[i]
+		logicalUID := strings.TrimSpace(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"))
+		if string(job.GetUID()) != uid && logicalUID != uid {
+			continue
 		}
-		for i := range jobs.Items {
-			job := &jobs.Items[i]
-			logicalUID := strings.TrimSpace(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"))
-			if string(job.GetUID()) != uid && logicalUID != uid {
-				continue
-			}
-			hostNamespace := firstNonEmpty(
-				getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-host-namespace"),
-				job.GetNamespace(),
-			)
-			identity := &jobIdentity{
-				Name:          firstNonEmpty(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"), job.GetName()),
-				Namespace:     firstNonEmpty(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-namespace"), job.GetNamespace()),
-				UID:           firstNonEmpty(logicalUID, string(job.GetUID()), uid),
-				Submitter:     firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), "-"),
-				HostNamespace: hostNamespace,
-				HostJobName:   job.GetName(),
-			}
-			identity.PodGroupName = derivePodGroupName(identity.Name, identity.UID)
-			identity.VClusterName = s.resolveVClusterNameFromNamespace(ctx, hostNamespace)
-			return identity, nil
+		hostNamespace := firstNonEmpty(
+			getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-host-namespace"),
+			job.GetNamespace(),
+		)
+		identity := &jobIdentity{
+			Name:          firstNonEmpty(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"), job.GetName()),
+			Namespace:     firstNonEmpty(getNestedString(job.Object, "metadata", "annotations", "vcluster.loft.sh/object-namespace"), job.GetNamespace()),
+			UID:           firstNonEmpty(logicalUID, string(job.GetUID()), uid),
+			Submitter:     firstNonEmpty(getNestedString(job.Object, "metadata", "labels", "lepton.sensetime.com/submitter"), getNestedString(job.Object, "metadata", "annotations", "lepton.sensetime.com/submitter"), "-"),
+			HostNamespace: hostNamespace,
+			HostJobName:   job.GetName(),
 		}
-		if strings.TrimSpace(jobs.GetContinue()) == "" {
-			break
-		}
-		options.Continue = jobs.GetContinue()
-		options.ResourceVersion = ""
+		identity.PodGroupName = derivePodGroupName(identity.Name, identity.UID)
+		identity.VClusterName = s.resolveVClusterNameFromNamespace(ctx, hostNamespace)
+		return identity, nil
 	}
-	return nil, fmt.Errorf("volcano job uid not found")
+	return nil, &jobNotFoundError{identifier: uid}
 }
 
 func looksLikePodBackedIdentifier(identifier string) bool {
@@ -323,6 +319,7 @@ func (s *JobService) findSeedPodForJobName(ctx context.Context, jobName string) 
 func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier string) (*jobIdentity, error) {
 	currentProfile := strings.TrimSpace(s.vcClient.CurrentProfileName())
 	currentClusters, currentErr := s.vcClient.ListCurrentProfileVirtualClusters(ctx)
+	var lookupErrs []error
 	if currentErr == nil {
 		identity, err := s.findPlatformJobIdentityInClusters(ctx, identifier, currentClusters)
 		if err == nil {
@@ -332,18 +329,10 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		if errors.As(err, &ambiguousErr) {
 			return nil, err
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
+		lookupErrs = append(lookupErrs, err)
 	}
 
-	vclusters, err := s.vcClient.ListVirtualClusters(ctx)
-	if err != nil {
-		if currentErr != nil {
-			return nil, currentErr
-		}
-		return nil, err
-	}
+	vclusters, inventoryErr := s.vcClient.ListLookupVirtualClusters(ctx)
 	if currentErr == nil && currentProfile != "" {
 		filtered := vclusters[:0]
 		for _, vc := range vclusters {
@@ -354,12 +343,20 @@ func (s *JobService) findPlatformJobIdentity(ctx context.Context, identifier str
 		}
 		vclusters = filtered
 	}
-	return s.findPlatformJobIdentityInClusters(ctx, identifier, vclusters)
+	identity, err := s.findPlatformJobIdentityInClusters(ctx, identifier, vclusters)
+	if err == nil {
+		return identity, nil
+	}
+	var ambiguousErr *ambiguousJobMatchError
+	if errors.As(err, &ambiguousErr) {
+		return nil, err
+	}
+	return nil, jobLookupFailure(identifier, append(lookupErrs, inventoryErr, err)...)
 }
 
 func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, identifier string, vclusters []platform.VirtualCluster) (*jobIdentity, error) {
 	if len(vclusters) == 0 {
-		return nil, fmt.Errorf("platform volcano job %q not found", identifier)
+		return nil, jobLookupFailure(identifier, ctx.Err())
 	}
 
 	type searchResult struct {
@@ -390,6 +387,7 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 				// Names are not confined to default; preserve every namespace match.
 				jobs, getErr := s.vcClient.ListVolcanoJobsPageForProfile(scanCtx, vc.ProfileName, vcRef, "name="+strconv.Quote(identifier), 0)
 				if getErr != nil {
+					results <- searchResult{err: fmt.Errorf("profile %q VC %q: %w", vc.ProfileName, vcRef, getErr)}
 					continue
 				}
 				for i := range jobs {
@@ -423,9 +421,11 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 	}()
 
 	matches := make([]jobIdentity, 0, len(vclusters))
+	var lookupErrs []error
 	seen := make(map[string]struct{}, len(vclusters))
 	for result := range results {
 		if result.err != nil {
+			lookupErrs = append(lookupErrs, result.err)
 			continue
 		}
 		if result.identity != nil {
@@ -455,11 +455,7 @@ func (s *JobService) findPlatformJobIdentityInClusters(ctx context.Context, iden
 			Matches:    matches,
 		}
 	}
-	if err := scanCtx.Err(); err != nil {
-		return nil, fmt.Errorf("platform volcano job %q scan did not finish: %w", identifier, err)
-	}
-
-	return nil, fmt.Errorf("platform volcano job %q not found", identifier)
+	return nil, jobLookupFailure(identifier, append(lookupErrs, scanCtx.Err())...)
 }
 
 func (s *JobService) findVClusterHostNamespace(ctx context.Context, vclusterUID string, virtualNamespace string) string {
@@ -513,20 +509,19 @@ func platformVCRefs(vc platform.VirtualCluster) []string {
 }
 
 func (s *JobService) findJob(ctx context.Context, identifier string) (*unstructured.Unstructured, error) {
-	list, err := s.dynamicClient.Resource(volcanoJobGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list volcano jobs: %w", err)
-	}
-
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return nil, fmt.Errorf("job identifier is required")
 	}
+	items, err := s.listJobLookupMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	var exact []*unstructured.Unstructured
 	var fuzzy []*unstructured.Unstructured
-	for i := range list.Items {
-		item := &list.Items[i]
+	for i := range items {
+		item := &items[i]
 		logicalName := strings.TrimSpace(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-name"))
 		logicalUID := strings.TrimSpace(getNestedString(item.Object, "metadata", "annotations", "vcluster.loft.sh/object-uid"))
 		switch {
@@ -538,7 +533,7 @@ func (s *JobService) findJob(ctx context.Context, identifier string) (*unstructu
 	}
 
 	if len(exact) == 1 {
-		return exact[0], nil
+		return s.dynamicClient.Resource(volcanoJobGVR).Namespace(exact[0].GetNamespace()).Get(ctx, exact[0].GetName(), metav1.GetOptions{})
 	}
 	if len(exact) > 1 {
 		return nil, &ambiguousJobMatchError{
@@ -547,7 +542,7 @@ func (s *JobService) findJob(ctx context.Context, identifier string) (*unstructu
 		}
 	}
 	if len(fuzzy) == 1 {
-		return fuzzy[0], nil
+		return s.dynamicClient.Resource(volcanoJobGVR).Namespace(fuzzy[0].GetNamespace()).Get(ctx, fuzzy[0].GetName(), metav1.GetOptions{})
 	}
 	if len(fuzzy) > 1 {
 		return nil, &ambiguousJobMatchError{
@@ -556,7 +551,7 @@ func (s *JobService) findJob(ctx context.Context, identifier string) (*unstructu
 		}
 	}
 
-	return nil, fmt.Errorf("volcano job %q not found in current cluster", identifier)
+	return nil, &jobNotFoundError{identifier: identifier}
 }
 
 func buildAmbiguousMatchesFromJobs(items []*unstructured.Unstructured) []jobIdentity {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	corev1 "k8s.io/api/core/v1"
@@ -88,25 +89,22 @@ func desiredReplicaTotal(job *unstructured.Unstructured) int {
 }
 
 func (s *JobService) resolveJobFromPods(ctx context.Context, identifier string, jobLookupErr error) (*jobIdentity, []corev1.Pod, error) {
-	allPods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("%v; fallback list pods failed: %w", jobLookupErr, err)
+	var ambiguousErr *ambiguousJobMatchError
+	if errors.As(jobLookupErr, &ambiguousErr) {
+		return nil, nil, jobLookupErr
 	}
-
-	candidates := make([]corev1.Pod, 0)
-	for _, pod := range allPods.Items {
-		if !isSSPManagedWorkloadPod(pod) && podMatchesIdentifier(pod, identifier) {
-			candidates = append(candidates, pod)
-		}
+	candidates, err := s.matchingHostPodMetadata(ctx, identifier)
+	if err != nil {
+		return nil, nil, jobLookupFailure(identifier, jobLookupErr, err)
 	}
 
 	if len(candidates) == 0 {
-		return nil, nil, jobLookupErr
+		return nil, nil, jobLookupFailure(identifier, jobLookupErr, ctx.Err())
 	}
 
 	groups := groupPodsByDerivedJob(candidates)
 	if len(groups) == 0 {
-		return nil, nil, jobLookupErr
+		return nil, nil, jobLookupFailure(identifier, jobLookupErr, ctx.Err())
 	}
 	if len(groups) > 1 {
 		return nil, nil, &ambiguousJobMatchError{
@@ -126,7 +124,11 @@ func (s *JobService) resolveJobFromPods(ctx context.Context, identifier string, 
 		return podInspectLess(selectedPods[i], selectedPods[j])
 	})
 
-	seed := selectedPods[0]
+	seedPod, err := s.clientset.CoreV1().Pods(selectedPods[0].Namespace).Get(ctx, selectedPods[0].Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get matched Pod: %w", err)
+	}
+	seed := *seedPod
 	identity := &jobIdentity{
 		Name:         deriveJobName(seed),
 		Namespace:    deriveLogicalNamespace(seed),
@@ -139,10 +141,10 @@ func (s *JobService) resolveJobFromPods(ctx context.Context, identifier string, 
 	_ = selectedKey
 	siblingPods, err := s.listSiblingPods(ctx, seed, identity)
 	if err != nil {
-		return identity, selectedPods, nil
+		return nil, nil, fmt.Errorf("list matched job Pods: %w", err)
 	}
 	if len(siblingPods) == 0 {
-		return identity, selectedPods, nil
+		return identity, []corev1.Pod{seed}, nil
 	}
 	return identity, siblingPods, nil
 }
@@ -188,6 +190,9 @@ func (s *JobService) findHostPodForIdentifier(ctx context.Context, identifier st
 		return nil, fmt.Errorf("job identifier is required")
 	}
 
+	if s.clientset == nil {
+		return nil, fmt.Errorf("Kubernetes Pod client unavailable")
+	}
 	if !looksLikeUUID(id) {
 		if pod, err := s.findSinglePodByName(ctx, id); err == nil && pod != nil && !isSSPManagedWorkloadPod(*pod) {
 			return pod, nil
@@ -197,19 +202,12 @@ func (s *JobService) findHostPodForIdentifier(ctx context.Context, identifier st
 		}
 	}
 
-	allPods, err := s.clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	matched, err := s.matchingHostPodMetadata(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("fallback list pods: %w", err)
-	}
-
-	matched := make([]corev1.Pod, 0)
-	for _, pod := range allPods.Items {
-		if !isSSPManagedWorkloadPod(pod) && podMatchesIdentifier(pod, id) {
-			matched = append(matched, pod)
-		}
+		return nil, err
 	}
 	if len(matched) == 0 {
-		return nil, fmt.Errorf("host cluster pod for %q not found", id)
+		return nil, &jobNotFoundError{identifier: id}
 	}
 
 	groups := groupPodsByDerivedJob(matched)
@@ -223,7 +221,7 @@ func (s *JobService) findHostPodForIdentifier(ctx context.Context, identifier st
 	sort.Slice(matched, func(i, j int) bool {
 		return podInspectLess(matched[i], matched[j])
 	})
-	return &matched[0], nil
+	return s.clientset.CoreV1().Pods(matched[0].Namespace).Get(ctx, matched[0].Name, metav1.GetOptions{})
 }
 
 func (s *JobService) findSinglePodByName(ctx context.Context, podName string) (*corev1.Pod, error) {
