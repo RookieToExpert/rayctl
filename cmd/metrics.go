@@ -24,13 +24,15 @@ type metricsFlags struct {
 	pods         []string
 	by           string
 	output       string
+	health       bool
+	detail       bool
 }
 
 func newMetricsCmd() *cobra.Command {
 	metricsCmd := &cobra.Command{
 		Use:   "metrics",
 		Short: "查询工作负载的原始监控指标与时间线",
-		Long:  "查询 VictoriaMetrics 中的工作负载指标。mem/gpu/restart 默认读取原始采样点，只有显式指定 --step 时才使用 query_range 固定步长查询。",
+		Long:  "查询 VictoriaMetrics 中的工作负载指标。mem/gpu 默认按序列输出摘要，--detail 查看逐点明细；默认读取原始采样点，只有显式指定 --step 时才使用 query_range 固定步长查询。",
 	}
 	metricsCmd.AddCommand(newMetricsMemoryCmd())
 	metricsCmd.AddCommand(newMetricsGPUCmd())
@@ -96,6 +98,7 @@ func newMetricsGPUCmd() *cobra.Command {
 		},
 	}
 	bindMetricsWorkloadFlags(command, &flags)
+	command.Flags().BoolVar(&flags.health, "health", false, "附加异常卡 RAS/ECC/错误码，缺失指标明确显示为无数据")
 	return command
 }
 
@@ -184,6 +187,9 @@ func newMetricsRawCmd() *cobra.Command {
 }
 
 func bindMetricsWorkloadFlags(command *cobra.Command, flags *metricsFlags) {
+	if strings.HasPrefix(command.Use, "gpu ") || strings.HasPrefix(command.Use, "mem ") {
+		command.Flags().BoolVar(&flags.detail, "detail", false, "输出逐采样点明细；默认每个聚合序列一行摘要")
+	}
 	command.Flags().StringVarP(&flags.workloadType, "type", "t", "auto", "工作负载类型: auto、aid、ait、air")
 	command.Flags().StringVarP(&flags.workspace, "workspace", "w", "", "指定 workspace，重名工作负载时必填")
 	command.Flags().StringVar(&flags.since, "since", "2h", "回溯窗口，例如 30m、2h、24h")
@@ -230,7 +236,7 @@ func (flags metricsFlags) queryOptions(cmd *cobra.Command, workload string) (met
 		}
 	}
 	return metricsquery.QueryOptions{
-		Workload: workload, Type: workloadType, Workspace: strings.TrimSpace(flags.workspace), Pods: flags.pods, By: by,
+		Workload: workload, Type: workloadType, Workspace: strings.TrimSpace(flags.workspace), Health: flags.health, Detail: flags.detail, Pods: flags.pods, By: by,
 		Start: start, End: end, Step: step, UseStep: step > 0,
 	}, nil
 }

@@ -78,6 +78,7 @@ type workloadIdentity struct {
 	Workspace string
 	Pods      []string
 	Warnings  []string
+	AllPods   []string
 }
 
 func (s *Service) Memory(ctx context.Context, options QueryOptions) (*Result, error) {
@@ -116,53 +117,6 @@ func (s *Service) Memory(ctx context.Context, options QueryOptions) (*Result, er
 	}
 	if len(result.Samples) == 0 {
 		result.Warnings = append(result.Warnings, "查询区间内没有内存采样点")
-	}
-	return result, nil
-}
-
-func (s *Service) GPU(ctx context.Context, options QueryOptions) (*Result, error) {
-	if options.Environment == "" {
-		options.Environment = s.environment
-	}
-	identity, err := s.resolveWorkload(ctx, options)
-	if err != nil {
-		return nil, err
-	}
-	options = applyIdentity(options, identity)
-	raw, err := s.queryMetric(ctx, acceleratorMetric, podMatchers(options.Pods), options)
-	if err != nil {
-		return nil, err
-	}
-	preferred := preferWorkspaceSeries(raw)
-	merged := mergeRawSeries(preferred, acceleratorIdentity, "percent")
-	grouped := merged
-	if options.By == "pod" {
-		grouped = aggregateSeries(merged, options.By, aggregateMax)
-	}
-	result := buildResult("gpu", options, identity, grouped)
-	result.Warnings = append(result.Warnings, identity.Warnings...)
-	if len(result.Samples) == 0 {
-		return nil, fmt.Errorf("工作负载 %q 没有加速卡指标", options.Workload)
-	}
-
-	memoryUsedMetric := acceleratorMemoryUsed
-	memoryTotalMetric := acceleratorMemoryTotal
-	if containsHardwareType(merged, "npu.com/gpu") {
-		memoryUsedMetric = npuMemoryUsedMetric
-		memoryTotalMetric = npuMemoryTotalMetric
-	}
-	used, usedErr := s.queryMetric(ctx, memoryUsedMetric, podMatchers(options.Pods), options)
-	total, totalErr := s.queryMetric(ctx, memoryTotalMetric, podMatchers(options.Pods), options)
-	if usedErr == nil && totalErr == nil {
-		usedSeries := mergeRawSeries(preferWorkspaceSeries(used), acceleratorIdentity, "MiB")
-		totalSeries := mergeRawSeries(preferWorkspaceSeries(total), acceleratorIdentity, "MiB")
-		if options.By == "pod" {
-			usedSeries = aggregateSeries(usedSeries, options.By, aggregateSum)
-			totalSeries = aggregateSeries(totalSeries, options.By, aggregateSum)
-		}
-		appendAcceleratorMemorySummary(result, usedSeries, totalSeries)
-	} else {
-		result.Warnings = append(result.Warnings, "未能完整读取加速卡显存指标")
 	}
 	return result, nil
 }
@@ -317,6 +271,7 @@ func (s *Service) resolveWorkload(ctx context.Context, options QueryOptions) (wo
 			identity.Workspace = values[0]
 		}
 	}
+	identity.AllPods = sortedKeys(pods)
 	if len(options.Pods) > 0 {
 		identity.Pods = uniqueSorted(options.Pods)
 	} else {
@@ -678,7 +633,7 @@ func buildResult(command string, options QueryOptions, identity workloadIdentity
 		mode = "step"
 	}
 	result := &Result{Metadata: Metadata{
-		Command: command, Workload: options.Workload, WorkloadType: identity.Type, Workspace: identity.Workspace, Environment: options.Environment,
+		Command: command, Detail: options.Detail, Workload: options.Workload, WorkloadType: identity.Type, Workspace: identity.Workspace, Environment: options.Environment,
 		Pods: identity.Pods, Start: formatTime(options.Start), End: formatTime(options.End), Range: TimeRange{Start: formatTime(options.Start), End: formatTime(options.End)}, Timezone: "UTC+8", Mode: mode,
 	}, Series: []Series{}, Samples: []Sample{}, Warnings: []string{}}
 	if options.UseStep {
@@ -710,6 +665,7 @@ func buildResult(command string, options QueryOptions, identity workloadIdentity
 		} else if command == "gpu" {
 			series.Summary.PeakPercent = series.Summary.Peak
 		}
+		completeSeriesSummary(&series.Summary, item.points)
 		result.Series = append(result.Series, series)
 	}
 	sortSamples(result.Samples)

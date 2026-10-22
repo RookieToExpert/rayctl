@@ -35,11 +35,15 @@ func PrintMetrics(result *metricsquery.Result, format string) error {
 }
 
 func printMetricsTable(result *metricsquery.Result) {
+	podText := emptyDash(strings.Join(result.Metadata.Pods, ", "))
+	if !result.Metadata.Detail && (result.Metadata.Command == "gpu" || result.Metadata.Command == "mem") {
+		podText = fmt.Sprintf("%d 个 Pod", len(result.Metadata.Pods))
+	}
 	metadataRows := [][]string{
 		{"WORKLOAD", emptyDash(result.Metadata.Workload)},
 		{"TYPE", emptyDash(result.Metadata.WorkloadType)},
 		{"WORKSPACE", emptyDash(result.Metadata.Workspace)},
-		{"PODS", emptyDash(strings.Join(result.Metadata.Pods, ", "))},
+		{"PODS", podText},
 		{"RANGE", metricsRange(result.Metadata)},
 		{"SAMPLES", fmt.Sprintf("%s | interval %s", metricsMode(result.Metadata), emptyDash(result.Metadata.SampleInterval))},
 	}
@@ -58,9 +62,19 @@ func printMetricsTable(result *metricsquery.Result) {
 
 	switch result.Metadata.Command {
 	case "mem":
-		printMemorySamples(result)
+		if result.Metadata.Detail {
+			printMemorySamples(result)
+		} else {
+			printMetricsAggregate(result)
+		}
 	case "gpu":
-		printGPUSamples(result)
+		if result.Metadata.Detail {
+			printGPUSamples(result)
+		} else {
+			printMetricsAggregate(result)
+		}
+		printGPUHealth(result)
+		printGPUBaseline(result)
 	case "restart":
 		printRestartSamples(result)
 	default:
@@ -103,15 +117,15 @@ func printGPUSamples(result *metricsquery.Result) {
 	for _, sample := range result.Samples {
 		percent := sample.Percent
 		rows = append(rows, []string{
-			metricsClock(sample.Timestamp), sample.Series, fmt.Sprintf("%.1f%%", percent), metricsBar(percent),
+			metricsClock(sample.Timestamp), sample.Series, fmt.Sprintf("%.1f%%", percent), metricsMemory(sample.MemoryUsedGiB), metricsOptionalPercent(sample.MemoryPercent),
 		})
 	}
 	if len(rows) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-"})
+		rows = append(rows, []string{"-", "-", "-", "-", "-"})
 	}
 	printBoxTableWithOptions(
-		[]string{"TIME", "POD/CONTAINER/GPU", "UTIL", "USAGE"}, rows,
-		[]int{18, 54, 10, 30}, tableOptions{minWidths: []int{14, 18, 8, 16}},
+		[]string{"TIME", "POD/CONTAINER/GPU", "UTIL", "MEM", "MEM%"}, rows,
+		[]int{18, 54, 10, 14, 10}, tableOptions{minWidths: []int{14, 18, 8, 10, 8}},
 	)
 	printMetricSummary(result, "UTIL")
 }
@@ -185,9 +199,15 @@ func printMetricSummary(result *metricsquery.Result, valueLabel string) {
 }
 
 func writeMetricsCSV(writer io.Writer, result *metricsquery.Result) error {
+	if (result.Metadata.Command == "gpu" || result.Metadata.Command == "mem") && !result.Metadata.Detail {
+		return writeMetricsAggregateCSV(writer, result)
+	}
 	csvWriter := csv.NewWriter(writer)
 	defer csvWriter.Flush()
 	header := []string{"time", "series", "value"}
+	if result.Metadata.Command == "gpu" {
+		header = append(header, "memory_used_gib", "memory_total_gib", "memory_percent")
+	}
 	if result.Metadata.Command == "restart" {
 		header = []string{"time", "series", "restarts", "total", "reason", "uid", "event"}
 	}
@@ -196,6 +216,9 @@ func writeMetricsCSV(writer io.Writer, result *metricsquery.Result) error {
 	}
 	for _, sample := range result.Samples {
 		row := []string{sample.Timestamp, sample.Series, strconv.FormatFloat(sample.Value, 'g', -1, 64)}
+		if result.Metadata.Command == "gpu" {
+			row = append(row, metricsOptionalNumber(sample.MemoryUsedGiB), metricsOptionalNumber(sample.MemoryTotalGiB), metricsOptionalNumber(sample.MemoryPercent))
+		}
 		if result.Metadata.Command == "restart" {
 			row = []string{
 				sample.Timestamp,
