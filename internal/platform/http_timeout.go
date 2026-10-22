@@ -11,5 +11,5 @@ import (
 const platformRequestTimeout = 20 * time.Second
 
 func newPlatformHTTPClient() *http.Client {
-	return &http.Client{Timeout: platformRequestTimeout}
+	return &http.Client{Timeout: platformRequestTimeout, Transport: newPlatformTransport(http.DefaultTransport)}
 }

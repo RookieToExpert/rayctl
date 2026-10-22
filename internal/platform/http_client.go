@@ -224,10 +224,14 @@ func doPlatformRequest(client *http.Client, req *http.Request) (*http.Response, 
 		if attempt >= 2 || !retryableGETResult(resp, err) {
 			return resp, err
 		}
+		delay, retry := platformRetryDelay(resp, attempt, time.Now())
+		if !retry {
+			return resp, err
+		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		pause := time.NewTimer(time.Duration(100<<attempt) * time.Millisecond)
+		pause := time.NewTimer(delay)
 		select {
 		case <-req.Context().Done():
 			pause.Stop()
