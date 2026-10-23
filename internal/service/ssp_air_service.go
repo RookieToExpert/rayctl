@@ -519,15 +519,14 @@ func (s *SSPAIRService) resolveWorkspacesWithStatus(ctx context.Context, region 
 		err    error
 	}
 	loads := boundedMap(ctx, regions, 3, func(ctx context.Context, region string) load {
-		items, queryErr := s.platform.ListSSPWorkspaces(ctx, region)
+		items, queryErr := s.platform.ListSSPWorkspacesWithStatus(ctx, region)
 		return load{region: region, items: items, err: queryErr}
 	})
 	items := make([]platform.SSPWorkspace, 0)
 	var failures []error
 	for _, result := range loads {
 		if result.err != nil {
-			failures = append(failures, &SSPWorkspaceQueryError{Workspace: "workspace 清单", Region: result.region, Cause: result.err})
-			continue
+			failures = append(failures, result.err)
 		}
 		for _, workspace := range result.items {
 			if identifier == "" || strings.EqualFold(strings.TrimSpace(workspace.Name), strings.TrimSpace(identifier)) || strings.EqualFold(strings.TrimSpace(workspace.UID), strings.TrimSpace(identifier)) {

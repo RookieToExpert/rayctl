@@ -23,10 +23,12 @@ const sspAIDWorkloadType = sspAIDWorkloadTypeValue
 const sspNodeZoneLabel = "topology.sensecore.cn/zone"
 
 type SSPAIDService struct {
-	clientset kubernetes.Interface
-	platform  *platform.VirtualClusterClient
-	sspBase   *SSPJobService
-	jobHelper *JobService
+	clientset      kubernetes.Interface
+	platform       *platform.VirtualClusterClient
+	sspBase        *SSPJobService
+	jobHelper      *JobService
+	workspaceMu    sync.Mutex
+	workspaceLoads map[string]*sspWorkspaceLoad
 }
 
 type SSPAIDGetResult struct {
@@ -159,11 +161,12 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	region := s.resolveAIDRegion(ctx, requestedRegion, seedPods)
 	timings.ResolveRegion = time.Since(stageStartedAt)
 	stageStartedAt = time.Now()
-	workspaces, err := s.sspBase.resolveWorkspaceCandidatesForRegion(ctx, workspace, seedPods, region)
+	workspaces, err := s.resolveAIDWorkspaceCandidates(ctx, workspace, region)
 	timings.Workspace = time.Since(stageStartedAt)
-	if err != nil {
+	if err != nil && len(workspaces) == 0 {
 		return nil, err
 	}
+	inventoryErr := err
 	stageStartedAt = time.Now()
 	subscription, err := s.sspBase.resolveSubscriptionForRegion(ctx, seedPods, region)
 	timings.Subscription = time.Since(stageStartedAt)
@@ -177,6 +180,7 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	}
 	stageStartedAt = time.Now()
 	candidates, lookupErr := s.findPlatformAIDs(ctx, subscription, region, lookupIdentifier, workspaces)
+	lookupErr = errors.Join(inventoryErr, lookupErr)
 	timings.PlatformAID = time.Since(stageStartedAt)
 	if err := ctx.Err(); err != nil {
 		return nil, err

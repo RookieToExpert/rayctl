@@ -669,77 +669,13 @@ func normalizeSSPCluster(cluster *SSPCluster, profile clientProfile) {
 // ListSSPWorkspaces returns SSP workspaces from RMH without relying on
 // workspace namespaces being visible through the current kubeconfig.
 func (c *VirtualClusterClient) ListSSPWorkspaces(ctx context.Context, region string) ([]SSPWorkspace, error) {
-	region = strings.TrimSpace(region)
-	profiles := c.inventoryProfilesForRegion(region)
-	if len(profiles) == 0 {
-		return nil, fmt.Errorf("no platform profile configured for region %q", region)
+	items, err := c.ListSSPWorkspacesWithStatus(ctx, region)
+	if items != nil {
+		// Keep the existing best-effort contract for other callers. AID/AIR
+		// use WithStatus so incomplete profile/page scans remain visible.
+		return items, nil
 	}
-
-	workspaces := make(map[string]SSPWorkspace)
-	var lastErr error
-	success := false
-	for _, profile := range profiles {
-		profileRegion := firstNonEmpty(region, strings.TrimSpace(profile.Region))
-		pageToken := "1"
-		seenTokens := make(map[string]struct{})
-		profileResultCount := 0
-		for {
-			if _, ok := seenTokens[pageToken]; ok {
-				break
-			}
-			seenTokens[pageToken] = struct{}{}
-
-			endpoint, _ := url.Parse(profile.BaseURL)
-			endpoint.Path = "/rmh/v1/resources:page"
-			query := endpoint.Query()
-			filter := `resource_type="compute.ssp.v1.workspace"`
-			if profileRegion != "" {
-				filter += fmt.Sprintf(` AND region="*%s*"`, escapeSSPFilterValue(profileRegion))
-			}
-			query.Set("filter", filter)
-			query.Set("page_size", "200")
-			query.Set("page_token", pageToken)
-			endpoint.RawQuery = query.Encode()
-
-			var payload storageVolumePageResponse
-			if err := c.postJSONWithProfile(ctx, profile, endpoint.String(), map[string]any{}, &payload); err != nil {
-				lastErr = err
-				break
-			}
-			success = true
-			profileResultCount += len(payload.Resources)
-			for _, resource := range payload.Resources {
-				name := strings.TrimSpace(resource.Name)
-				resourceType := firstNonEmpty(strings.TrimSpace(resource.Type), strings.TrimSpace(resource.ResourceType))
-				if name != "" && strings.EqualFold(resourceType, "compute.ssp.v1.workspace") {
-					workspace := sspWorkspaceFromResource(resource, profile.Name)
-					workspaces[firstNonEmpty(workspace.Subscription+"|"+name, name)] = workspace
-				}
-			}
-
-			nextPageToken := strings.TrimSpace(payload.NextPageToken)
-			if nextPageToken == "" || nextPageToken == pageToken || len(payload.Resources) < 200 ||
-				(payload.TotalSize > 0 && profileResultCount >= payload.TotalSize) {
-				break
-			}
-			pageToken = nextPageToken
-		}
-	}
-	if !success {
-		return nil, lastErr
-	}
-
-	result := make([]SSPWorkspace, 0, len(workspaces))
-	for _, workspace := range workspaces {
-		result = append(result, workspace)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Name != result[j].Name {
-			return result[i].Name < result[j].Name
-		}
-		return result[i].Subscription < result[j].Subscription
-	})
-	return result, nil
+	return nil, err
 }
 
 func sspWorkspaceFromResource(resource StorageVolumeResource, profileName string) SSPWorkspace {
