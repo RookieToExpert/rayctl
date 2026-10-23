@@ -9,6 +9,10 @@
 ```bash
 rayctl node list
 rayctl node list ecp
+rayctl node list ssp
+rayctl node list ssp -l
+# USE 按当前用途显示 ECP/ECS/SSP；SSP 依据 Cluster 与源 VC 的关联识别，空闲节点也可识别。
+# -l 的 PROD 保留宿主节点原始标签；直接传 label selector 仍按原始标签筛选。
 rayctl node list "accelerator=huawei-ascend"
 rayctl node cordon worker-01
 rayctl node uncordon worker-01
@@ -16,6 +20,21 @@ rayctl node cordon 10.140.214.222 10.140.214.223
 rayctl node uncordon 10.140.214.222 10.140.214.223
 rayctl node get worker-01
 rayctl node get 10.140.214.222 10.140.214.223
+rayctl node get 10.12.145.100 --workloads
+rayctl node get 10.12.145.100 --workloads -l
+rayctl node get worker-01 --workloads --no-platform -o json
+# --workloads 按 Pod 展示全部可见归属，STATUS 包含容器 Waiting 原因（如 ContainerCreating）。
+# ECS 节点默认同时显示 Pod 名与 ECS 业务名；--workloads 也保留 ECS 类型及业务名。
+# -l 额外显示 VC、WORKSPACE、CREATOR、ACCEL REQ、SOURCE；ACCEL REQ 是资源请求量而非实时利用率。
+# 平台补全整批共享 2 秒预算；失败保留 k8s 行与 warnings，未知类型为 OTHER。
+
+# 从 HC Pod 名或 Pod IP 反查负载；同名时必须指定 host namespace
+rayctl pod get dev-ww-new-0
+rayctl pod get vcluster-b55aba4e-3c427f5a/dev-ww-new-0
+rayctl pod get 10.119.211.204 -l -o json
+rayctl pod get dev-ww-new-0 -n host-namespace --no-platform
+# 默认不查存储；-l 查询 PVC -> AFS。平台补全最多 2 秒，失败保留 Pod 信息并提示。
+# STATUS 结合删除标记和容器状态显示 Terminating、CrashLoopBackOff 等；PHASE、READY 保留 Kubernetes 原始值。
 
 # 多资源查询默认紧凑输出，最多 4 路并发并保持输入顺序
 rayctl afs get afs-a afs-b
@@ -30,6 +49,10 @@ rayctl auth check user user-a user-b
 rayctl auth check user ug-owner -e pt
 rayctl auth check groups ug-a2-jcpt-yunwei -e d
 rayctl auth check groups ug-a2-jcpt-yunwei -e dcloud
+# 查询队列的直接 IAM 授权，支持名称片段、完整 UID、批量、-l 和 JSON
+rayctl auth check queue queue-d-elastic-a2-caicopilot
+rayctl auth check queue elastic-a2-caicopilot -e d -l
+rayctl auth check queue queue-a queue-b -o json
 rayctl rbac get vc-a vc-b
 rayctl policy get disallow-privileged-containers vc-a vc-b
 rayctl --kubeconfig=/path/to/config node list ecp
@@ -43,9 +66,19 @@ rayctl ate list
 rayctl ate list -s pending
 rayctl ate get old-job
 rayctl ate list cluster vc-a3-intern-delivery
+rayctl ecs list
+rayctl ecs list -t ecs --state Running
+rayctl ecs list --name yunwei -l
+rayctl ecs list -n 0 -o json
+# ecs list 分页汇总当前环境中已配置且有权限的各租户 ECS/AIS，隔离其他平台环境。
+# 平台机器规格为空时，仅对筛选和截取后展示的资源按 UID 查询 HC VM/VMI，显示实际 vCPU / 内存；无 HC 配置仍可列出平台数据。
+# 默认按类型、名称排序并最多显示 100 条；--name/--state 筛选后再应用 -n，-n 0 显示全部。
+# -l 增加 TENANT、UID、机器规格、VPC；JSON 同时保留 tenant_id。创建人按所属租户补全，失败保留 ID；清单部分失败保留成功结果并返回错误。
 rayctl ecs get ais-a ecs-b ais-c
+# ecs get 同时展示所属租户及 DNAT 外部地址:端口 -> 内部地址:端口、协议、状态和 NAT 网关。
+# 资源接口缺失 DNAT 时按所属租户、VPC 和内网 IP 查询；查询失败保留机器详情并提示告警。
 
-# 列出当前 profile 下的资源，或按名称/UID 查看单个资源
+# 汇总当前环境各已配置租户的资源，或按名称/UID 查看单个资源；list -l 显示 TENANT
 rayctl vpc list
 rayctl vpc get vpc-muxi-ailab
 rayctl subnet list
@@ -78,7 +111,8 @@ rayctl ait list
 rayctl ait get <job-name-or-uid>
 rayctl ait get <job-name-or-uid> --workspace ws-t-llm-frontier
 
-# 查看 AID 开发机、资源规格、挂载卷、SSH DNAT 和 Pod 状态
+# 查看 AID 开发机；运行中开发机的结论含近 24h 重启次数、最近重启时间和原因
+# Pod 重建后仍查询同名 Pod 的监控历史；监控时间是采样观测时间
 rayctl aid get <aid-name-or-uid>
 rayctl aid get <aid-name-or-uid> --workspace ws-t-wamcritic
 rayctl aid list
@@ -99,17 +133,30 @@ rayctl cluster get cluster-a3 cluster-muxi
 rayctl cluster list -e pt
 rayctl workspace list
 rayctl ws get ws-d-a3-ai4s
+rayctl workspace workload list ws-d-a3-ai4s
+rayctl ws wl list ws-d-a3-ai4s -t aid --state Running
+rayctl ws workload list ws-d-a3-ai4s ws-d-a3-frontier -o json
 rayctl queue list
 rayctl queue get queue-d-reserved-a3-ai4s
 rayctl queue workload list queue-d-reserved-a3-ai4s
 rayctl queue wl list queue-d-reserved-a3-ai4s -t job
 rayctl queue workload list queue-d-reserved-a3-ai4s --state Running --priority NORMAL
+rayctl vc workload list vc-a3-llmit
+rayctl vc wl list vc-a3-llmit vc-a3-deeplink -t job --state Running
+rayctl vc workload list vc-a3-llmit -t vcJob -o json
+# workspace 聚合其所有 queue；VC 包含关联 SSP queue 工作负载和 ECP Volcano VCJob。
+# VC 的 -t job 包含 SSP 训练任务和 ECP VCJob，-t vcJob/ecp-vcjob 仅查询 ECP。
+# 三种 workload list 均支持 --type、--state、--priority；默认读取全部分页。
+# 部分来源失败仍保留成功记录，同时返回错误；JSON 的 summary.complete 为 false。
 rayctl queue node list queue-d-reserved-a3-ai4s
 rayctl queue node usage queue-d-reserved-a3-ai4s
 rayctl queue node usage queue-d-reserved-a3-ai4s --free
 
-# AIR 推理任务和推理网关命令已预留；gateway 可缩写为 gw
+# AIR 推理任务和推理网关；gateway 可缩写为 gw
 rayctl air job get <job-name-or-uid>
+rayctl air job get <job-name-or-uid> -l
+# 默认显示实例组、每组实例数、总实例数以及每个计算实例的节点、Host IP、Pod IP。
+# 辅助 Pod 单独展示；LEADER SERVICE IP 是集群内服务地址，未分配时显示说明。
 rayctl air gateway get <gateway-name-or-uid>
 rayctl air gw get <gateway-name-or-uid>
 
