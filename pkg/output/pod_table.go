@@ -10,6 +10,7 @@ func PrintPodLocateResult(r *service.PodLocateResult) {
 		return
 	}
 	rows := [][]string{
+		{"ENVIRONMENT", r.Environment},
 		{"HC NAMESPACE", r.HostNamespace}, {"HC POD", r.HostPod},
 		{"VC NAMESPACE", r.VCNamespace}, {"VC POD", r.VCPod},
 		{"TYPE", r.WorkloadType}, {"WORKLOAD", r.WorkloadName}, {"WORKLOAD UID", r.WorkloadUID},

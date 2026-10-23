@@ -28,6 +28,7 @@ type PodLocateService struct {
 }
 
 type PodLocateResult struct {
+	Environment   string
 	HostNamespace string
 	HostPod       string
 	VCPod         string
@@ -53,6 +54,10 @@ type PodLocateResult struct {
 	Suggestions   []string
 	Warnings      []string
 }
+
+type PodNotFoundError struct{ Identifier string }
+
+func (e *PodNotFoundError) Error() string { return fmt.Sprintf("pod %q not found", e.Identifier) }
 
 type PodPVCResult struct {
 	Namespace string
@@ -128,7 +133,7 @@ func (s *PodLocateService) Get(ctx context.Context, identifier, namespace string
 		}
 	}
 	if len(pods) == 0 {
-		return nil, fmt.Errorf("pod %q not found", identifier)
+		return nil, &PodNotFoundError{Identifier: identifier}
 	}
 	if len(pods) > 1 {
 		matches := make([]string, 0, len(pods))
