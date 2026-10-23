@@ -40,6 +40,9 @@ func installJSONCommands(command *cobra.Command) {
 		// Cobra otherwise appends Usage to stdout after a query error.
 		cmd.SilenceUsage = true
 		allowed := false
+		if cmd.Name() == "update" && cmd.Parent() != nil && cmd.Parent().Name() == "config" && cmd.Parent().Parent() != nil && cmd.Parent().Parent().Name() == "vc" {
+			allowed = true
+		}
 		for parent := cmd; parent != nil; parent = parent.Parent() {
 			if parent.Name() == "grant" || parent.Name() == "remove" || parent.Name() == "create" {
 				return fmt.Errorf("%s does not support JSON output", cmd.CommandPath())

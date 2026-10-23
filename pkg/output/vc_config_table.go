@@ -60,3 +60,25 @@ func printVCConfigWarnings(result *service.VCControlPlaneConfig) {
 		}
 	}
 }
+
+func PrintVCConfigUpdate(result *service.VCConfigUpdateResult) {
+	if captureJSON(result) || result == nil || result.Current == nil {
+		return
+	}
+	current := "未知"
+	if result.Current.Desired != nil {
+		current = result.Current.Desired.Name
+	}
+	rows := [][]string{
+		{"VC", result.Current.Name}, {"UID", result.Current.UID}, {"ENVIRONMENT", result.Current.Environment},
+		{"FLAVOR", current + " → " + result.Target.Name}, {"TARGET REPLICAS", strconv.Itoa(int(result.Target.Replicas))},
+		{"TARGET CPU / REPLICA", resourcePair(result.Target.ResourceRequests, result.Target.ResourceLimits, "cpu")},
+		{"TARGET MEMORY / REPLICA", resourcePair(result.Target.ResourceRequests, result.Target.ResourceLimits, "memory")},
+		{"TARGET MAX NODES", strconv.Itoa(int(result.Target.MaxNodeCount))}, {"RESULT", result.Status},
+	}
+	if result.Observed != nil {
+		rows = append(rows, vcConfigRows(result.Observed)...)
+	}
+	printBoxTableWithOptions([]string{"FIELD", "VALUE"}, rows, []int{28, 72}, tableOptions{noWrapCells: makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), 1)...)})
+	printVCConfigWarnings(result.Observed)
+}

@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"rayctl/internal/kube"
@@ -37,6 +40,85 @@ func newVCConfigCmd() *cobra.Command {
 			return err
 		},
 	})
+	command.AddCommand(newVCConfigUpdateCmd())
+	return command
+}
+
+func newVCConfigUpdateCmd() *cobra.Command {
+	var flavor string
+	var dryRun, yes, allowUnlimit bool
+	var wait bool
+	var timeout time.Duration
+	command := &cobra.Command{
+		Use: "update <vc-name-or-uid>", Short: "持久更新 VC 控制面规格并等待资源和副本收敛",
+		Long: "从平台读取规格定义后更新控制面规格。默认先展示差异并确认；--dry-run 仅预检。\n" +
+			"medium/large 均为 3 副本，但资源不同。unlimit 不建议使用，须额外显式允许。",
+		Example: "  rayctl vc config update vc-demo --flavor medium --dry-run -e d\n" +
+			"  rayctl vc config update vc-demo --flavor large --yes --timeout 5m -e pt",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flavor = strings.ToLower(strings.TrimSpace(flavor))
+			if err := service.ValidateVCFlavor(flavor, allowUnlimit); err != nil {
+				return err
+			}
+			if timeout <= 0 {
+				return fmt.Errorf("--timeout 必须大于 0")
+			}
+			if output.IsJSON() && !dryRun && !yes {
+				return fmt.Errorf("JSON 更新须指定 --yes，或使用 --dry-run 预检")
+			}
+			_, vcService, err := newVCPlatformService()
+			if err != nil {
+				return err
+			}
+			detail, err := vcService.Get(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			target, err := hcEnvironmentForVC(detail, explicitHCKubeconfig(cmd))
+			if err != nil {
+				return err
+			}
+			configService, err := vcConfigServiceFor(target)
+			if err != nil {
+				return err
+			}
+			result, err := configService.PrepareUpdate(cmd.Context(), detail.Name, detail.UID, target.Name, flavor, allowUnlimit)
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				result.DryRun = true
+				result.Status = "dry-run，未提交变更"
+				output.PrintVCConfigUpdate(result)
+				return nil
+			}
+			if !yes && result.Changed {
+				output.PrintVCConfigUpdate(result)
+				fmt.Fprintf(cmd.OutOrStdout(), "将更新 %s/%s 的控制面规格 %s → %s，是否继续? (y/N): ", target.Name, detail.Name, result.Current.Desired.Name, result.Target.Name)
+				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if err != nil {
+					return err
+				}
+				if !isYes(line) {
+					fmt.Fprintln(cmd.OutOrStdout(), "已取消更新。")
+					return nil
+				}
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			defer cancel()
+			err = configService.ApplyUpdate(ctx, result, wait)
+			output.PrintVCConfigUpdate(result)
+			return err
+		},
+	}
+	command.Flags().StringVar(&flavor, "flavor", "", "目标规格：minimum、small、medium、large")
+	_ = command.MarkFlagRequired("flavor")
+	command.Flags().BoolVar(&dryRun, "dry-run", false, "只读预检，展示当前与目标规格，不提交变更")
+	command.Flags().BoolVarP(&yes, "yes", "y", false, "跳过交互确认")
+	command.Flags().BoolVar(&allowUnlimit, "allow-unlimit", false, "允许使用无资源上限的 unlimit 规格")
+	command.Flags().BoolVar(&wait, "wait", true, "等待 HC 标签、控制面资源和 Deployment 完成收敛")
+	command.Flags().DurationVar(&timeout, "timeout", 2*time.Minute, "提交及等待收敛的最长时间")
 	return command
 }
 
