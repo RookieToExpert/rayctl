@@ -81,6 +81,8 @@
 - 用户复现：`aid get dev-yifan-gpu2 -e all` 在 D 未找到，`-e pt` 能找到。
 - 位置：`internal/service/ssp_aid_service.go` 的 `resolveAIDRegion`；Pod 查询的 clientset 也固定为当前 kubeconfig。
 
+2026-10-23 补测调整（`a2856f2`）：成功命中时退出 0，其他范围失败汇总为一行警告，403 只报 workspace；JSON 标记 `query_incomplete`。未命中但存在 403 时仅说明可访问范围内未找到，不能判定全局不存在。见 [五项补测修复记录](validation/rayctl-followups-20261023.md)。
+
 验收要求：
 
 1. `-e all` 依次查询 D、PT，每个 region 使用对应 HC client；`-e d/pt` 严格限定环境。

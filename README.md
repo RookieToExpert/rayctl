@@ -126,7 +126,8 @@ rayctl ait get <job-name-or-uid> --workspace ws-t-llm-frontier
 rayctl aid get <aid-name-or-uid>
 rayctl aid get <aid-name-or-uid> --workspace ws-t-wamcritic
 rayctl aid get dev-yifan-gpu2 -e all -l --no-image
-# -e all 查询 D/PT 的对应 HC；任何范围无权限时保留命中结果并返回查询不完整。
+# -e all 查询 D/PT 的对应 HC；命中时退出 0，其他范围无权限压成一行 workspace 警告。
+# JSON 用 query_incomplete 标记未完成范围；未命中且存在无权限范围时仍报查询不完整。
 # RAYCTL_HC_KUBECONFIG_D/PT 可以覆盖默认的 ~/kubeconfig 与 ~/kubeconfigpt。
 rayctl aid list
 rayctl aid list -w ws-d-a3-ai4s
@@ -166,6 +167,9 @@ rayctl queue node usage queue-d-reserved-a3-ai4s
 rayctl queue node usage queue-d-reserved-a3-ai4s --free
 
 # AIR 推理任务和推理网关；gateway 可缩写为 gw
+rayctl air job list -n 50
+# 部分 workspace 失败时保留可用结果、退出 0 并汇总警告；全部失败仍退出非零。
+# JSON 的 summary.complete=false 保留不完整范围；UID 去重后再筛选和限条数，metadata 可含 duplicates_removed。
 rayctl air job get <job-name-or-uid>
 rayctl air job get <job-name-or-uid> -l
 # 默认显示实例组、每组实例数、总实例数以及每个计算实例的节点、Host IP、Pod IP。
@@ -177,6 +181,7 @@ rayctl air gw get <gateway-name-or-uid>
 rayctl metrics gpu dev-5dc5d665 -w ws-t-vcg -k ~/kubeconfigpt --since 24h
 rayctl metrics gpu dev-5dc5d665 -w ws-t-vcg -k ~/kubeconfigpt --since 72h --by gpu -o json
 # 覆盖率不足 90% 或缺口超过 3 个采样间隔时警告，并列出 UTC+8 缺口。
+# 相同断档合并显示；相同覆盖率与断档合并为一行，JSON coverage 仍逐卡保留。
 # --health 只按验证过的物理 UUID 关联；缺失显示未知。SBE 为信息项，DBE/隔离页参与异常判定。
 
 # SSP 工作空间成员权限跟随当前 profile，并使用 auth login 缓存的 Bearer session
