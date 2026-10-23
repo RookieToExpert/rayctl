@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,6 +30,8 @@ type SSPAIDService struct {
 }
 
 type SSPAIDGetResult struct {
+	Environment            string
+	Region                 string
 	PodEvidence            *podevidence.Result
 	Name                   string
 	UID                    string
@@ -107,6 +110,12 @@ type sspAIDCandidate struct {
 	Workspace sspWorkspaceRef
 }
 
+type AIDNotFoundError struct{ Identifier, Region, Workspace string }
+
+func (e *AIDNotFoundError) Error() string {
+	return fmt.Sprintf("AID %q not found in %s workspaces (workspace=%q)", e.Identifier, e.Region, e.Workspace)
+}
+
 func NewSSPAIDService(clientset kubernetes.Interface, platformClient *platform.VirtualClusterClient) *SSPAIDService {
 	return &SSPAIDService{
 		clientset: clientset,
@@ -167,14 +176,11 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	stageStartedAt = time.Now()
 	candidates, lookupErr := s.findPlatformAIDs(ctx, subscription, region, lookupIdentifier, workspaces)
 	timings.PlatformAID = time.Since(stageStartedAt)
+	if lookupErr != nil {
+		return nil, fmt.Errorf("query SSP AID API: %w", lookupErr)
+	}
 	if len(candidates) == 0 {
-		if lookupErr != nil {
-			return nil, fmt.Errorf("query SSP AID API: %w", lookupErr)
-		}
-		if workspace != "" {
-			return nil, fmt.Errorf("AID %q not found in workspace %q", identifier, workspace)
-		}
-		return nil, fmt.Errorf("AID %q not found in %s workspaces", identifier, region)
+		return nil, &AIDNotFoundError{Identifier: identifier, Region: region, Workspace: workspace}
 	}
 	if len(candidates) > 1 {
 		values := make([]string, 0, len(candidates))
@@ -218,6 +224,11 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	})
 	stageStartedAt = time.Now()
 	result := s.buildResult(ctx, aid, hostNamespace, pods, nil, includeLogs)
+	result.Region = region
+	result.Environment = "d"
+	if region == "cn-pj-03" {
+		result.Environment = "pt"
+	}
 	timings.BuildDetail = time.Since(stageStartedAt)
 	if resolved := <-dnatResult; resolved.Err == nil {
 		appendSSPAIDDNATRules(result, resolved.Value.Rules)
@@ -266,24 +277,17 @@ func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription strin
 	close(results)
 
 	candidates := make([]sspAIDCandidate, 0)
-	var firstErr error
-	successfulLookups := 0
+	var lookupErrors []error
 	for result := range results {
 		if result.err != nil {
-			if firstErr == nil {
-				firstErr = result.err
-			}
+			lookupErrors = append(lookupErrors, result.err)
 			continue
 		}
-		successfulLookups++
 		for _, aid := range result.aids {
 			candidates = append(candidates, sspAIDCandidate{AID: aid, Workspace: result.workspace})
 		}
 	}
-	if successfulLookups > 0 {
-		firstErr = nil
-	}
-	return candidates, firstErr
+	return candidates, errors.Join(lookupErrors...)
 }
 
 func (s *SSPAIDService) resolveAIDRegion(ctx context.Context, requested string, pods []corev1.Pod) string {

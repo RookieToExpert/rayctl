@@ -77,13 +77,14 @@ func newSSPAIDGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <aid-name-or-uid> [aid-name-or-uid...]",
 		Short: "并行查询一个或多个 AID 开发机并诊断 Pod 状态",
+		Long:  "查询 AID；-e all 依次查询 D/PT，并使用各环境的 HC 配置收集 Pod 证据。可用 RAYCTL_HC_KUBECONFIG_D/PT 指定配置路径。",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			region, err := selectedSSPRegionForLookup()
+			_, err := selectedSSPRegionForLookup()
 			if err != nil {
 				return err
 			}
-			clientset, err := kube.NewClientset(kubeconfig)
+			targets, err := hcTargets(cmd)
 			if err != nil {
 				return err
 			}
@@ -91,14 +92,15 @@ func newSSPAIDGetCmd() *cobra.Command {
 			if platformErr != nil {
 				return platformErr
 			}
-			aidService := service.NewSSPAIDService(clientset, platformClient)
 			type queryResult struct {
 				identifier string
 				result     *service.SSPAIDGetResult
 				err        error
 			}
 			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
-				result, err := aidService.GetAIDInRegion(service.WithPodEvidenceOptions(ctx, noImage, kubeconfig), identifier, workspace, region, longOutput)
+				result, err := service.QueryHCEnvironments(ctx, targets, identifier, func(ctx context.Context, target service.HCEnvironment) (*service.SSPAIDGetResult, error) {
+					return service.NewSSPAIDService(target.Client, platformClient).GetAIDInRegion(service.WithPodEvidenceOptions(ctx, noImage, target.Kubeconfig), identifier, workspace, target.Region, longOutput)
+				}, func(err error) bool { var missing *service.AIDNotFoundError; return errors.As(err, &missing) })
 				return queryResult{identifier, result, err}
 			})
 			queryErrors := make([]error, 0)
@@ -106,6 +108,8 @@ func newSSPAIDGetCmd() *cobra.Command {
 			for index, result := range results {
 				if result.err != nil {
 					queryErrors = append(queryErrors, fmt.Errorf("aid %q: %w", result.identifier, result.err))
+				}
+				if result.result == nil {
 					continue
 				}
 				if printed {

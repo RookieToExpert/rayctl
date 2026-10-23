@@ -379,6 +379,7 @@ func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool, debugTi
 	}
 	rows := [][]string{
 		{"AID", emptyDash(result.Name)},
+		{"ENVIRONMENT", emptyDash(result.Environment)},
 		{"STATE", emptyDash(result.State)},
 		{"VC", emptyDash(result.VCluster)},
 		{"WORKSPACE", emptyDash(result.Workspace)},
