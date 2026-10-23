@@ -98,6 +98,14 @@ rayctl vc list
 rayctl vc get vc-a3-llmit
 rayctl vc get vc-a3-llmit vc-a3-deeplink vc-c550-jiaofu
 rayctl vc get vc-a3-llmit --platform-only
+# 控制面规格：区分平台期望、HC 下发标签和实际 Deployment 资源/Ready
+rayctl vc config get vc-a2-discovery-prod -e d
+rayctl vc config get vc-p-cluster -e pt -o json
+rayctl vc config update vc-a2-discovery-prod --flavor large --dry-run -e d
+# 去掉 --dry-run 后交互确认；--yes 可跳过确认，默认等待收敛，--timeout 默认 2m。
+# 规格从平台读取；minimum/small 为 1 副本，medium/large 为 3 副本，不能只凭 Pod 数反推。
+# minimum/small 节点上限分别为 15/30；unlimit 无资源 limits，不建议使用，须 --allow-unlimit。
+# 通过 HC Service proxy 调用持久 API，不连接数据库。--platform-only 跳过 HC/规格查询。
 rayctl vc set d
 rayctl vc node list vc-c550-ai4s-sys
 rayctl vc node usage vc-a3-deeplink
@@ -117,6 +125,9 @@ rayctl ait get <job-name-or-uid> --workspace ws-t-llm-frontier
 # Pod 重建后仍查询同名 Pod 的监控历史；监控时间是采样观测时间
 rayctl aid get <aid-name-or-uid>
 rayctl aid get <aid-name-or-uid> --workspace ws-t-wamcritic
+rayctl aid get dev-yifan-gpu2 -e all -l --no-image
+# -e all 查询 D/PT 的对应 HC；任何范围无权限时保留命中结果并返回查询不完整。
+# RAYCTL_HC_KUBECONFIG_D/PT 可以覆盖默认的 ~/kubeconfig 与 ~/kubeconfigpt。
 rayctl aid list
 rayctl aid list -w ws-d-a3-ai4s
 rayctl aid list -q queue-d-reserved-a3-ai4s --state Running
@@ -161,6 +172,12 @@ rayctl air job get <job-name-or-uid> -l
 # 辅助 Pod 单独展示；LEADER SERVICE IP 是集群内服务地址，未分配时显示说明。
 rayctl air gateway get <gateway-name-or-uid>
 rayctl air gw get <gateway-name-or-uid>
+
+# GPU 默认摘要；--detail 展开采样点。coverage 按序列计算，缺失不填 0。
+rayctl metrics gpu dev-5dc5d665 -w ws-t-vcg -k ~/kubeconfigpt --since 24h
+rayctl metrics gpu dev-5dc5d665 -w ws-t-vcg -k ~/kubeconfigpt --since 72h --by gpu -o json
+# 覆盖率不足 90% 或缺口超过 3 个采样间隔时警告，并列出 UTC+8 缺口。
+# --health 只按验证过的物理 UUID 关联；缺失显示未知。SBE 为信息项，DBE/隔离页参与异常判定。
 
 # SSP 工作空间成员权限跟随当前 profile，并使用 auth login 缓存的 Bearer session
 rayctl auth ssp check ws-p-jcpt
