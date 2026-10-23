@@ -44,7 +44,7 @@ func identifierHeader(header string) bool {
 		}
 	}
 	switch header {
-	case "POD", "PODS", "HC POD", "VC POD", "PODGROUP", "INSTANCE", "INSPECT POD", "NODE", "NODES", "HOST", "VC", "WORKSPACE", "QUEUE", "CLUSTER", "PVC", "PV", "HOST PV", "VOLUME", "CONTAINER", "SOURCE", "MOUNT", "SUBPATH", "AFS", "AID", "AIT", "ATE", "ECS", "AIS", "CREATOR", "SUBMITTER", "USER", "GROUP", "IP", "HOST IP", "POD IP", "NODE IP":
+	case "ID", "BINDING", "PROFILE", "CLUSTER REF", "ENDPOINT", "AFS/AOSS ENDPOINT", "POD", "PODS", "HC POD", "VC POD", "PODGROUP", "INSTANCE", "INSPECT POD", "NODE", "NODES", "HOST", "VC", "WORKSPACE", "QUEUE", "CLUSTER", "PVC", "PV", "HOST PV", "VOLUME", "CONTAINER", "SOURCE", "MOUNT", "SUBPATH", "AFS", "AID", "AIT", "ATE", "ECS", "AIS", "CREATOR", "SUBMITTER", "USER", "GROUP", "IP", "HOST IP", "POD IP", "NODE IP":
 		return true
 	}
 	return false

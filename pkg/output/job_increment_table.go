@@ -5,6 +5,7 @@ import (
 	"os"
 	"rayctl/internal/podevidence"
 	"rayctl/internal/service"
+	"strings"
 )
 
 func printDetailAnchor(name, status, namespace, node, environment string) {
@@ -79,7 +80,7 @@ func printIncrementLogs(lines []string) {
 	}
 	rows := [][]string{}
 	for _, line := range lines {
-		if line != "" {
+		if strings.TrimSpace(line) != "" {
 			rows = append(rows, []string{redactText(line)})
 		}
 	}
