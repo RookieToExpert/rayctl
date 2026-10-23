@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +43,9 @@ type SSPAIRVolumeItem struct {
 
 type SSPAIRWorkerItem struct {
 	Name        string
+	Role        string
+	Group       string
+	Node        string
 	Phase       string
 	HostIP      string
 	PodIP       string
@@ -51,32 +55,36 @@ type SSPAIRWorkerItem struct {
 }
 
 type SSPAIRJobItem struct {
-	PodEvidence   *podevidence.Result
-	Name          string
-	UID           string
-	State         string
-	Workspace     string
-	Queue         string
-	QueueType     string
-	Cluster       string
-	VCluster      string
-	Namespace     string
-	HostNamespace string
-	Priority      string
-	Creator       string
-	Region        string
-	Profile       string
-	ReadyReplicas int
-	Replicas      int
-	CreatedAt     string
-	UpdatedAt     string
-	InternalIP    string
-	Resource      SSPAIRResourceItem
-	DNATRules     []SSPAIRDNATItem
-	Volumes       []SSPAIRVolumeItem
-	Workers       []SSPAIRWorkerItem
-	WorkerTotal   int
-	Raw           platform.SSPAIRJob
+	PodEvidence      *podevidence.Result
+	Name             string
+	UID              string
+	State            string
+	Workspace        string
+	Queue            string
+	QueueType        string
+	Cluster          string
+	VCluster         string
+	Namespace        string
+	HostNamespace    string
+	Priority         string
+	Creator          string
+	Region           string
+	Profile          string
+	ReadyReplicas    int
+	Replicas         int
+	DesiredReplicas  int
+	GroupSize        int
+	TotalInstances   int
+	CreatedAt        string
+	UpdatedAt        string
+	InternalIP       string
+	Resource         SSPAIRResourceItem
+	DNATRules        []SSPAIRDNATItem
+	Volumes          []SSPAIRVolumeItem
+	Workers          []SSPAIRWorkerItem
+	AuxiliaryWorkers []SSPAIRWorkerItem
+	WorkerTotal      int
+	Raw              platform.SSPAIRJob
 }
 
 type SSPAIRGatewayItem struct {
@@ -163,7 +171,7 @@ func filterAIRJobsByState(items []SSPAIRJobItem, state string) []SSPAIRJobItem {
 	return filtered
 }
 
-func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, region string, workspace string, includeWorkers bool, workerLimit int) ([]*SSPAIRJobItem, []error) {
+func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, region string, workspace string, includeDetails bool, workerLimit int) ([]*SSPAIRJobItem, []error) {
 	workspaces, err := s.resolveWorkspaces(ctx, region, workspace)
 	if err != nil {
 		return nil, []error{err}
@@ -229,23 +237,20 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 		}
 		item := s.airJobItem(*detail)
 		vcNameCh := make(chan string, 1)
-		go func() {
-			vcNameCh <- s.resolveAIRJobVCluster(ctx, item)
-		}()
+		go func(snapshot SSPAIRJobItem) {
+			vcNameCh <- s.resolveAIRJobVCluster(ctx, snapshot)
+		}(item)
 		pods, podErr := s.findAIRPods(ctx, item.UID)
 		setAIRNamespaces(&item.Namespace, &item.HostNamespace, pods)
-		if includeWorkers {
-			workers, total, workersErr := s.platform.ListSSPAIRWorkers(ctx, *detail, workerLimit)
-			if workersErr != nil {
-				return detailResult{err: fmt.Errorf("AIR job %q workers: %w", identifiers[index], workersErr)}
-			}
+		workers, total, workersErr := s.platform.ListSSPAIRWorkers(ctx, *detail, workerLimit)
+		var workerQueryErr error
+		if workersErr != nil {
+			workerQueryErr = fmt.Errorf("AIR job %q workers: %w", identifiers[index], workersErr)
+		} else {
 			item.WorkerTotal = total
-			for _, worker := range workers {
-				item.Workers = append(item.Workers, SSPAIRWorkerItem{
-					Name: worker.Name, Phase: worker.Phase, HostIP: worker.HostIP, PodIP: worker.IP,
-					Restarts: worker.RestartCount, StartedAt: formatSSPTime(worker.StartTime), LastStarted: formatSSPTime(worker.LastStartedTime),
-				})
-			}
+			setAIRWorkers(&item, workers, pods)
+		}
+		if includeDetails {
 			if s.clientset != nil {
 				if podErr != nil {
 					item.PodEvidence = &podevidence.Result{Warnings: []string{"AIR Pod discovery: " + podErr.Error()}}
@@ -260,18 +265,87 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 			}
 		}
 		item.VCluster = <-vcNameCh
-		return detailResult{item: &item}
+		return detailResult{item: &item, err: workerQueryErr}
 	})
 	result := make([]*SSPAIRJobItem, len(identifiers))
 	for offset, detail := range details {
 		index := indices[offset]
 		if detail.err != nil {
 			errs[index] = detail.err
-			continue
 		}
 		result[index] = detail.item
 	}
 	return result, compactErrors(errs)
+}
+
+// The workers endpoint also returns auxiliary Pods such as metrics collectors.
+// LWS labels identify compute instances without including those auxiliary Pods.
+func setAIRWorkers(item *SSPAIRJobItem, workers []platform.SSPAIRWorker, pods []corev1.Pod) {
+	podsByName := make(map[string]*corev1.Pod, len(pods))
+	for index := range pods {
+		pod := &pods[index]
+		name := firstNonEmpty(pod.Annotations["vcluster.loft.sh/object-name"], pod.Name)
+		podsByName[name] = pod
+	}
+	for _, worker := range workers {
+		role, group := airWorkerRole(item.Name, worker)
+		instance := SSPAIRWorkerItem{
+			Name: worker.Name, Role: role, Group: group, Node: worker.NodeInfo.Name,
+			Phase: worker.Phase, HostIP: worker.HostIP, PodIP: worker.IP,
+			Restarts: worker.RestartCount, StartedAt: formatSSPTime(worker.StartTime), LastStarted: formatSSPTime(worker.LastStartedTime),
+		}
+		if pod := podsByName[worker.Name]; pod != nil {
+			instance.Node = firstNonEmpty(instance.Node, pod.Spec.NodeName)
+			instance.HostIP = firstNonEmpty(instance.HostIP, pod.Status.HostIP)
+			instance.PodIP = firstNonEmpty(instance.PodIP, pod.Status.PodIP)
+			instance.Phase = firstNonEmpty(instance.Phase, string(pod.Status.Phase))
+			instance.Restarts = 0
+			for _, status := range pod.Status.InitContainerStatuses {
+				instance.Restarts += int(status.RestartCount)
+			}
+			for _, status := range pod.Status.ContainerStatuses {
+				instance.Restarts += int(status.RestartCount)
+			}
+		}
+		if role == "AUXILIARY" {
+			item.AuxiliaryWorkers = append(item.AuxiliaryWorkers, instance)
+		} else {
+			item.Workers = append(item.Workers, instance)
+		}
+	}
+}
+
+func airWorkerRole(jobName string, worker platform.SSPAIRWorker) (string, string) {
+	const prefix = "leaderworkerset.sigs.k8s.io/"
+	labels := worker.Metadata.Labels
+	if name := labels[prefix+"name"]; name != "" && name != jobName {
+		return "AUXILIARY", ""
+	}
+	group, workerIndex := labels[prefix+"group-index"], labels[prefix+"worker-index"]
+	// Older responses may omit metadata; LWS names encode the same indices.
+	if group == "" || workerIndex == "" {
+		if !strings.HasPrefix(worker.Name, jobName+"-") {
+			return "AUXILIARY", ""
+		}
+		parts := strings.Split(strings.TrimPrefix(worker.Name, jobName+"-"), "-")
+		switch len(parts) {
+		case 1:
+			group, workerIndex = parts[0], "0"
+		case 2:
+			group, workerIndex = parts[0], parts[1]
+		default:
+			return "AUXILIARY", ""
+		}
+	}
+	groupNumber, groupErr := strconv.Atoi(group)
+	index, indexErr := strconv.Atoi(workerIndex)
+	if groupErr != nil || indexErr != nil || groupNumber < 0 || index < 0 {
+		return "AUXILIARY", ""
+	}
+	if index == 0 {
+		return "LEADER", strconv.Itoa(groupNumber)
+	}
+	return "WORKER", strconv.Itoa(groupNumber)
 }
 
 func (s *SSPAIRService) ListGateways(ctx context.Context, region string, workspace string) (*SSPAIRGatewayListResult, error) {
@@ -437,13 +511,20 @@ func (s *SSPAIRService) airJobItem(job platform.SSPAIRJob) SSPAIRJobItem {
 	resource, image := airTemplateResource(job.Spec.LWS.LeaderWorkerTemplate.Leader)
 	replicas := job.Status.Replicas
 	if replicas == 0 {
-		replicas = firstPositive(job.TotalInstances, job.Spec.LWS.Replicas)
+		replicas = job.Spec.LWS.Replicas
+	}
+	desiredReplicas := job.Spec.LWS.Replicas
+	groupSize := job.Spec.LWS.LeaderWorkerTemplate.Size
+	totalInstances := job.TotalInstances
+	if desiredReplicas > 0 && groupSize > 0 {
+		totalInstances = desiredReplicas * groupSize
 	}
 	item := SSPAIRJobItem{
 		Name: job.Name, UID: job.UID, State: job.Status.State, Workspace: job.WorkspaceName,
 		Queue: job.Spec.Queue.Name, QueueType: job.Spec.Queue.Type, Cluster: resourceNameFromRID(job.Spec.Queue.ID, "clusters"),
 		Priority: job.Spec.Priority, Creator: job.Ownership.CreatorName, Region: job.Region, Profile: job.ProfileName,
 		ReadyReplicas: job.Status.ReadyReplicas, Replicas: replicas, CreatedAt: formatSSPTime(job.Status.CreateTime),
+		DesiredReplicas: desiredReplicas, GroupSize: groupSize, TotalInstances: totalInstances,
 		UpdatedAt: formatSSPTime(job.Status.UpdateTime), InternalIP: job.Status.LeaderServiceClusterIP,
 		Resource: resource, Raw: job,
 	}

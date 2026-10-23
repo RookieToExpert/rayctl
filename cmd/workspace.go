@@ -20,6 +20,7 @@ func newWorkspaceCmd() *cobra.Command {
 	cmd.AddCommand(newWorkspaceListCmd())
 	cmd.AddCommand(newWorkspaceGetCmd())
 	cmd.AddCommand(newWorkspaceNodeCmd())
+	cmd.AddCommand(newWorkspaceWorkloadCmd())
 	return cmd
 }
 

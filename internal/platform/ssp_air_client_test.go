@@ -114,6 +114,41 @@ func TestListSSPAIRWorkersPaginatesToRequestedLimit(t *testing.T) {
 	}
 }
 
+func TestListSSPAIRWorkersParsesComputeLabelsAndNodeInfo(t *testing.T) {
+	client := testSSPAIRClient(func(request *http.Request) string {
+		if !strings.HasSuffix(request.URL.Path, "/workers") {
+			t.Fatalf("unexpected path %q", request.URL.Path)
+		}
+		items := make([]string, 0, 9)
+		for index := 0; index < 8; index++ {
+			items = append(items, `{"name":"infer-demo-0-`+strconv.Itoa(index)+`","phase":"RUNNING","host_ip":"10.0.0.`+strconv.Itoa(index+1)+`","ip":"10.1.0.`+strconv.Itoa(index+1)+`","metadata":{"labels":{"leaderworkerset.sigs.k8s.io/name":"infer-demo","leaderworkerset.sigs.k8s.io/group-index":"0","leaderworkerset.sigs.k8s.io/worker-index":"`+strconv.Itoa(index)+`"}},"node_info":{"name":"node-`+strconv.Itoa(index)+`"}}`)
+		}
+		items = append(items, `{"name":"infer-demo-metrics","phase":"RUNNING","host_ip":"10.0.0.9","metadata":{"labels":{"app":"metrics"}},"node_info":{"name":"node-metrics"}}`)
+		return `{"workers":[` + strings.Join(items, ",") + `],"total_size":9}`
+	})
+	job := SSPAIRJob{Name: "infer-demo", WorkspaceName: "ws-demo", SubscriptionName: "sub-1", ResourceGroupName: "default", Region: "cn-pj-01", ProfileName: "d"}
+	workers, total, err := client.ListSSPAIRWorkers(context.Background(), job, 20)
+	if err != nil {
+		t.Fatalf("ListSSPAIRWorkers() error = %v", err)
+	}
+	if len(workers) != 9 || total != 9 {
+		t.Fatalf("workers=%d total=%d, want 9 each", len(workers), total)
+	}
+	for index := 0; index < 8; index++ {
+		worker := workers[index]
+		if worker.Metadata.Labels["leaderworkerset.sigs.k8s.io/name"] != "infer-demo" || worker.Metadata.Labels["leaderworkerset.sigs.k8s.io/group-index"] != "0" || worker.Metadata.Labels["leaderworkerset.sigs.k8s.io/worker-index"] != strconv.Itoa(index) || worker.NodeInfo.Name != "node-"+strconv.Itoa(index) {
+			t.Fatalf("compute worker %d = %#v", index, worker)
+		}
+		if worker.HostIP != "10.0.0."+strconv.Itoa(index+1) || worker.IP != "10.1.0."+strconv.Itoa(index+1) || worker.Phase != "RUNNING" {
+			t.Fatalf("flat worker fields %d = %#v", index, worker)
+		}
+	}
+	metrics := workers[8]
+	if metrics.Metadata.Labels["leaderworkerset.sigs.k8s.io/name"] != "" || metrics.NodeInfo.Name != "node-metrics" {
+		t.Fatalf("metrics worker = %#v", metrics)
+	}
+}
+
 func TestListSSPAIRGatewaysParsesFullListObject(t *testing.T) {
 	client := testSSPAIRClient(func(request *http.Request) string {
 		return `{"infer_gateways":[{"name":"service-demo","uid":"gateway-uid","spec":{"replicas":2,"queue":{"name":"queue-demo"}},"status":{"state":"RUNNING"}}],"total_size":1}`

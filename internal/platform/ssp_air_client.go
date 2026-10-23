@@ -115,6 +115,12 @@ type SSPAIRWorker struct {
 	RestartCount    int    `json:"restart_count"`
 	LastStartedTime string `json:"last_started_time"`
 	CreateTime      string `json:"create_time"`
+	Metadata        struct {
+		Labels map[string]string `json:"labels"`
+	} `json:"metadata"`
+	NodeInfo struct {
+		Name string `json:"name"`
+	} `json:"node_info"`
 }
 
 type SSPAIRGateway struct {

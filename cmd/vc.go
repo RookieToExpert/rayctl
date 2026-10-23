@@ -26,6 +26,7 @@ func newVCCmd() *cobra.Command {
 	vcCmd.AddCommand(newVCRenewCmd())
 	vcCmd.AddCommand(newVCGetCmd())
 	vcCmd.AddCommand(newVCNodeCmd())
+	vcCmd.AddCommand(newVCWorkloadCmd())
 	vcCmd.AddCommand(newClusterSetCmd())
 	return vcCmd
 }

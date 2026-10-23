@@ -94,8 +94,8 @@ func newAIRJobGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace，可显著加快精确查询")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 worker、卷、镜像和详细资源")
-	cmd.Flags().IntVarP(&workerLimit, "worker-limit", "c", 20, "-l 时最多展示的 worker 数量")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示实例时间、卷、镜像和详细资源及 Pod 诊断")
+	cmd.Flags().IntVarP(&workerLimit, "worker-limit", "c", 20, "最多展示的实例及辅助 Pod 数量")
 	cmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	return cmd
 }

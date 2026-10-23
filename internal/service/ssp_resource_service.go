@@ -136,6 +136,7 @@ type SSPQueueWorkloadQuery struct {
 
 type SSPQueueWorkloadItem struct {
 	Queue     string
+	Namespace string
 	Type      string
 	Name      string
 	UID       string
