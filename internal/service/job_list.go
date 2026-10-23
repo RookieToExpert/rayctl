@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
+	"net/http"
 	"os"
 	"path/filepath"
 	"rayctl/internal/kube"
@@ -359,11 +360,17 @@ func (s *JobService) ListCurrentTenantVolcanoJobsSince(ctx context.Context, incl
 	items := make([]JobClusterItem, 0)
 	warnings := make([]string, 0)
 	succeeded := 0
+	only404 := len(results) > 0
 	for _, result := range results {
 		if result.err != nil {
+			var status *platform.HTTPStatusError
+			if !errors.As(result.err, &status) || status.StatusCode != http.StatusNotFound {
+				only404 = false
+			}
 			warnings = append(warnings, fmt.Sprintf("跳过 VC %s：%s", result.name, conciseJobListError(result.err)))
 			continue
 		}
+		only404 = false
 		succeeded++
 		for index := range result.jobs {
 			job := &result.jobs[index]
@@ -404,6 +411,12 @@ func (s *JobService) ListCurrentTenantVolcanoJobsSince(ctx context.Context, incl
 	})
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if only404 && s.vcClient.ProfileEnvironment(s.vcClient.CurrentProfileName()) == "pt" {
+		return nil, ErrPTATEUnavailable
 	}
 	if succeeded == 0 && len(vclusters) > 0 {
 		return nil, fmt.Errorf("全部 %d 个 VC 的任务查询均失败；%s", len(vclusters), firstNonEmpty(strings.TrimPrefix(warnings[0], "跳过 VC "), "请检查平台或 VC kubeconfig"))
