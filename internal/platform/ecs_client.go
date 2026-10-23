@@ -23,7 +23,7 @@ func (c *VirtualClusterClient) listECSVirtualMachinesWithProfile(ctx context.Con
 
 		var payload ecsVirtualMachineListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return result, err
 		}
 		if len(payload.VirtualMachines) == 0 {
 			break
@@ -53,7 +53,7 @@ func (c *VirtualClusterClient) listAISpacesWithProfile(ctx context.Context, prof
 
 		var payload aiSpaceListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return result, err
 		}
 		if len(payload.AISpaces) == 0 {
 			break
@@ -68,79 +68,55 @@ func (c *VirtualClusterClient) listAISpacesWithProfile(ctx context.Context, prof
 }
 
 func (c *VirtualClusterClient) ListECSVirtualMachines(ctx context.Context) ([]ECSVirtualMachine, error) {
-	result := make([]ECSVirtualMachine, 0)
-	seen := make(map[string]struct{})
-	var lastErr error
-	success := false
-	for _, profile := range c.orderedProfiles() {
-		items, err := c.listECSVirtualMachinesWithProfile(ctx, profile, "")
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		success = true
-		for _, item := range items {
-			item.ProfileName = profile.Name
-			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.ID), strings.TrimSpace(item.Name))
-			if key == "" {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			result = append(result, item)
-		}
-	}
-	if success {
-		return result, nil
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, fmt.Errorf("no platform profile available")
+	return c.listEnvironmentECSVirtualMachines(ctx, "")
 }
 
 func (c *VirtualClusterClient) ListAISpaces(ctx context.Context) ([]AISpace, error) {
-	result := make([]AISpace, 0)
-	seen := make(map[string]struct{})
-	var lastErr error
-	success := false
-	for _, profile := range c.orderedProfiles() {
-		items, err := c.listAISpacesWithProfile(ctx, profile, "")
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		success = true
-		for _, item := range items {
-			item.ProfileName = profile.Name
-			key := firstNonEmpty(strings.TrimSpace(item.UID), strings.TrimSpace(item.ID), strings.TrimSpace(item.Name))
-			if key == "" {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			result = append(result, item)
-		}
-	}
-	if success {
-		return result, nil
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, fmt.Errorf("no platform profile available")
+	return c.listEnvironmentAISpaces(ctx, "")
+}
+
+func (c *VirtualClusterClient) FindECSVirtualMachines(ctx context.Context, identifier string) ([]ECSVirtualMachine, error) {
+	return c.listEnvironmentECSVirtualMachines(ctx, exactECSResourceFilter(identifier))
+}
+
+func (c *VirtualClusterClient) FindAISpaces(ctx context.Context, identifier string) ([]AISpace, error) {
+	return c.listEnvironmentAISpaces(ctx, exactECSResourceFilter(identifier))
+}
+
+func (c *VirtualClusterClient) listEnvironmentECSVirtualMachines(ctx context.Context, filter string) ([]ECSVirtualMachine, error) {
+	return listProfileInventory(ctx, c.currentEnvironmentProfiles(), "ECS", func(ctx context.Context, profile clientProfile) ([]ECSVirtualMachine, error) {
+		return c.listECSVirtualMachinesWithProfile(ctx, profile, filter)
+	}, func(item *ECSVirtualMachine, profile clientProfile) { item.ProfileName = profile.Name }, func(item ECSVirtualMachine) string {
+		return firstNonEmpty(item.TenantID, item.ProfileName) + "|" + firstNonEmpty(item.UID, item.ID, item.Name)
+	})
+}
+
+func (c *VirtualClusterClient) listEnvironmentAISpaces(ctx context.Context, filter string) ([]AISpace, error) {
+	return listProfileInventory(ctx, c.currentEnvironmentProfiles(), "AIS", func(ctx context.Context, profile clientProfile) ([]AISpace, error) {
+		return c.listAISpacesWithProfile(ctx, profile, filter)
+	}, func(item *AISpace, profile clientProfile) { item.ProfileName = profile.Name }, func(item AISpace) string {
+		return firstNonEmpty(item.TenantID, item.ProfileName) + "|" + firstNonEmpty(item.UID, item.ID, item.Name)
+	})
+}
+
+func (c *VirtualClusterClient) ListCurrentProfileECSVirtualMachines(ctx context.Context) ([]ECSVirtualMachine, error) {
+	return c.listCurrentProfileECSVirtualMachines(ctx, "")
+}
+
+func (c *VirtualClusterClient) ListCurrentProfileAISpaces(ctx context.Context) ([]AISpace, error) {
+	return c.listCurrentProfileAISpaces(ctx, "")
 }
 
 func (c *VirtualClusterClient) FindCurrentProfileECSVirtualMachines(ctx context.Context, identifier string) ([]ECSVirtualMachine, error) {
+	return c.listCurrentProfileECSVirtualMachines(ctx, exactECSResourceFilter(identifier))
+}
+
+func (c *VirtualClusterClient) listCurrentProfileECSVirtualMachines(ctx context.Context, filter string) ([]ECSVirtualMachine, error) {
 	profile, ok := c.currentClientProfile()
 	if !ok {
 		return nil, fmt.Errorf("no current platform profile available")
 	}
-	items, err := c.listECSVirtualMachinesWithProfile(ctx, profile, exactECSResourceFilter(identifier))
+	items, err := c.listECSVirtualMachinesWithProfile(ctx, profile, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -151,11 +127,15 @@ func (c *VirtualClusterClient) FindCurrentProfileECSVirtualMachines(ctx context.
 }
 
 func (c *VirtualClusterClient) FindCurrentProfileAISpaces(ctx context.Context, identifier string) ([]AISpace, error) {
+	return c.listCurrentProfileAISpaces(ctx, exactECSResourceFilter(identifier))
+}
+
+func (c *VirtualClusterClient) listCurrentProfileAISpaces(ctx context.Context, filter string) ([]AISpace, error) {
 	profile, ok := c.currentClientProfile()
 	if !ok {
 		return nil, fmt.Errorf("no current platform profile available")
 	}
-	items, err := c.listAISpacesWithProfile(ctx, profile, exactECSResourceFilter(identifier))
+	items, err := c.listAISpacesWithProfile(ctx, profile, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +155,8 @@ func exactECSResourceFilter(identifier string) string {
 }
 
 type ECSVirtualMachine struct {
+	Zone        string `json:"zone"`
+	TenantID    string `json:"tenant_id"`
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	UID         string `json:"uid"`
@@ -183,10 +165,11 @@ type ECSVirtualMachine struct {
 	State       string `json:"state"`
 	ProfileName string `json:"-"`
 	Properties  struct {
-		Hostname           string `json:"hostname"`
-		MachineType        string `json:"machine_type"`
-		VirtualMachineType string `json:"virtual_machine_type"`
-		ImageID            string `json:"image_id"`
+		DNATRules          []DNATRule `json:"dnat_rules"`
+		Hostname           string     `json:"hostname"`
+		MachineType        string     `json:"machine_type"`
+		VirtualMachineType string     `json:"virtual_machine_type"`
+		ImageID            string     `json:"image_id"`
 		Metadata           struct {
 			Items []struct {
 				Key   string `json:"key"`

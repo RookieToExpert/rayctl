@@ -2,9 +2,53 @@ package output
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"rayctl/internal/service"
 )
+
+func PrintECSList(result *service.ECSListResult, long bool) {
+	if captureJSON(result) || result == nil {
+		return
+	}
+	headers := []string{"TYPE", "NAME", "STATE", "INTERNAL IP", "CREATOR"}
+	widths := []int{6, 64, 16, 40, 32}
+	minimums := []int{4, 20, 10, 12, 12}
+	noWrapColumns := []int{1, 3, 4}
+	if long {
+		headers = append(headers, "TENANT", "UID", "MACHINE", "VPC")
+		widths = append(widths, 32, 36, 32, 64)
+		minimums = append(minimums, 8, 36, 12, 16)
+		noWrapColumns = append(noWrapColumns, 5, 6, 7, 8)
+	}
+	rows := make([][]string, 0, len(result.Items))
+	for _, item := range result.Items {
+		row := []string{emptyDash(item.ResourceType), emptyDash(item.Name), emptyDash(item.State), emptyDash(item.InternalIP), emptyDash(item.Creator)}
+		if long {
+			row = append(row, emptyDash(item.Tenant), emptyDash(item.UID), emptyDash(item.MachineType), emptyDash(item.VPC))
+		}
+		for _, column := range noWrapColumns {
+			minimums[column] = max(minimums[column], min(widths[column], textWidth(row[column])))
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		row := make([]string, len(headers))
+		for index := range row {
+			row[index] = "-"
+		}
+		rows = append(rows, row)
+	}
+	printBoxTableWithOptions(headers, rows, widths, tableOptions{
+		minWidths:   minimums,
+		noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), noWrapColumns...)...),
+	})
+	fmt.Fprintf(os.Stdout, "Showing %d of %d matching resources", len(result.Items), result.Total)
+	if result.Truncated {
+		fmt.Fprint(os.Stdout, "; use -n 0 to show all")
+	}
+	fmt.Fprintln(os.Stdout)
+}
 
 func PrintECSCheckDetail(result *service.ECSCheckResult) {
 	if captureJSON(result) {
@@ -74,6 +118,8 @@ func PrintECSCheckDetail(result *service.ECSCheckResult) {
 				{"VM", emptyDash(item.VMName)},
 				{"Namespace", emptyDash(item.Namespace)},
 				{"Node", emptyDash(item.Node)},
+				{"租户", emptyDash(item.Tenant)},
+				{"租户 ID", emptyDash(item.TenantID)},
 				{"创建人", emptyDash(item.Creator)},
 				{"内网 IP", emptyDash(item.InternalIP)},
 			},
@@ -112,5 +158,25 @@ func PrintECSCheckDetail(result *service.ECSCheckResult) {
 				),
 			},
 		)
+		printECSDNAT(item)
+	}
+}
+
+func printECSDNAT(item service.ECSCheckItem) {
+	fmt.Fprintln(os.Stdout)
+	if len(item.DNATRules) > 0 {
+		rows := make([][]string, 0, len(item.DNATRules))
+		for _, rule := range item.DNATRules {
+			rows = append(rows, []string{net.JoinHostPort(rule.ExternalIP, rule.ExternalPort), net.JoinHostPort(rule.InternalIP, rule.InternalPort), emptyDash(rule.Protocol), emptyDash(rule.State), emptyDash(rule.NATGateway)})
+		}
+		printBoxTableWithMaxWidths([]string{"EXTERNAL", "INTERNAL", "PROTOCOL", "STATE", "NAT GATEWAY"}, rows, []int{44, 44, 12, 16, 40})
+	} else if item.DNATComplete {
+		fmt.Fprintln(os.Stdout, "DNAT: 未发现端口映射。")
+	}
+	if !item.DNATComplete {
+		fmt.Fprintln(os.Stdout, "DNAT: 查询未完成。")
+	}
+	for _, warning := range item.Warnings {
+		fmt.Fprintln(os.Stdout, "Warning:", redactText(warning))
 	}
 }

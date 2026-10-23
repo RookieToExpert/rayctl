@@ -367,6 +367,21 @@ func (c *VirtualClusterClient) currentEnvironmentProfiles() []clientProfile {
 	return result
 }
 
+// A resolved region may differ from the current profile (for example when
+// inspecting PT through an HC kubeconfig). Inventory still includes every
+// configured tenant at the selected region's platform endpoint.
+func (c *VirtualClusterClient) inventoryProfilesForRegion(region string) []clientProfile {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return c.currentEnvironmentProfiles()
+	}
+	current, ok := c.currentClientProfile()
+	if ok && strings.EqualFold(strings.TrimSpace(current.Region), region) {
+		return c.currentEnvironmentProfiles()
+	}
+	return c.profilesForRegion(region)
+}
+
 func (c *VirtualClusterClient) currentClientProfile() (clientProfile, bool) {
 	if len(c.profiles) == 0 {
 		return clientProfile{

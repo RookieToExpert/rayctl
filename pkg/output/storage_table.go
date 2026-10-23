@@ -7,15 +7,17 @@ import (
 	"strings"
 )
 
-func PrintAFSList(result *service.AFSListResult) {
+func PrintAFSList(result *service.AFSListResult, longOutput ...bool) {
 	if captureJSON(result) {
 		return
 	}
 	if result == nil {
 		return
 	}
+	tenants := make([]string, 0, len(result.Items))
 	rows := make([][]string, 0, maxInt(1, len(result.Items)))
 	for _, item := range result.Items {
+		tenants = append(tenants, item.Tenant)
 		rows = append(rows, []string{
 			emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Capacity), emptyDash(item.StorageClass),
 			emptyDash(item.Zone), emptyDash(item.CreatedAt),
@@ -24,11 +26,12 @@ func PrintAFSList(result *service.AFSListResult) {
 	if len(rows) == 0 {
 		rows = append(rows, []string{"-", "-", "-", "-", "-", "-"})
 	}
-	printBoxTableWithOptions(
+	printInventoryWithTenants(
 		[]string{"AFS", "STATE", "CAPACITY", "STORAGE CLASS", "ZONE", "CREATED"},
 		rows,
 		[]int{36, 10, 12, 18, 12, 20},
 		tableOptions{minWidths: []int{18, 8, 8, 12, 8, 16}},
+		tenants, longOutput,
 	)
 }
 
@@ -42,6 +45,8 @@ func PrintAFSDetail(result *service.AFSListItem) {
 	printResourceDetail([][]string{
 		{"AFS", emptyDash(result.Name)},
 		{"UID", emptyDash(result.UID)},
+		{"TENANT", emptyDash(result.Tenant)},
+		{"TENANT ID", emptyDash(result.TenantID)},
 		{"STATE", emptyDash(result.State)},
 		{"CAPACITY", emptyDash(result.Capacity)},
 		{"STORAGE CLASS", emptyDash(result.StorageClass)},

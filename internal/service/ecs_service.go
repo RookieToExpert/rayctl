@@ -58,6 +58,11 @@ type ECSCheckItem struct {
 	Type         string
 	ImageName    string
 	VPC          string
+	Tenant       string
+	TenantID     string
+	DNATRules    []ECSDNATItem
+	DNATComplete bool
+	Warnings     []string
 }
 
 type nodeOwnershipHint struct {
@@ -73,6 +78,7 @@ type vmResourceContext struct {
 	RawText      string
 	ResourceUID  string
 	ResourceName string
+	MachineSpec  string
 }
 
 type ecsCheckSnapshot struct {
@@ -144,10 +150,10 @@ func (s *ECSService) checkWithSnapshot(ctx context.Context, keyword string, snap
 		return nil, fmt.Errorf("ecs/ais identifier is required")
 	}
 	ecsCall := asyncCall(ctx, func(ctx context.Context) ([]platform.ECSVirtualMachine, error) {
-		return s.vcClient.FindCurrentProfileECSVirtualMachines(ctx, keyword)
+		return s.vcClient.FindECSVirtualMachines(ctx, keyword)
 	})
 	aisCall := asyncCall(ctx, func(ctx context.Context) ([]platform.AISpace, error) {
-		return s.vcClient.FindCurrentProfileAISpaces(ctx, keyword)
+		return s.vcClient.FindAISpaces(ctx, keyword)
 	})
 	contexts, err := snapshot.baseVMIContexts(ctx)
 	if err != nil {
@@ -201,18 +207,19 @@ func (s *ECSService) checkWithSnapshot(ctx context.Context, keyword string, snap
 			internalIP := firstNonEmpty(match.InternalIP, ecsPlatformIP(resource), "-")
 			items = append(items, ECSCheckItem{
 				ResourceType: "ECS",
-				Name:         firstNonEmpty(resource.Name, resource.DisplayName, "-"),
-				UID:          firstNonEmpty(resource.UID, "-"),
-				VMName:       dashIfEmptyECS(match.VMName),
-				Namespace:    dashIfEmptyECS(match.Namespace),
-				Node:         dashIfEmptyECS(match.Node),
-				Creator:      dashIfEmptyECS(firstNonEmpty(usernames[resource.CreatorID], resource.CreatorID)),
-				InternalIP:   dashIfEmptyECS(internalIP),
-				State:        dashIfEmptyECS(strings.TrimSpace(resource.State)),
-				MachineType:  dashIfEmptyECS(strings.TrimSpace(resource.Properties.MachineType)),
-				Type:         dashIfEmptyECS(strings.TrimSpace(resource.Properties.VirtualMachineType)),
-				ImageName:    dashIfEmptyECS(ecsImageName(resource)),
-				VPC:          dashIfEmptyECS(ecsVPC(resource)),
+				Tenant:       resource.ProfileName, TenantID: resource.TenantID,
+				Name:        firstNonEmpty(resource.Name, resource.DisplayName, "-"),
+				UID:         firstNonEmpty(resource.UID, "-"),
+				VMName:      dashIfEmptyECS(match.VMName),
+				Namespace:   dashIfEmptyECS(match.Namespace),
+				Node:        dashIfEmptyECS(match.Node),
+				Creator:     dashIfEmptyECS(firstNonEmpty(usernames[resource.CreatorID], resource.CreatorID)),
+				InternalIP:  dashIfEmptyECS(internalIP),
+				State:       dashIfEmptyECS(strings.TrimSpace(resource.State)),
+				MachineType: dashIfEmptyECS(firstNonEmpty(ecsMachineType(resource), match.MachineSpec)),
+				Type:        dashIfEmptyECS(strings.TrimSpace(resource.Properties.VirtualMachineType)),
+				ImageName:   dashIfEmptyECS(ecsImageName(resource)),
+				VPC:         dashIfEmptyECS(ecsVPC(resource)),
 			})
 		}
 	}
@@ -226,22 +233,24 @@ func (s *ECSService) checkWithSnapshot(ctx context.Context, keyword string, snap
 			internalIP := firstNonEmpty(match.InternalIP, strings.TrimSpace(resource.Properties.HostIP), "-")
 			items = append(items, ECSCheckItem{
 				ResourceType: "AIS",
-				Name:         firstNonEmpty(resource.DisplayName, resource.Name, "-"),
-				UID:          firstNonEmpty(resource.UID, "-"),
-				VMName:       dashIfEmptyECS(match.VMName),
-				Namespace:    dashIfEmptyECS(match.Namespace),
-				Node:         dashIfEmptyECS(match.Node),
-				Creator:      dashIfEmptyECS(firstNonEmpty(usernames[resource.CreatorID], resource.CreatorID)),
-				InternalIP:   dashIfEmptyECS(internalIP),
-				State:        dashIfEmptyECS(strings.TrimSpace(resource.State)),
-				MachineType:  dashIfEmptyECS(strings.TrimSpace(resource.Properties.VirtualMachineProperties.MachineType)),
-				Type:         dashIfEmptyECS(strings.TrimSpace(resource.Properties.Type)),
-				ImageName:    dashIfEmptyECS(strings.TrimSpace(resource.Properties.ImagePath)),
-				VPC:          dashIfEmptyECS(aisVPC(resource)),
+				Tenant:       resource.ProfileName, TenantID: resource.TenantID,
+				Name:        firstNonEmpty(resource.DisplayName, resource.Name, "-"),
+				UID:         firstNonEmpty(resource.UID, "-"),
+				VMName:      dashIfEmptyECS(match.VMName),
+				Namespace:   dashIfEmptyECS(match.Namespace),
+				Node:        dashIfEmptyECS(match.Node),
+				Creator:     dashIfEmptyECS(firstNonEmpty(usernames[resource.CreatorID], resource.CreatorID)),
+				InternalIP:  dashIfEmptyECS(internalIP),
+				State:       dashIfEmptyECS(strings.TrimSpace(resource.State)),
+				MachineType: dashIfEmptyECS(firstNonEmpty(aisMachineType(resource), match.MachineSpec)),
+				Type:        dashIfEmptyECS(strings.TrimSpace(resource.Properties.Type)),
+				ImageName:   dashIfEmptyECS(strings.TrimSpace(resource.Properties.ImagePath)),
+				VPC:         dashIfEmptyECS(aisVPC(resource)),
 			})
 		}
 	}
 
+	s.enrichDNAT(ctx, items, matchedECS, matchedAIS)
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].ResourceType == items[j].ResourceType {
 			if items[i].Name == items[j].Name {
@@ -407,6 +416,7 @@ func buildVMResourceContexts(vms []unstructured.Unstructured, vmis []unstructure
 		}
 
 		result = append(result, vmResourceContext{
+			MachineSpec:  firstNonEmpty(vmMachineSpec(vmi.Object, false), vmMachineSpec(vm.Object, true)),
 			VMName:       vm.GetName(),
 			Namespace:    vm.GetNamespace(),
 			Node:         firstNonEmpty(getNestedString(vmi.Object, "status", "nodeName"), getNestedString(vmi.Object, "metadata", "labels", "kubevirt.io/nodeName")),
@@ -424,6 +434,7 @@ func buildVMIResourceContexts(vmis []unstructured.Unstructured) []vmResourceCont
 	for _, vmi := range vmis {
 		rawBytes, _ := json.Marshal(vmi.Object)
 		result = append(result, vmResourceContext{
+			MachineSpec:  vmMachineSpec(vmi.Object, false),
 			VMName:       vmi.GetName(),
 			Namespace:    vmi.GetNamespace(),
 			Node:         firstNonEmpty(getNestedString(vmi.Object, "status", "nodeName"), getNestedString(vmi.Object, "metadata", "labels", "kubevirt.io/nodeName")),
@@ -510,6 +521,9 @@ func matchVMContextsForECS(contexts []vmResourceContext, resource platform.ECSVi
 	lowerKeyword := strings.ToLower(strings.TrimSpace(keyword))
 	result := make([]vmResourceContext, 0)
 	for _, item := range contexts {
+		if item.ResourceUID != "" && resource.UID != "" && item.ResourceUID != strings.TrimSpace(resource.UID) {
+			continue
+		}
 		switch {
 		case item.ResourceUID != "" && item.ResourceUID == strings.TrimSpace(resource.UID):
 			result = append(result, item)
@@ -528,6 +542,9 @@ func matchVMContextsForAIS(contexts []vmResourceContext, resource platform.AISpa
 	result := make([]vmResourceContext, 0)
 	for _, item := range contexts {
 		itemUID := strings.ToLower(strings.TrimSpace(item.ResourceUID))
+		if resourceUID != "" && itemUID != "" && itemUID != resourceUID {
+			continue
+		}
 		if resourceUID != "" && itemUID == resourceUID {
 			result = append(result, item)
 			continue

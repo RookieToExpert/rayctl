@@ -87,7 +87,8 @@ func newAFSCreateCmd() *cobra.Command {
 }
 
 func newAFSListCmd() *cobra.Command {
-	return &cobra.Command{
+	var longOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出 AFS 资源",
 		Args:  cobra.NoArgs,
@@ -97,13 +98,17 @@ func newAFSListCmd() *cobra.Command {
 				return err
 			}
 			result, err := networkService.ListAFS(cmd.Context())
-			if err != nil {
-				return err
+			if result != nil {
+				output.PrintAFSList(result, longOutput)
+				for _, warning := range result.Warnings {
+					fmt.Fprintln(cmd.ErrOrStderr(), "warning:", warning)
+				}
 			}
-			output.PrintAFSList(result)
-			return nil
+			return err
 		},
 	}
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示租户信息")
+	return cmd
 }
 
 func newAFSGetCmd() *cobra.Command {

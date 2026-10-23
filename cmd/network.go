@@ -18,7 +18,8 @@ func newVPCCmd() *cobra.Command {
 }
 
 func newVPCListCmd() *cobra.Command {
-	return &cobra.Command{
+	var longOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出 VPC 资源",
 		Args:  cobra.NoArgs,
@@ -28,13 +29,17 @@ func newVPCListCmd() *cobra.Command {
 				return err
 			}
 			result, err := networkService.ListVPCs(cmd.Context())
-			if err != nil {
-				return err
+			if result != nil {
+				output.PrintVPCList(result, longOutput)
+				for _, warning := range result.Warnings {
+					fmt.Fprintln(cmd.ErrOrStderr(), "warning:", warning)
+				}
 			}
-			output.PrintVPCList(result)
-			return nil
+			return err
 		},
 	}
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示租户信息")
+	return cmd
 }
 
 func newVPCGetCmd() *cobra.Command {
@@ -75,7 +80,8 @@ func newSubnetCmd() *cobra.Command {
 }
 
 func newSubnetListCmd() *cobra.Command {
-	return &cobra.Command{
+	var longOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出 Subnet 资源",
 		Args:  cobra.NoArgs,
@@ -85,13 +91,17 @@ func newSubnetListCmd() *cobra.Command {
 				return err
 			}
 			result, err := networkService.ListSubnets(cmd.Context())
-			if err != nil {
-				return err
+			if result != nil {
+				output.PrintSubnetList(result, longOutput)
+				for _, warning := range result.Warnings {
+					fmt.Fprintln(cmd.ErrOrStderr(), "warning:", warning)
+				}
 			}
-			output.PrintSubnetList(result)
-			return nil
+			return err
 		},
 	}
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示租户信息")
+	return cmd
 }
 
 func newSubnetGetCmd() *cobra.Command {
@@ -132,7 +142,8 @@ func newNATGatewayCmd() *cobra.Command {
 }
 
 func newNATGatewayListCmd() *cobra.Command {
-	return &cobra.Command{
+	var longOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出 NAT Gateway 资源",
 		Args:  cobra.NoArgs,
@@ -142,13 +153,17 @@ func newNATGatewayListCmd() *cobra.Command {
 				return err
 			}
 			result, err := networkService.ListNATGateways(cmd.Context())
-			if err != nil {
-				return err
+			if result != nil {
+				output.PrintNATGatewayList(result, longOutput)
+				for _, warning := range result.Warnings {
+					fmt.Fprintln(cmd.ErrOrStderr(), "warning:", warning)
+				}
 			}
-			output.PrintNATGatewayList(result)
-			return nil
+			return err
 		},
 	}
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示租户信息")
+	return cmd
 }
 
 func newNATGatewayGetCmd() *cobra.Command {

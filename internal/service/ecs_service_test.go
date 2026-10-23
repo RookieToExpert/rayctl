@@ -24,11 +24,15 @@ type fakeECSPlatform struct {
 	maximumCalls      int32
 }
 
-func (f *fakeECSPlatform) FindCurrentProfileECSVirtualMachines(context.Context, string) ([]platform.ECSVirtualMachine, error) {
+func (f *fakeECSPlatform) FindInstanceDNATRules(context.Context, platform.InstanceDNATQuery) ([]platform.DNATRule, error) {
 	return nil, nil
 }
 
-func (f *fakeECSPlatform) FindCurrentProfileAISpaces(_ context.Context, keyword string) ([]platform.AISpace, error) {
+func (f *fakeECSPlatform) FindECSVirtualMachines(context.Context, string) ([]platform.ECSVirtualMachine, error) {
+	return nil, nil
+}
+
+func (f *fakeECSPlatform) FindAISpaces(_ context.Context, keyword string) ([]platform.AISpace, error) {
 	active := atomic.AddInt32(&f.activeCalls, 1)
 	for {
 		maximum := atomic.LoadInt32(&f.maximumCalls)

@@ -8,6 +8,7 @@ import (
 )
 
 type VPCResource struct {
+	ProfileName  string `json:"-"`
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	DisplayName  string `json:"display_name"`
@@ -32,6 +33,7 @@ type VPCResource struct {
 }
 
 type SubnetResource struct {
+	ProfileName  string `json:"-"`
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	DisplayName  string `json:"display_name"`
@@ -58,6 +60,7 @@ type SubnetResource struct {
 }
 
 type NATGatewayResource struct {
+	ProfileName  string `json:"-"`
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	DisplayName  string `json:"display_name"`
@@ -106,10 +109,12 @@ type natGatewayResourceListResponse struct {
 }
 
 func (c *VirtualClusterClient) ListVPCResources(ctx context.Context) ([]VPCResource, error) {
-	profile, ok := c.currentClientProfile()
-	if !ok {
-		return nil, fmt.Errorf("current platform profile not found")
-	}
+	return listProfileInventory(ctx, c.currentEnvironmentProfiles(), "VPC", c.listVPCResourcesWithProfile, func(item *VPCResource, profile clientProfile) { item.ProfileName = profile.Name }, func(item VPCResource) string {
+		return firstNonEmpty(item.TenantID, item.ProfileName) + "|" + firstNonEmpty(item.UID, item.ID, item.Name)
+	})
+}
+
+func (c *VirtualClusterClient) listVPCResourcesWithProfile(ctx context.Context, profile clientProfile) ([]VPCResource, error) {
 
 	pageToken := "1"
 	cursor := newPageCursor(pageToken)
@@ -124,7 +129,7 @@ func (c *VirtualClusterClient) ListVPCResources(ctx context.Context) ([]VPCResou
 
 		var payload vpcResourceListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return resources, err
 		}
 		resources = append(resources, payload.VPCs...)
 		if len(payload.VPCs) == 0 || !cursor.advance(payload.NextPageToken) {
@@ -136,10 +141,12 @@ func (c *VirtualClusterClient) ListVPCResources(ctx context.Context) ([]VPCResou
 }
 
 func (c *VirtualClusterClient) ListSubnetResources(ctx context.Context) ([]SubnetResource, error) {
-	profile, ok := c.currentClientProfile()
-	if !ok {
-		return nil, fmt.Errorf("current platform profile not found")
-	}
+	return listProfileInventory(ctx, c.currentEnvironmentProfiles(), "Subnet", c.listSubnetResourcesWithProfile, func(item *SubnetResource, profile clientProfile) { item.ProfileName = profile.Name }, func(item SubnetResource) string {
+		return firstNonEmpty(item.TenantID, item.ProfileName) + "|" + firstNonEmpty(item.UID, item.ID, item.Name)
+	})
+}
+
+func (c *VirtualClusterClient) listSubnetResourcesWithProfile(ctx context.Context, profile clientProfile) ([]SubnetResource, error) {
 
 	pageToken := "1"
 	cursor := newPageCursor(pageToken)
@@ -155,7 +162,7 @@ func (c *VirtualClusterClient) ListSubnetResources(ctx context.Context) ([]Subne
 
 		var payload subnetResourceListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return resources, err
 		}
 		resources = append(resources, payload.Subnets...)
 		if len(payload.Subnets) == 0 || !cursor.advance(payload.NextPageToken) {
@@ -167,10 +174,16 @@ func (c *VirtualClusterClient) ListSubnetResources(ctx context.Context) ([]Subne
 }
 
 func (c *VirtualClusterClient) ListNATGatewayResources(ctx context.Context) ([]NATGatewayResource, error) {
-	profile, ok := c.currentClientProfile()
-	if !ok {
-		return nil, fmt.Errorf("current platform profile not found")
-	}
+	return listProfileInventory(ctx, c.currentEnvironmentProfiles(), "NAT", c.listNATGatewayResourcesWithProfile, func(item *NATGatewayResource, profile clientProfile) { item.ProfileName = profile.Name }, func(item NATGatewayResource) string {
+		return firstNonEmpty(item.TenantID, item.ProfileName) + "|" + firstNonEmpty(item.UID, item.ID, item.Name)
+	})
+}
+
+func (c *VirtualClusterClient) listNATGatewayResourcesWithProfile(ctx context.Context, profile clientProfile) ([]NATGatewayResource, error) {
+	return c.listNATGatewaysWithFilter(ctx, profile, `vpc_id='**'`)
+}
+
+func (c *VirtualClusterClient) listNATGatewaysWithFilter(ctx context.Context, profile clientProfile, filter string) ([]NATGatewayResource, error) {
 
 	pageToken := "1"
 	cursor := newPageCursor(pageToken)
@@ -179,14 +192,14 @@ func (c *VirtualClusterClient) ListNATGatewayResources(ctx context.Context) ([]N
 		u, _ := url.Parse(profile.BaseURL)
 		u.Path = "/network/vpc/v2/subscriptions/-/resourceGroups/-/zones/-/natGws"
 		query := u.Query()
-		query.Set("filter", `vpc_id='**'`)
+		query.Set("filter", filter)
 		query.Set("page_size", fmt.Sprintf("%d", defaultPageLimit))
 		query.Set("page_token", pageToken)
 		u.RawQuery = query.Encode()
 
 		var payload natGatewayResourceListResponse
 		if err := c.getJSONWithProfile(ctx, profile, u.String(), &payload); err != nil {
-			return nil, err
+			return resources, err
 		}
 		resources = append(resources, payload.NATGateways...)
 		if len(payload.NATGateways) == 0 || !cursor.advance(payload.NextPageToken) {
@@ -202,6 +215,16 @@ func (c *VirtualClusterClient) ListCurrentStorageVolumeResources(ctx context.Con
 	if !ok {
 		return nil, fmt.Errorf("current platform profile not found")
 	}
+	return c.listAFSInventoryWithProfile(ctx, profile)
+}
+
+func (c *VirtualClusterClient) ListEnvironmentStorageVolumeResources(ctx context.Context) ([]StorageVolumeResource, error) {
+	return listProfileInventory(ctx, c.currentEnvironmentProfiles(), "AFS", c.listAFSInventoryWithProfile, func(item *StorageVolumeResource, profile clientProfile) { item.ProfileName = profile.Name }, func(item StorageVolumeResource) string {
+		return firstNonEmpty(item.RID, item.ProfileName+"|"+firstNonEmpty(item.ID, item.Name))
+	})
+}
+
+func (c *VirtualClusterClient) listAFSInventoryWithProfile(ctx context.Context, profile clientProfile) ([]StorageVolumeResource, error) {
 
 	pageToken := "1"
 	cursor := newPageCursor(pageToken)
@@ -217,7 +240,7 @@ func (c *VirtualClusterClient) ListCurrentStorageVolumeResources(ctx context.Con
 
 		var payload storageVolumePageResponse
 		if err := c.postJSONWithProfile(ctx, profile, u.String(), map[string]any{}, &payload); err != nil {
-			return nil, err
+			return resources, err
 		}
 		for i := range payload.Resources {
 			payload.Resources[i].ProfileName = profile.Name

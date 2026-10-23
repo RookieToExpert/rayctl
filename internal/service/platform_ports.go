@@ -17,8 +17,9 @@ type ClusterPlatform interface {
 
 // ECSPlatform contains only the ECS/AIS discovery operations used by ECSService.
 type ECSPlatform interface {
-	FindCurrentProfileECSVirtualMachines(ctx context.Context, identifier string) ([]platform.ECSVirtualMachine, error)
-	FindCurrentProfileAISpaces(ctx context.Context, identifier string) ([]platform.AISpace, error)
+	FindInstanceDNATRules(ctx context.Context, query platform.InstanceDNATQuery) ([]platform.DNATRule, error)
+	FindECSVirtualMachines(ctx context.Context, identifier string) ([]platform.ECSVirtualMachine, error)
+	FindAISpaces(ctx context.Context, identifier string) ([]platform.AISpace, error)
 	ListECSVirtualMachines(ctx context.Context) ([]platform.ECSVirtualMachine, error)
 	ListAISpaces(ctx context.Context) ([]platform.AISpace, error)
 	ResolveUsernames(ctx context.Context, ids []string) (map[string]string, error)

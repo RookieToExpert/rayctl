@@ -79,33 +79,7 @@ type SSPAIDVolumeMount struct {
 	AccessMode string `json:"access_mode"`
 }
 
-type SSPAIDDNATRule struct {
-	Name         string `json:"name"`
-	State        string `json:"state"`
-	ExternalIP   string `json:"external_ip"`
-	ExternalPort string `json:"external_port"`
-	InternalIP   string `json:"internal_ip"`
-	InternalPort string `json:"internal_port"`
-	Protocol     string `json:"protocol"`
-	Properties   struct {
-		ExternalIP   string `json:"external_ip"`
-		ExternalPort string `json:"external_port"`
-		InternalIP   string `json:"internal_ip"`
-		InternalPort string `json:"internal_port"`
-		Protocol     string `json:"protocol"`
-	} `json:"properties"`
-	DNATRule struct {
-		Name       string `json:"name"`
-		State      string `json:"state"`
-		Properties struct {
-			ExternalIP   string `json:"external_ip"`
-			ExternalPort string `json:"external_port"`
-			InternalIP   string `json:"internal_ip"`
-			InternalPort string `json:"internal_port"`
-			Protocol     string `json:"protocol"`
-		} `json:"properties"`
-	} `json:"dnat_rule"`
-}
+type SSPAIDDNATRule = DNATRule
 
 type sspAIDListResponse struct {
 	AIDs          []SSPAID `json:"aids"`
@@ -212,7 +186,7 @@ func (c *VirtualClusterClient) findSSPAIDs(ctx context.Context, profileName stri
 		return nil, fmt.Errorf("subscription, region, workspace and AID identifier are required")
 	}
 
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if strings.TrimSpace(profileName) != "" {
 		profile, ok := c.clientProfileByName(profileName)
 		if !ok {
@@ -383,16 +357,7 @@ func sspAIDDNATURL(profile clientProfile, aid SSPAID, gateway sspAIDNATGateway) 
 }
 
 func normalizeSSPAIDDNATRules(items []SSPAIDDNATRule) []SSPAIDDNATRule {
-	for i := range items {
-		items[i].Name = firstNonEmpty(items[i].Name, items[i].DNATRule.Name)
-		items[i].State = firstNonEmpty(items[i].State, items[i].DNATRule.State)
-		items[i].ExternalIP = firstNonEmpty(items[i].ExternalIP, items[i].Properties.ExternalIP, items[i].DNATRule.Properties.ExternalIP)
-		items[i].ExternalPort = firstNonEmpty(items[i].ExternalPort, items[i].Properties.ExternalPort, items[i].DNATRule.Properties.ExternalPort)
-		items[i].InternalIP = firstNonEmpty(items[i].InternalIP, items[i].Properties.InternalIP, items[i].DNATRule.Properties.InternalIP)
-		items[i].InternalPort = firstNonEmpty(items[i].InternalPort, items[i].Properties.InternalPort, items[i].DNATRule.Properties.InternalPort)
-		items[i].Protocol = firstNonEmpty(items[i].Protocol, items[i].Properties.Protocol, items[i].DNATRule.Properties.Protocol)
-	}
-	return items
+	return normalizeDNATRules(items)
 }
 
 func sspAIDRegion(aid SSPAID) string {

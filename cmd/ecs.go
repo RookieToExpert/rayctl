@@ -16,9 +16,10 @@ import (
 func newECSCmd() *cobra.Command {
 	ecsCmd := &cobra.Command{
 		Use:   "ecs",
-		Short: "查询 ECS/AIS 在 HC 中对应的 VM/VMI 信息",
+		Short: "查询 ECS/AIS 清单及 HC 中对应的 VM/VMI 信息",
 	}
 
+	ecsCmd.AddCommand(newECSListCmd())
 	ecsCmd.AddCommand(newECSGetCmd())
 	ecsCmd.AddCommand(newECSCheckCmd())
 	ecsCmd.AddCommand(newECSLoginCmd())
@@ -28,7 +29,7 @@ func newECSCmd() *cobra.Command {
 func newECSGetCmd() *cobra.Command {
 	return newECSQueryCmd(
 		"get <ais-name-or-ecs-name-or-uid> [ais-name-or-ecs-name-or-uid...]",
-		"并行查询一个或多个 AIS/ECS 的 VM、namespace、node、创建人和内网 IP",
+		"并行查询一个或多个 AIS/ECS 的 VM、namespace、node、创建人、内网 IP 和 DNAT",
 		"  rayctl ecs get ais-example ecs-example another-uid",
 	)
 }

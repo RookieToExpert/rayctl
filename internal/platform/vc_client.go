@@ -401,6 +401,8 @@ type VirtualCluster struct {
 }
 
 type AISpace struct {
+	Zone        string `json:"zone"`
+	TenantID    string `json:"tenant_id"`
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	UID         string `json:"uid"`
@@ -409,11 +411,13 @@ type AISpace struct {
 	State       string `json:"state"`
 	ProfileName string `json:"-"`
 	Properties  struct {
-		Type                     string `json:"type"`
-		ImagePath                string `json:"image_path"`
-		HostIP                   string `json:"host_ip"`
+		Type                     string     `json:"type"`
+		ImagePath                string     `json:"image_path"`
+		HostIP                   string     `json:"host_ip"`
+		DNATRules                []DNATRule `json:"dnat_rules"`
 		VirtualMachineProperties struct {
-			MachineType       string `json:"machine_type"`
+			MachineType       string     `json:"machine_type"`
+			DNATRules         []DNATRule `json:"dnat_rules"`
 			NetworkInterfaces []struct {
 				Properties struct {
 					IPv4Addr string `json:"ip_v4_addr"`

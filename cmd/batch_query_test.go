@@ -88,6 +88,7 @@ func TestResourceListCommandsRejectIdentifiers(t *testing.T) {
 		path []string
 	}{
 		{name: "afs list", root: newAFSCmd(), path: []string{"list"}},
+		{name: "ecs list", root: newECSCmd(), path: []string{"list"}},
 		{name: "vc list", root: newVCCmd(), path: []string{"list"}},
 		{name: "cluster list", root: newClusterCmd(), path: []string{"list"}},
 		{name: "workspace list", root: newWorkspaceCmd(), path: []string{"list"}},

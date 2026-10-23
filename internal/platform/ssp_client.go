@@ -338,7 +338,7 @@ type sspQueueListResponse struct {
 }
 
 func (c *VirtualClusterClient) ListSSPClusters(ctx context.Context, region string) ([]SSPCluster, error) {
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -459,7 +459,7 @@ func (c *VirtualClusterClient) ListSSPClusterQueues(ctx context.Context, cluster
 }
 
 func (c *VirtualClusterClient) ListSSPQueuesForRegion(ctx context.Context, region string) ([]SSPQueue, error) {
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -569,7 +569,7 @@ func normalizeSSPQueue(queue *SSPQueue, profile clientProfile) {
 }
 
 func (c *VirtualClusterClient) FindSSPQueuesForRegion(ctx context.Context, region string, names []string) ([]SSPQueue, error) {
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -670,7 +670,7 @@ func normalizeSSPCluster(cluster *SSPCluster, profile clientProfile) {
 // workspace namespaces being visible through the current kubeconfig.
 func (c *VirtualClusterClient) ListSSPWorkspaces(ctx context.Context, region string) ([]SSPWorkspace, error) {
 	region = strings.TrimSpace(region)
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -1088,7 +1088,7 @@ func (c *VirtualClusterClient) GetSSPQueueResource(ctx context.Context, profileN
 }
 
 func (c *VirtualClusterClient) FindSSPQueueResource(ctx context.Context, region string, identifier string) (*SSPQueueResourceDetails, error) {
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -1154,7 +1154,7 @@ func (c *VirtualClusterClient) ListSSPQueueResources(ctx context.Context, profil
 }
 
 func (c *VirtualClusterClient) ListSSPQueueResourcesForRegion(ctx context.Context, region string) ([]SSPQueueResourceDetails, error) {
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no platform profile configured for region %q", region)
 	}
@@ -1336,7 +1336,7 @@ func firstNestedString(value any, keys ...string) string {
 // for the requested region. Callers can fall back to Kubernetes labels when it
 // is intentionally omitted from platform.json.
 func (c *VirtualClusterClient) ConfiguredSubscriptionForRegion(region string) string {
-	for _, profile := range c.sspProfilesForRegion(region) {
+	for _, profile := range c.inventoryProfilesForRegion(region) {
 		if value := strings.TrimSpace(profile.Subscription); value != "" {
 			return value
 		}
@@ -1496,7 +1496,7 @@ func (c *VirtualClusterClient) findSSPTrainingJobs(ctx context.Context, profileN
 		return nil, fmt.Errorf("training job name or uid is required")
 	}
 
-	profiles := c.sspProfilesForRegion(region)
+	profiles := c.inventoryProfilesForRegion(region)
 	if strings.TrimSpace(profileName) != "" {
 		profile, ok := c.clientProfileByName(profileName)
 		if !ok {

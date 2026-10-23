@@ -15,10 +15,22 @@ type NetworkResourceService struct {
 	client *platform.VirtualClusterClient
 }
 
-type VPCListResult struct{ Items []VPCListItem }
-type SubnetListResult struct{ Items []SubnetListItem }
-type NATGatewayListResult struct{ Items []NATGatewayListItem }
-type AFSListResult struct{ Items []AFSListItem }
+type VPCListResult struct {
+	Items    []VPCListItem
+	Warnings []string
+}
+type SubnetListResult struct {
+	Items    []SubnetListItem
+	Warnings []string
+}
+type NATGatewayListResult struct {
+	Items    []NATGatewayListItem
+	Warnings []string
+}
+type AFSListResult struct {
+	Items    []AFSListItem
+	Warnings []string
+}
 
 type VPCQueryResult struct {
 	Identifier string
@@ -37,20 +49,24 @@ type NATGatewayQueryResult struct {
 }
 
 type VPCListItem struct {
+	Tenant, TenantID                                                                 string
 	Name, UID, State, CIDR, RDMA, Default, NATGateways, Region, CreatedAt, UpdatedAt string
 	SubnetCount                                                                      int
 }
 
 type SubnetListItem struct {
+	Tenant, TenantID                                                                                             string
 	Name, UID, State, VPC, CIDR, Gateway, AvailableIPs, Scope, Provider, NetworkType, Zone, CreatedAt, UpdatedAt string
 }
 
 type NATGatewayListItem struct {
+	Tenant, TenantID                                                             string
 	Name, UID, State, VPC, Subnet, GatewayType, EIPs, Zone, CreatedAt, UpdatedAt string
 	EIPCount, SNATCount, DNATCount                                               int
 }
 
 type AFSListItem struct {
+	Tenant, TenantID                                                                  string
 	Name, UID, RID, State, Capacity, StorageClass, Zone, Region, CreatedAt, UpdatedAt string
 }
 
@@ -63,9 +79,6 @@ func (s *NetworkResourceService) ListVPCs(ctx context.Context) (*VPCListResult, 
 		return nil, err
 	}
 	resources, err := s.client.ListVPCResources(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list vpcs: %w", err)
-	}
 	items := make([]VPCListItem, 0, len(resources))
 	for _, resource := range resources {
 		natNames := make([]string, 0, len(resource.Properties.NATGatewayInfos))
@@ -73,6 +86,7 @@ func (s *NetworkResourceService) ListVPCs(ctx context.Context) (*VPCListResult, 
 			natNames = append(natNames, firstNonEmpty(strings.TrimSpace(nat.Name), strings.TrimSpace(nat.DisplayName), strings.TrimSpace(nat.UID)))
 		}
 		items = append(items, VPCListItem{
+			Tenant: resource.ProfileName, TenantID: resource.TenantID,
 			Name:        resourceDisplayName(resource.Name, resource.DisplayName, resource.UID),
 			UID:         strings.TrimSpace(resource.UID),
 			State:       resource.State,
@@ -87,7 +101,11 @@ func (s *NetworkResourceService) ListVPCs(ctx context.Context) (*VPCListResult, 
 		})
 	}
 	sortByResourceName(items, func(item VPCListItem) string { return item.Name })
-	return &VPCListResult{Items: items}, nil
+	result := &VPCListResult{Items: items, Warnings: []string{}}
+	if err != nil {
+		result.Warnings = append(result.Warnings, err.Error())
+	}
+	return result, err
 }
 
 func (s *NetworkResourceService) GetVPC(ctx context.Context, identifier string) (*VPCListItem, error) {
@@ -129,12 +147,10 @@ func (s *NetworkResourceService) ListSubnets(ctx context.Context) (*SubnetListRe
 		return nil, err
 	}
 	resources, err := s.client.ListSubnetResources(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list subnets: %w", err)
-	}
 	items := make([]SubnetListItem, 0, len(resources))
 	for _, resource := range resources {
 		items = append(items, SubnetListItem{
+			Tenant: resource.ProfileName, TenantID: resource.TenantID,
 			Name:         resourceDisplayName(resource.Name, resource.DisplayName, resource.UID),
 			UID:          strings.TrimSpace(resource.UID),
 			State:        resource.State,
@@ -151,7 +167,11 @@ func (s *NetworkResourceService) ListSubnets(ctx context.Context) (*SubnetListRe
 		})
 	}
 	sortByResourceName(items, func(item SubnetListItem) string { return item.Name })
-	return &SubnetListResult{Items: items}, nil
+	result := &SubnetListResult{Items: items, Warnings: []string{}}
+	if err != nil {
+		result.Warnings = append(result.Warnings, err.Error())
+	}
+	return result, err
 }
 
 func (s *NetworkResourceService) GetSubnet(ctx context.Context, identifier string) (*SubnetListItem, error) {
@@ -193,9 +213,6 @@ func (s *NetworkResourceService) ListNATGateways(ctx context.Context) (*NATGatew
 		return nil, err
 	}
 	resources, err := s.client.ListNATGatewayResources(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list nat gateways: %w", err)
-	}
 	items := make([]NATGatewayListItem, 0, len(resources))
 	for _, resource := range resources {
 		eips := make([]string, 0, len(resource.Properties.EIPs))
@@ -207,6 +224,7 @@ func (s *NetworkResourceService) ListNATGateways(ctx context.Context) (*NATGatew
 			eips = append(eips, label)
 		}
 		items = append(items, NATGatewayListItem{
+			Tenant: resource.ProfileName, TenantID: resource.TenantID,
 			Name:        resourceDisplayName(resource.Name, resource.DisplayName, resource.UID),
 			UID:         strings.TrimSpace(resource.UID),
 			State:       resource.State,
@@ -223,7 +241,11 @@ func (s *NetworkResourceService) ListNATGateways(ctx context.Context) (*NATGatew
 		})
 	}
 	sortByResourceName(items, func(item NATGatewayListItem) string { return item.Name })
-	return &NATGatewayListResult{Items: items}, nil
+	result := &NATGatewayListResult{Items: items, Warnings: []string{}}
+	if err != nil {
+		result.Warnings = append(result.Warnings, err.Error())
+	}
+	return result, err
 }
 
 func (s *NetworkResourceService) GetNATGateway(ctx context.Context, identifier string) (*NATGatewayListItem, error) {
@@ -264,14 +286,12 @@ func (s *NetworkResourceService) ListAFS(ctx context.Context) (*AFSListResult, e
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
-	resources, err := s.client.ListCurrentStorageVolumeResources(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list afs resources: %w", err)
-	}
+	resources, err := s.client.ListEnvironmentStorageVolumeResources(ctx)
 	items := make([]AFSListItem, 0, len(resources))
 	for _, resource := range resources {
 		capacity, storageClass := parseAFSProperties(resource.Properties)
 		items = append(items, AFSListItem{
+			Tenant: resource.ProfileName, TenantID: ridSubscription(resource.RID),
 			Name:         resourceDisplayName(resource.Name, resource.DisplayName, resource.ID),
 			UID:          strings.TrimSpace(resource.ID),
 			RID:          strings.TrimSpace(resource.RID),
@@ -285,7 +305,11 @@ func (s *NetworkResourceService) ListAFS(ctx context.Context) (*AFSListResult, e
 		})
 	}
 	sortByResourceName(items, func(item AFSListItem) string { return item.Name })
-	return &AFSListResult{Items: items}, nil
+	result := &AFSListResult{Items: items, Warnings: []string{}}
+	if err != nil {
+		result.Warnings = append(result.Warnings, err.Error())
+	}
+	return result, err
 }
 
 func (s *NetworkResourceService) GetAFS(ctx context.Context, identifier string) (*AFSListItem, error) {
@@ -410,4 +434,14 @@ func sortByResourceName[T any](items []T, name func(T) string) {
 	sort.Slice(items, func(i, j int) bool {
 		return strings.ToLower(name(items[i])) < strings.ToLower(name(items[j]))
 	})
+}
+
+func ridSubscription(rid string) string {
+	parts := strings.Split(strings.Trim(rid, "/"), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "subscriptions" {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
