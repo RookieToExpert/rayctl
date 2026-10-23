@@ -71,7 +71,7 @@ func TestFilterNodeListByQueueMatchesHostAndIP(t *testing.T) {
 		},
 	}
 	got := filterNodeListByQueue(nodes, queueNodes)
-	if len(got) != 2 || got[0].QueueName != "queue-demo" || got[1].Name != "custom-node" {
+	if len(got) != 2 || got[0].QueueName != "queue-demo" || got[1].Name != "custom-node" || got[0].Usage != "SSP" || got[1].Usage != "SSP" {
 		t.Fatalf("filterNodeListByQueue() = %#v", got)
 	}
 }
@@ -101,7 +101,7 @@ func TestFilterNodeListByScopeMatchesHostAndIP(t *testing.T) {
 		{HostIP: "10.1.1.2", Queues: "queue-b"},
 	}}
 	got := filterNodeListByScope(nodes, scope)
-	if len(got) != 2 || got[0].QueueName != "queue-a" || got[1].QueueName != "queue-b" {
+	if len(got) != 2 || got[0].QueueName != "queue-a" || got[1].QueueName != "queue-b" || got[0].Usage != "SSP" || got[1].Usage != "SSP" {
 		t.Fatalf("filterNodeListByScope() = %#v", got)
 	}
 }

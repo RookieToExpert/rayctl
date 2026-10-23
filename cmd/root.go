@@ -36,6 +36,7 @@ func init() {
 	rootCmd.AddCommand(newMetricsCmd())
 	rootCmd.AddCommand(newNATGatewayCmd())
 	rootCmd.AddCommand(newNodeCmd())
+	rootCmd.AddCommand(newPodCmd())
 	rootCmd.AddCommand(newPolicyCmd())
 	rootCmd.AddCommand(newQueueCmd())
 	rootCmd.AddCommand(newPVCmd())

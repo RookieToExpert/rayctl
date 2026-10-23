@@ -255,6 +255,10 @@ func TestDescribeECSNodeIncludesVisibleVMWorkloads(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "ecs-user",
 				Name:      "virt-launcher-ecs-demo",
+				Annotations: map[string]string{
+					"resource.compute.sensecore.cn/name": "ecs-yunwei",
+					"resource.compute.sensecore.cn/uid":  "019fc69a-98d5-70b4-9745-957244ee092f",
+				},
 				OwnerReferences: []metav1.OwnerReference{{
 					Kind: "VirtualMachineInstance",
 					Name: "ecs-demo",
@@ -300,5 +304,10 @@ func TestDescribeECSNodeIncludesVisibleVMWorkloads(t *testing.T) {
 	}
 	if result.MemoryUsage != "64/100GiB" {
 		t.Fatalf("MemoryUsage = %q, want 64/100GiB", result.MemoryUsage)
+	}
+	if len(result.PodDetails) != 1 || result.PodDetails[0].Pod != result.Pods[0] ||
+		result.PodDetails[0].Type != "ECS" || result.PodDetails[0].Workload != "ecs-yunwei" ||
+		result.PodDetails[0].WorkloadUID != "019fc69a-98d5-70b4-9745-957244ee092f" {
+		t.Fatalf("ECS business identity = %+v", result.PodDetails)
 	}
 }

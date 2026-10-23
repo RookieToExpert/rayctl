@@ -21,17 +21,19 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 	rows := make([][]string, 0, len(nodes))
 	noWrapCells := make([][2]int, 0, len(nodes)*7)
 	for rowIdx, node := range nodes {
+		usage := emptyDash(firstNodeListValue(node.Usage, node.ProdRole))
+		cluster := emptyDash(firstNodeListValue(node.SSPClusterName, node.ClusterName))
 		if longOutput {
-			rows = append(rows, []string{node.Name, emptyDash(node.Model), emptyDash(node.QueueName), emptyDash(node.Tenant)})
+			rows = append(rows, []string{node.Name, emptyDash(node.Model), usage, emptyDash(node.ProdRole), cluster, emptyDash(node.QueueName), emptyDash(node.Tenant)})
 		} else {
 			rows = append(rows, []string{
 				node.Name,
 				yesNoFromReady(node.Ready),
 				yesNo(node.Schedulable == "Yes"),
 				yesNo(node.Repair),
-				emptyDash(node.ProdRole),
+				usage,
 				node.InternalIP,
-				node.ClusterName,
+				cluster,
 			})
 		}
 		for colIdx := range rows[len(rows)-1] {
@@ -39,14 +41,14 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 		}
 	}
 
-	_ = showProdRole // Kept for API compatibility; PROD is part of the default view.
-	headers := []string{"HOSTNAME", "RDY", "SCH", "RPR", "PROD", "IP", "CLUSTER"}
+	_ = showProdRole // Kept for API compatibility; current usage is always displayed.
+	headers := []string{"HOSTNAME", "RDY", "SCH", "RPR", "USE", "IP", "CLUSTER"}
 	maxWidths := []int{24, 5, 5, 3, 18, 16, 40}
 	minWidths := []int{19, 5, 5, 3, 11, 14, 16}
 	if longOutput {
-		headers = []string{"HOSTNAME", "MODEL", "QUEUE", "TENANT"}
-		maxWidths = []int{24, 28, 48, 18}
-		minWidths = []int{19, 12, 18, 8}
+		headers = []string{"HOSTNAME", "MODEL", "USE", "PROD", "CLUSTER", "QUEUE", "TENANT"}
+		maxWidths = []int{24, 28, 18, 18, 32, 48, 18}
+		minWidths = []int{19, 12, 3, 8, 12, 18, 8}
 	}
 
 	printBoxTableWithOptions(
@@ -70,22 +72,43 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 	}
 }
 
+func firstNodeListValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDuration interface{}, longOutput ...bool) {
+	long := len(longOutput) > 0 && longOutput[0]
 	if captureJSON(details) {
 		return
 	}
-	headers := []string{"HOST", "VC", "QUEUE", "RDY", "UNSCH", "RPR", "ACCEL"}
-	row := []string{
-		details.Hostname,
-		emptyDash(details.VClusterName),
+	headers := []string{"HOST"}
+	row := []string{details.Hostname}
+	maxWidths := []int{24}
+	showVC := details.Workloads == nil || long
+	if showVC {
+		headers = append(headers, "VC")
+		row = append(row, emptyDash(details.VClusterName))
+		maxWidths = append(maxWidths, 20)
+	}
+	headers = append(headers, "QUEUE", "RDY", "UNSCH", "RPR", "ACCEL")
+	row = append(row,
 		emptyDash(details.QueueName),
 		yesNoFromReady(details.Ready),
 		fmt.Sprintf("%t", details.Unschedulable),
 		fmt.Sprintf("%t", details.Repair),
 		details.GPUUsage,
-	}
-	maxWidths := []int{24, 20, 40, 3, 5, 5, 8}
+	)
+	maxWidths = append(maxWidths, 40, 3, 5, 5, 8)
+	noWrap := makeNoWrapCells([2]int{0, 0})
 	colors := map[string]string{}
+	if showVC {
+		noWrap[cellKey(0, 1)] = struct{}{}
+	}
 	if len(details.RDMAResources) > 0 {
 		if nodeRDMACapacityZero(details.RDMAResources) && nodeColorEnabled() {
 			colors[cellKey(0, len(headers))] = "\x1b[31m"
@@ -102,29 +125,36 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 		headers,
 		[][]string{row},
 		maxWidths,
-		tableOptions{
-			cellColors: colors,
-			noWrapCells: makeNoWrapCells(
-				[2]int{0, 0},
-				[2]int{0, 1},
-			),
-		},
+		tableOptions{noWrapCells: noWrap, cellColors: colors},
 	)
 
 	fmt.Fprintln(os.Stdout)
-	podRows := make([][]string, 0, maxInt(1, len(details.Pods)))
-	if len(details.Pods) == 0 {
-		podRows = append(podRows, []string{"-"})
-	} else {
-		for _, pod := range details.Pods {
-			podRows = append(podRows, []string{pod})
+	if details.Workloads != nil {
+		printNodeWorkloads(details.Workloads, long)
+	} else if nodeHasECSDetails(details.PodDetails) {
+		podRows := make([][]string, 0, len(details.PodDetails))
+		for _, pod := range details.PodDetails {
+			podRows = append(podRows, []string{pod.Pod, emptyDash(pod.Type), emptyDash(pod.Workload)})
 		}
+		printBoxTableWithMaxWidths([]string{"PODS", "TYPE", "WORKLOAD"}, podRows, []int{52, 6, 44})
+	} else {
+		podRows := make([][]string, 0, maxInt(1, len(details.Pods)))
+		if len(details.Pods) == 0 {
+			podRows = append(podRows, []string{"-"})
+		} else {
+			for _, pod := range details.Pods {
+				podRows = append(podRows, []string{pod})
+			}
+		}
+		printBoxTableWithMaxWidths(
+			[]string{"PODS"},
+			podRows,
+			[]int{80},
+		)
 	}
-	printBoxTableWithMaxWidths(
-		[]string{"PODS"},
-		podRows,
-		[]int{80},
-	)
+	for _, warning := range details.Warnings {
+		fmt.Fprintln(os.Stderr, "Warning: "+warning)
+	}
 
 	if debugTiming {
 		fmt.Fprintln(os.Stdout)
@@ -145,6 +175,15 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 	}
 }
 
+func nodeHasECSDetails(pods []service.NodePodDetail) bool {
+	for _, pod := range pods {
+		if pod.Type == "ECS" {
+			return true
+		}
+	}
+	return false
+}
+
 func formatNodeRDMAUsage(resources []service.NodeExtendedResource) string {
 	values := make([]string, 0, len(resources))
 	for _, item := range resources {
@@ -158,6 +197,25 @@ func formatNodeRDMAUsage(resources []service.NodeExtendedResource) string {
 		return "-"
 	}
 	return strings.Join(values, ", ")
+}
+
+func nodeRDMACapacityZero(resources []service.NodeExtendedResource) bool {
+	for _, item := range resources {
+		if item.Capacity == "0" || item.Allocatable == "0" {
+			return true
+		}
+	}
+	return false
+}
+
+func nodeColorEnabled() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if forced := os.Getenv("CLICOLOR_FORCE"); forced != "" && forced != "0" {
+		return true
+	}
+	return os.Getenv("TERM") != "dumb" && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 func PrintNodeMutationResult(result *service.NodeMutationResult) {
@@ -358,23 +416,4 @@ func printUserWorkloadWarnings(warnings []string) {
 	for _, warning := range warnings {
 		fmt.Fprintf(os.Stdout, "Warning: %s\n", warning)
 	}
-}
-
-func nodeRDMACapacityZero(resources []service.NodeExtendedResource) bool {
-	for _, item := range resources {
-		if item.Capacity == "0" || item.Allocatable == "0" {
-			return true
-		}
-	}
-	return false
-}
-
-func nodeColorEnabled() bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	if forced := os.Getenv("CLICOLOR_FORCE"); forced != "" && forced != "0" {
-		return true
-	}
-	return os.Getenv("TERM") != "dumb" && term.IsTerminal(int(os.Stdout.Fd()))
 }

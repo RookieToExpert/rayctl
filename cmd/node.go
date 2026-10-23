@@ -52,13 +52,15 @@ func newNodeListCmd() *cobra.Command {
 
 	// 定义 get 命令的结构和行为
 	cmd := &cobra.Command{
-		Use:   "list [profile-or-selector]",
-		Short: "通过 profile 或 label selector 列出节点",
-		Long: "通过 profile、label selector 或 InternalIP 片段列出节点。\n" +
+		Use:   "list [usage-or-selector]",
+		Short: "按当前用途、label selector 或 IP 列出节点",
+		Long: "按当前用途（ecp、ecs、ssp）、label selector 或 InternalIP 片段列出节点。\n" +
+			"用途优先根据 SSP Cluster 与源 VC 的关联识别，-l 保留原始产品标签。\n" +
 			"支持直接传入 IP 过滤片段，例如 10.12.14；也支持使用 | 分隔多个片段做或匹配，例如 '10.12|10.140'。",
 		Example: strings.Join([]string{
 			"  rayctl node list",
 			"  rayctl node list ecp",
+			"  rayctl node list ssp",
 			"  rayctl node list 'node-role.compute.sensecore.cn/prod=ecs'",
 			"  rayctl node list -q queue-d-reserved-a3-llm-share",
 			"  rayctl node list -w ws-d-a3-ai4s",
@@ -194,7 +196,7 @@ func newNodeListCmd() *cobra.Command {
 
 				clusterUIDs := make([]string, 0, len(nodes))
 				for _, node := range nodes {
-					if strings.Contains(strings.ToLower(strings.TrimSpace(node.ProdRole)), "ecs") {
+					if node.Usage == "ECS" && node.ClusterUID == "" {
 						continue
 					}
 					if node.ClusterUID != "" && (strings.TrimSpace(node.ClusterName) == "" || strings.HasPrefix(strings.TrimSpace(node.ClusterName), "vc-") || strings.TrimSpace(node.Tenant) == "") {
@@ -215,22 +217,31 @@ func newNodeListCmd() *cobra.Command {
 				}
 			}
 
+			var usageErr error
+			if vcClient != nil {
+				usageCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+				usageErr = service.EnrichNodeListUsage(usageCtx, nodes, vcClient, "")
+				cancel()
+			} else {
+				usageErr = platformErr
+				if usageErr == nil {
+					usageErr = fmt.Errorf("platform configuration unavailable")
+				}
+			}
+			if usageErr != nil {
+				if isNodeUsageTarget(listTarget) {
+					return fmt.Errorf("resolve node usage: %w", usageErr)
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: SSP 用途识别不完整，仅使用节点标签：%v\n", usageErr)
+			}
+
 			for i := range nodes {
-				if strings.Contains(strings.ToLower(strings.TrimSpace(nodes[i].ProdRole)), "ecs") {
+				if nodes[i].Usage == "ECS" {
 					nodes[i].ClusterName = "ecs 节点"
 					if longOutput {
 						nodes[i].Tenant = "ecs 节点"
 					}
 					continue
-				}
-				if longOutput {
-					if strings.TrimSpace(nodes[i].Tenant) != "" {
-						continue
-					}
-					nodes[i].Tenant = "控制面节点"
-					if strings.TrimSpace(nodes[i].ClusterName) == "" {
-						nodes[i].ClusterName = "控制面节点"
-					}
 				}
 			}
 
@@ -266,6 +277,7 @@ func newNodeListCmd() *cobra.Command {
 			if vcFilter != "" {
 				nodes = filterNodeListByVC(nodes, vcFilter)
 			}
+			nodes = service.FilterNodeListByUsage(nodes, listTarget)
 			resolvedSelector = nodeListFilterDescription(resolvedSelector, queueFilter, vcFilter, workspaceFilter, clusterFilter)
 
 			displayLimit := 100
@@ -283,7 +295,7 @@ func newNodeListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&showAll, "all", "A", false, "Show all nodes")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail columns such as tenant")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示型号、当前用途、原始产品标签、队列和租户")
 	cmd.Flags().StringVarP(&queueFilter, "queue", "q", "", "只显示指定 SSP Queue 下的节点（名称或 UID）")
 	cmd.Flags().StringVarP(&vcFilter, "vc", "v", "", "只显示指定 VC 下的节点（名称或 UID）")
 	cmd.Flags().StringVarP(&workspaceFilter, "workspace", "w", "", "只显示指定 SSP Workspace 下的节点（名称或 UID）")
@@ -313,6 +325,9 @@ func filterNodeListByQueue(nodes []service.NodeListItem, queueNodes *service.SSP
 			continue
 		}
 		node.QueueName = firstNonEmptyString(queueNodes.Queue.Name, node.QueueName)
+		node.Usage = "SSP"
+		node.SSPClusterName = firstNonEmptyString(queueNodes.Queue.Cluster, node.SSPClusterName)
+		node.SSPClusterUID = firstNonEmptyString(queueNodes.Queue.ClusterUID, node.SSPClusterUID)
 		result = append(result, node)
 	}
 	return result
@@ -340,9 +355,21 @@ func filterNodeListByScope(nodes []service.NodeListItem, scope *service.SSPNodeS
 			continue
 		}
 		node.QueueName = firstNonEmptyString(queue, node.QueueName)
+		node.Usage = "SSP"
+		if scope.Kind == "cluster" {
+			node.SSPClusterName = firstNonEmptyString(scope.Name, node.SSPClusterName)
+		}
 		result = append(result, node)
 	}
 	return result
+}
+
+func isNodeUsageTarget(target string) bool {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "ecp", "ecs", "ssp":
+		return true
+	}
+	return false
 }
 
 func filterNodeListByVC(nodes []service.NodeListItem, identifier string) []service.NodeListItem {
@@ -411,6 +438,7 @@ func limitNodes(nodes []service.NodeListItem, limit int) ([]service.NodeListItem
 // 包括该节点的可分配资源量 (Allocatable) 以及当前正在该节点上运行的 Pod 列表。
 func newNodeGetCmd() *cobra.Command {
 	var debugTiming bool
+	var workloads, noPlatform, longOutput bool
 
 	// 定义 get 命令的结构和行为
 	cmd := &cobra.Command{
@@ -433,20 +461,61 @@ func newNodeGetCmd() *cobra.Command {
 			clientDuration := time.Since(clientBegin)
 
 			nodeService := service.NewNodeService(clientset)
-			vcClient, platformErr := optionalPlatformClient()
-			if platformErr != nil {
+			if workloads {
+				nodeService.WithWorkloads()
+			}
+			var vcClient *platform.VirtualClusterClient
+			var platformErr error
+			if !noPlatform {
+				vcClient, platformErr = optionalPlatformClient()
+			}
+			if platformErr != nil && !workloads {
 				return platformErr
 			}
 			normalizedNames := make([]string, len(args))
 			for i, nodeName := range args {
 				normalizedNames[i] = normalizeNodeIdentifier(nodeName)
+				if workloads && net.ParseIP(strings.TrimSpace(nodeName)) != nil {
+					normalizedNames[i] = strings.TrimSpace(nodeName)
+				}
 			}
 			results := nodeService.DescribeMany(cmd.Context(), normalizedNames, 4)
-			if vcClient != nil {
-				resolveFailedPlatformNodeNames(cmd.Context(), vcClient, nodeService, args, normalizedNames, results, 4)
-				resolveNodeVCNames(cmd.Context(), vcClient, results, 4)
+			platformCtx := cmd.Context()
+			if workloads {
+				var cancel context.CancelFunc
+				platformCtx, cancel = context.WithTimeout(platformCtx, 2*time.Second)
+				defer cancel()
 			}
-			resolveNodeDescribeQueuesFromLocalVC(cmd.Context(), results, 4)
+			if vcClient != nil {
+				resolveFailedPlatformNodeNames(platformCtx, vcClient, nodeService, args, normalizedNames, results, 4)
+				if workloads {
+					service.EnrichNodeWorkloads(platformCtx, results, vcClient)
+				} else {
+					resolveNodeVCNames(platformCtx, vcClient, results, 4)
+				}
+			}
+			if !workloads && !noPlatform {
+				resolveNodeDescribeQueuesFromLocalVC(cmd.Context(), results, 4)
+			}
+			if workloads {
+				for _, result := range results {
+					if result.Details == nil {
+						continue
+					}
+					if platformErr != nil {
+						result.Details.Warnings = append(result.Details.Warnings, "platform unavailable: "+platformErr.Error())
+					}
+					if !noPlatform && vcClient == nil && platformErr == nil {
+						result.Details.Warnings = append(result.Details.Warnings, "platform configuration unavailable; using Kubernetes labels")
+					}
+					if platformCtx.Err() != nil {
+						result.Details.Warnings = append(result.Details.Warnings, "platform enrichment budget exhausted; using available Kubernetes data")
+					}
+				}
+			}
+			if err := cmd.Context().Err(); err != nil {
+				return err
+			}
 
 			var queryErrors []error
 			printed := 0
@@ -461,7 +530,7 @@ func newNodeGetCmd() *cobra.Command {
 				if len(args) > 1 {
 					fmt.Fprintf(cmd.OutOrStdout(), "===== NODE [%d/%d]: %s =====\n\n", i+1, len(args), args[i])
 				}
-				output.PrintNodeDescribe(result.Details, debugTiming, clientDuration)
+				output.PrintNodeDescribe(result.Details, debugTiming, clientDuration, longOutput)
 				printed++
 			}
 			return errors.Join(queryErrors...)
@@ -469,6 +538,9 @@ func newNodeGetCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for node get")
+	cmd.Flags().BoolVar(&workloads, "workloads", false, "显示节点所有可见 Pod 的负载归属")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示负载的 VC、workspace、creator、加速卡请求和来源")
+	cmd.Flags().BoolVar(&noPlatform, "no-platform", false, "不访问平台 API，仅使用 Kubernetes 数据")
 
 	return cmd
 }

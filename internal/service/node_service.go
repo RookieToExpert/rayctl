@@ -34,29 +34,27 @@ const (
 	metaxGPUTopologyAnnotationKey = "metax-tech.com/gpu.topology.zones"
 )
 
-var nodeSelectorProfiles = map[string]string{
-	// Replace these selectors with the real labels used in your cluster.
-	"ecp": "node-role.compute.sensecore.cn/prod=ecp-private",
-	"ecs": "node-role.compute.sensecore.cn/prod=ecs",
-}
-
 type NodeService struct {
-	clientset kubernetes.Interface
+	clientset        kubernetes.Interface
+	includeWorkloads bool
 }
 
 type NodeListItem struct {
-	Name        string
-	Ready       string
-	Schedulable string
-	UsageType   string
-	Repair      bool
-	ProdRole    string
-	InternalIP  string
-	ClusterName string
-	ClusterUID  string
-	QueueName   string
-	Tenant      string
-	Model       string
+	Name           string
+	Ready          string
+	Schedulable    string
+	UsageType      string
+	Repair         bool
+	ProdRole       string
+	Usage          string
+	InternalIP     string
+	ClusterName    string
+	ClusterUID     string
+	SSPClusterName string
+	SSPClusterUID  string
+	QueueName      string
+	Tenant         string
+	Model          string
 }
 
 type NodeMutationResult struct {
@@ -79,8 +77,11 @@ type NodeDescribe struct {
 	MemoryUsage     string
 	RDMAResources   []NodeExtendedResource
 	Pods            []string
+	PodDetails      []NodePodDetail
 	MatchedPodCount int
 	Timings         DescribeTimings
+	Workloads       []NodeWorkload
+	Warnings        []string
 }
 
 type NodeExtendedResource struct {
@@ -143,6 +144,7 @@ func (s *NodeService) List(ctx context.Context, target string, extraSelector str
 			UsageType:   node.Labels[repairUsageLabelKey],
 			Repair:      node.Spec.Unschedulable,
 			ProdRole:    nodeDisplayRole(node.Labels),
+			Usage:       nodeUsageFromLabels(node.Labels),
 			InternalIP:  nodeInternalIP(node.Status.Addresses),
 			ClusterName: firstNonEmpty(
 				node.Labels["cluster.x-k8s.io/vcluster-name"],
@@ -150,11 +152,16 @@ func (s *NodeService) List(ctx context.Context, target string, extraSelector str
 				node.Labels[nodeVClusterNamespaceLabelKey],
 				node.Labels["resource.compute.sensecore.cn/vc-uid"],
 			),
-			ClusterUID: nodeResolveClusterUID(node.Labels),
-			QueueName:  nodeQueueDisplayName(node.Labels, nil),
+			ClusterUID:     nodeResolveClusterUID(node.Labels),
+			SSPClusterName: strings.TrimSpace(node.Labels[sspClusterNameLabel]),
+			SSPClusterUID:  strings.TrimSpace(node.Labels[nodeSSPClusterUIDLabelKey]),
+			QueueName:      nodeQueueDisplayName(node.Labels, nil),
 		})
 	}
 
+	if usage := nodeListUsageTarget(target); usage != "" {
+		resolvedSelector = strings.TrimSuffix("usage="+usage+","+resolvedSelector, ",")
+	}
 	return result, resolvedSelector, nil
 }
 
@@ -192,19 +199,28 @@ func nodeDisplayRole(labels map[string]string) string {
 func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescribe, error) {
 	startedAt := time.Now()
 	getNodeBegin := time.Now()
-	node, err := s.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	node, err := s.getNodeByNameOrIP(ctx, nodeName)
 	getNodeDuration := time.Since(getNodeBegin)
 	if err != nil {
 		return nil, fmt.Errorf("get node %q: %w", nodeName, err)
 	}
+	nodeName = node.Name
 
 	listNamespacesBegin := time.Now()
-	targetNamespaces, err := s.listTargetNamespacesForNode(ctx, node)
+	var targetNamespaces []string
+	if !s.includeWorkloads {
+		targetNamespaces, err = s.listTargetNamespacesForNode(ctx, node)
+	}
 	listNamespacesDuration := time.Since(listNamespacesBegin)
 
 	listPodsBegin := time.Now()
 	pods := make([]corev1.Pod, 0)
 	switch {
+	case s.includeWorkloads:
+		pods, err = s.listWorkloadPodsOnNode(ctx, nodeName)
+		if err != nil {
+			return nil, err
+		}
 	case err == nil && len(targetNamespaces) > 0:
 		pods, err = s.listPodsOnNodeInNamespaces(ctx, nodeName, targetNamespaces)
 		if err != nil {
@@ -229,7 +245,7 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 	}
 	summarizeDuration := time.Since(summarizeBegin)
 
-	return &NodeDescribe{
+	details := &NodeDescribe{
 		Hostname: node.Name,
 		VClusterName: firstNonEmpty(
 			node.Labels["cluster.x-k8s.io/vcluster-name"],
@@ -247,6 +263,7 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 		MemoryUsage:     formatMemoryUsage(allocatedMemory, totalMemory),
 		RDMAResources:   nodeRDMAExtendedResources(node, pods),
 		Pods:            podNames,
+		PodDetails:      nodePodDetailsFromPods(pods),
 		MatchedPodCount: len(podNames),
 		Timings: DescribeTimings{
 			GetNode:        getNodeDuration,
@@ -255,7 +272,11 @@ func (s *NodeService) Describe(ctx context.Context, nodeName string) (*NodeDescr
 			Summarize:      summarizeDuration,
 			Total:          time.Since(startedAt),
 		},
-	}, nil
+	}
+	if s.includeWorkloads {
+		details.Workloads = nodeWorkloadsFromPods(pods)
+	}
+	return details, nil
 }
 
 func nodeRDMAExtendedResources(node *corev1.Node, pods []corev1.Pod) []NodeExtendedResource {
@@ -707,12 +728,8 @@ func directNodeGPUAllocated(node *corev1.Node) (int64, bool) {
 func resolveNodeSelector(target string, extraSelector string) (string, error) {
 	selectors := make([]string, 0, 2)
 
-	if target != "" {
-		if selector, ok := nodeSelectorProfiles[strings.ToLower(target)]; ok {
-			selectors = append(selectors, selector)
-		} else {
-			selectors = append(selectors, target)
-		}
+	if target != "" && nodeListUsageTarget(target) == "" {
+		selectors = append(selectors, target)
 	}
 
 	if extraSelector != "" {
