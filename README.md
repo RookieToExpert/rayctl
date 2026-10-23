@@ -1,6 +1,8 @@
 # rayctl
 
-`get -l` 使用增量详情：先显示名称、状态、HC namespace、节点的身份锚点，再显示默认视图没有的字段与诊断；多对象分别显示锚点。`list -l` 继续增加列。`-o json` 保留完整的已采集对象，不应用表格去重或隐藏卷的规则。标识字段完整保留；AIR list 默认显示 NAME/STATE/READY/WORKSPACE，`READY 1/1 ×2` 表示就绪组/总组 × 每组实例数，`-n` 默认 50，`-l` 增加队列和创建信息。
+`get -l` 使用增量详情：先显示名称、状态、HC namespace、节点的身份锚点，再显示默认视图没有的字段与诊断；多对象分别显示锚点。`list -l` 继续增加列。`-o json` 保留完整的已采集对象，不应用表格去重或隐藏卷的规则。标识字段完整保留；AIR list 默认显示 NAME/STATE/READY/WORKSPACE，`READY 1/1 ×2` 表示就绪组/总组 × 每组实例数，`-n` 默认 50，`-l` 增加队列和创建信息，CREATED 保留完整年月日和时分秒。
+
+带 `-n/--limit` 且不接收位置参数的列表，JSON `summary.requested` 表示实际请求的条数上限：例如 `ait list -n 3`、`air job list -n 3` 为 3，默认普通列表为 50；AIT 的时间窗口扫描未显式指定 `-n` 时为 5000。按多个位置参数查询对象时仍表示目标数量。
 强大的 k8s 工具 for 商汤 dcluster
 =======
 
@@ -128,6 +130,9 @@ rayctl aid get <aid-name-or-uid> --workspace ws-t-wamcritic
 rayctl aid get dev-yifan-gpu2 -e all -l --no-image
 # -e all 查询 D/PT 的对应 HC；命中时退出 0，其他范围无权限压成一行 workspace 警告。
 # JSON 用 query_incomplete 标记未完成范围；未命中且存在无权限范围时仍报查询不完整。
+# AID 默认 workspace 范围与 AIR 一致，均来自对应 region 的平台 RMH 清单；HC 标签只用于定位 Pod。
+# 平台可见但 HC 没有对应 namespace 的 workspace 也会查询；同名不同 subscription 分别保留。
+# AID 显式 --workspace 仍可直接查询未列入清单的名称；AID get 与 AIR job list 会标记部分 profile/分页失败。
 # RAYCTL_HC_KUBECONFIG_D/PT 可以覆盖默认的 ~/kubeconfig 与 ~/kubeconfigpt。
 rayctl aid list
 rayctl aid list -w ws-d-a3-ai4s

@@ -2,6 +2,8 @@
 
 基线 `cf9a30d`。此记录对应用户补测反馈，区分自动回归、真实二进制的本机模拟接口验收，以及 AIS D/PT 只读实测。
 
+后续已定位本记录中两个 D 测试 workspace 的 403 来源，并统一 AID/AIR 默认查询范围；以下保留当时实测，最新行为见 [workspace 范围与输出验收](rayctl-workspace-scope-json-created-20261023.md)。
+
 | 项目 | 提交 | 实现 |
 |---|---|---|
 | 1. AID 命中仍因 403 失败 | `a2856f2` | 有唯一命中时退出 0；未完成范围合成一行警告，403 只显示 region/workspace 和状态，保留 typed cause |
