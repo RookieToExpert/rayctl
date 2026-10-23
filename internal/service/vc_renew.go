@@ -24,7 +24,6 @@ import (
 type VCRenewAPI interface {
 	VCKubeconfigInventory(context.Context, string) ([]platform.VCKubeconfigRef, []error)
 	DownloadVCKubeconfig(context.Context, platform.VCKubeconfigRef) ([]byte, error)
-	VCKubeconfigDeleted(context.Context, platform.VCKubeconfigRef) (bool, error)
 }
 type renewEntry struct {
 	Ref  platform.VCKubeconfigRef `json:"resource"`
@@ -115,6 +114,9 @@ func createRenewFile(path string, data []byte) error {
 }
 
 func RenewVCKubeconfigs(ctx context.Context, api VCRenewAPI, options VCRenewOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if options.Out == nil {
 		options.Out = io.Discard
 	}
@@ -144,6 +146,7 @@ func RenewVCKubeconfigs(ctx context.Context, api VCRenewAPI, options VCRenewOpti
 		return err
 	}
 	refs, failures := api.VCKubeconfigInventory(ctx, options.Environment)
+	inventoryComplete := len(failures) == 0
 	for _, err := range failures {
 		fmt.Fprintf(options.Out, "WARNING %v; affected files are preserved\n", err)
 	}
@@ -152,34 +155,61 @@ func RenewVCKubeconfigs(ctx context.Context, api VCRenewAPI, options VCRenewOpti
 		path, err := renewPath(root, ref)
 		if err != nil {
 			failures = append(failures, err)
+			inventoryComplete = false
 			continue
 		}
 		paths[path] = append(paths[path], ref)
 	}
-	keys := make([]string, 0, len(paths))
+	selectedEnvironments := map[string]bool{}
+	switch options.Environment {
+	case "all":
+		selectedEnvironments["d"], selectedEnvironments["pt"], selectedEnvironments["dcloud"] = true, true, true
+	case "d", "pt", "dcloud":
+		selectedEnvironments[options.Environment] = true
+	default:
+		for _, ref := range refs {
+			selectedEnvironments[ref.Environment] = true
+		}
+	}
+	missingPaths := []string{}
 	for env, dir := range map[string]string{"d": "D", "pt": "PT", "dcloud": "Dcloud"} {
-		if options.Environment != "all" && options.Environment != "" && options.Environment != "auto" && options.Environment != env {
+		if !selectedEnvironments[env] {
 			continue
 		}
-		files, readErr := os.ReadDir(filepath.Join(root, dir))
+		directory := filepath.Join(root, dir)
+		info, statErr := os.Lstat(directory)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			failures = append(failures, statErr)
+			continue
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			failures = append(failures, fmt.Errorf("unsafe output directory %s; files are preserved", directory))
+			continue
+		}
+		files, readErr := os.ReadDir(directory)
 		if readErr != nil && !os.IsNotExist(readErr) {
 			failures = append(failures, readErr)
 		}
 		for _, file := range files {
 			path := filepath.Join(root, dir, file.Name())
 			if strings.HasPrefix(file.Name(), "vc-") && len(paths[path]) == 0 {
-				if _, tracked := entries[path]; !tracked {
-					fmt.Fprintf(options.Out, "KEEP %s (legacy/unmanaged; deletion not confirmed)\n", path)
-				}
+				missingPaths = append(missingPaths, path)
 			}
 		}
 	}
+	keys := make([]string, 0, len(paths))
 	for path := range paths {
 		keys = append(keys, path)
 	}
 	sort.Strings(keys)
 	added, kept := 0, 0
 	for _, path := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := os.Lstat(path); err == nil {
 			fmt.Fprintf(options.Out, "KEEP %s\n", path)
 			kept++
@@ -216,15 +246,12 @@ func RenewVCKubeconfigs(ctx context.Context, api VCRenewAPI, options VCRenewOpti
 		fmt.Fprintf(options.Out, "ADDED %s\n", path)
 	}
 	removals := []string{}
-	for path, entry := range entries {
-		expected, err := renewPath(root, entry.Ref)
-		if err != nil || expected != path {
-			continue
-		}
-		if options.Environment != "" && options.Environment != "auto" && options.Environment != "all" && entry.Ref.Environment != options.Environment {
-			continue
-		}
-		if len(paths[path]) > 0 {
+	removalHashes := map[string]string{}
+	sort.Strings(missingPaths)
+	for _, path := range missingPaths {
+		if !inventoryComplete {
+			fmt.Fprintf(options.Out, "KEEP %s (platform inventory incomplete)\n", path)
+			kept++
 			continue
 		}
 		info, err := os.Lstat(path)
@@ -232,45 +259,70 @@ func RenewVCKubeconfigs(ctx context.Context, api VCRenewAPI, options VCRenewOpti
 			continue
 		}
 		if err != nil || !info.Mode().IsRegular() {
+			fmt.Fprintf(options.Out, "KEEP %s (not a regular file)\n", path)
+			kept++
+			if err != nil {
+				failures = append(failures, err)
+			}
 			continue
 		}
 		content, err := os.ReadFile(path)
-		if err != nil || fmt.Sprintf("%x", sha256.Sum256(content)) != entry.Hash {
-			fmt.Fprintf(options.Out, "KEEP %s (locally modified)\n", path)
+		if err != nil {
+			fmt.Fprintf(options.Out, "KEEP %s (cannot read file)\n", path)
+			kept++
+			failures = append(failures, err)
 			continue
 		}
-		query, cancel := context.WithTimeout(ctx, 5*time.Second)
-		deleted, err := api.VCKubeconfigDeleted(query, entry.Ref)
-		cancel()
-		if err != nil || !deleted {
-			fmt.Fprintf(options.Out, "KEEP %s (deletion not confirmed)\n", path)
-			continue
-		}
+		removalHashes[path] = fmt.Sprintf("%x", sha256.Sum256(content))
 		removals = append(removals, path)
 	}
 	sort.Strings(removals)
 	for _, path := range removals {
-		fmt.Fprintf(options.Out, "REMOVE CANDIDATE %s\n", path)
+		fmt.Fprintf(options.Out, "REMOVE CANDIDATE %s (VC absent from platform inventory)\n", path)
 	}
 	removed := 0
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !options.DryRun && len(removals) > 0 && options.Confirm != nil && options.Confirm(removals) {
 		for _, path := range removals {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			directory, err := os.Lstat(filepath.Dir(path))
+			if err != nil || !directory.IsDir() || directory.Mode()&os.ModeSymlink != 0 {
+				fmt.Fprintf(options.Out, "KEEP %s (directory changed during confirmation)\n", path)
+				kept++
+				continue
+			}
 			info, err := os.Lstat(path)
 			if err != nil || !info.Mode().IsRegular() {
+				if !os.IsNotExist(err) {
+					fmt.Fprintf(options.Out, "KEEP %s (file changed during confirmation)\n", path)
+					kept++
+				}
 				continue
 			}
 			content, err := os.ReadFile(path)
-			if err != nil || fmt.Sprintf("%x", sha256.Sum256(content)) != entries[path].Hash {
+			if err != nil || fmt.Sprintf("%x", sha256.Sum256(content)) != removalHashes[path] {
+				fmt.Fprintf(options.Out, "KEEP %s (file changed during confirmation)\n", path)
+				kept++
 				continue
 			}
 			if err = os.Remove(path); err != nil {
 				failures = append(failures, err)
+				kept++
 			} else {
 				delete(entries, path)
 				removed++
 				fmt.Fprintf(options.Out, "REMOVED %s\n", path)
 			}
 		}
+	} else {
+		kept += len(removals)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if !options.DryRun {
 		bytes, err := json.MarshalIndent(entries, "", "  ")

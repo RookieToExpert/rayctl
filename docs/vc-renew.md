@@ -23,20 +23,28 @@ manifest, or delete files. A normal run holds an exclusive lock file. If a
 process is forcibly terminated, check that no renewal process remains before
 removing the stale `.rayctl-vc-renew.json.lock` file in the output root.
 
-## Conservative Deletion
+## Cleanup from the Platform Inventory
 
 The manifest `.rayctl-vc-renew.json` tracks only files created by this command.
-It records resource identity and the file hash, not credentials. Unmanaged
-legacy files, symlinks, and modified files are never deleted.
+It records resource identity and the file hash, not credentials. Manifest
+registration is not required for cleanup.
 
-Absence from a resource list, HTTP 401/403/404, timeout, and an inaccessible
-profile are not proof of deletion. Cleanup currently requires a successful
-detail response with the same UID and an explicit `DELETED` state. If the
-platform permanently removes records and returns only 404, cleanup deliberately
-keeps those files: an authoritative deletion API or independent inventory would
-be needed to safely support that case.
+After the entire platform inventory for the selected environments succeeds,
+local `vc-*` kubeconfig files absent from that inventory become removal
+candidates. This includes legacy/unmanaged files and files modified before the
+run; an explicit `DELETED` detail response is not required. Cleanup is limited
+to ordinary files in the selected environment directories (`D`, `PT`, and
+`Dcloud`) beneath the output root. Symlinks, directories, and unsafe paths are
+not removed. Only local kubeconfig files are removed; platform VCs are not
+deleted.
 
 Eligible files are displayed for confirmation `(y/N)`. Only `y` deletes them
-permanently; no backup is created. File hashes are rechecked before deletion.
-Partial inventory/download failures are reported and result in a nonzero exit
-status, without removing affected local files.
+permanently; no backup is created. Each candidate's hash is captured when it is
+selected and rechecked before deletion. A file changed during confirmation is
+preserved. `--dry-run` displays candidates without prompting or deleting them.
+
+Any failed or incomplete inventory prevents all cleanup in that run, while
+successful additions may still be retained. Credential download or validation
+failures do not make a successful inventory incomplete and do not prevent
+cleanup of other stale files. Failures are reported and result in a nonzero
+exit status.

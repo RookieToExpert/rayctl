@@ -13,7 +13,11 @@ import (
 func newVCRenewCmd() *cobra.Command {
 	var dry, skip bool
 	var directory string
-	command := &cobra.Command{Use: "renew", Short: "补齐 VC kubeconfig，保留已有文件，确认后清理已证实删除的 VC", SilenceUsage: true, SilenceErrors: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	command := &cobra.Command{Use: "renew", Short: "补齐 VC kubeconfig，确认后清理完整平台清单中已不存在的本地配置", Long: "补齐所选环境的 VC kubeconfig，保留平台清单中已有 VC 的本地文件。\n" +
+		"完整平台清单中不存在的本地 vc-* 普通文件会进入删除候选，包含历史未登记或此前修改过的文件。\n" +
+		"候选仅限所选环境的安全目录，确认 (y/N) 后永久删除；确认期间文件变化则保留。\n" +
+		"平台清单失败或不完整时跳过所有清理；证书下载失败不影响其它过期文件的清理。\n" +
+		"仅删除本地配置，不删除平台 VC。--dry-run 只显示计划，不写入或删除文件。", SilenceUsage: true, SilenceErrors: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		client, _, err := newVCPlatformService()
 		if err != nil {
 			return err

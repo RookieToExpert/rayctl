@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -26,24 +27,37 @@ type VCKubeconfigRef struct {
 }
 
 func (c *VirtualClusterClient) VCKubeconfigInventory(ctx context.Context, environment string) ([]VCKubeconfigRef, []error) {
+	if c == nil || len(c.profiles) == 0 {
+		return nil, []error{fmt.Errorf("VC inventory unavailable: no configured profiles")}
+	}
 	if environment == "" || environment == "auto" {
 		environment = c.ProfileEnvironment(c.CurrentProfileName())
+	}
+	if environment != "d" && environment != "pt" && environment != "dcloud" && environment != "all" {
+		return nil, []error{fmt.Errorf("VC inventory unavailable: unknown environment %q", environment)}
 	}
 	refs := []VCKubeconfigRef{}
 	failures := []error{}
 	seen := map[string]bool{}
+	selectedProfiles := 0
 	for _, p := range c.orderedProfiles() {
 		// D/PT share tenants; resources are selected by their own region below.
 		if environment != "all" && (profileEnvironment(p) == "dcloud") != (environment == "dcloud") {
 			continue
 		}
-		items, err := c.listVirtualClustersForProfile(ctx, p)
+		selectedProfiles++
+		items, err := c.listVCKubeconfigInventoryForProfile(ctx, p)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("profile %s inventory unavailable", p.Name))
 			continue
 		}
 		for _, vc := range items {
 			if strings.EqualFold(vc.State, "DELETED") {
+				continue
+			}
+			subscription := firstNonEmpty(ridSegment(vc.ID, "subscriptions"), vc.TenantID)
+			if vc.UID == "" || vc.Name == "" || subscription == "" || vc.Region == "" {
+				failures = append(failures, fmt.Errorf("profile %s: incomplete VC identity for %s", p.Name, vc.Name))
 				continue
 			}
 			env := "d"
@@ -55,19 +69,98 @@ func (c *VirtualClusterClient) VCKubeconfigInventory(ctx context.Context, enviro
 			if environment != "all" && environment != env {
 				continue
 			}
-			ref := VCKubeconfigRef{Name: vc.Name, UID: vc.UID, Profile: p.Name, Subscription: firstNonEmpty(ridSegment(vc.ID, "subscriptions"), vc.TenantID), ResourceGroup: firstNonEmpty(ridSegment(vc.ID, "resourceGroups"), p.ResourceGroup, "default"), Region: vc.Region, Environment: env}
+			ref := VCKubeconfigRef{Name: vc.Name, UID: vc.UID, Profile: p.Name, Subscription: subscription, ResourceGroup: firstNonEmpty(ridSegment(vc.ID, "resourceGroups"), p.ResourceGroup, "default"), Region: vc.Region, Environment: env}
 			key := env + "|" + ref.Subscription + "|" + ref.UID
-			if ref.UID == "" || ref.Name == "" || ref.Subscription == "" || ref.Region == "" {
-				failures = append(failures, fmt.Errorf("profile %s: incomplete VC identity for %s", p.Name, vc.Name))
-				continue
-			}
 			if !seen[key] {
 				refs = append(refs, ref)
 				seen[key] = true
 			}
 		}
 	}
+	if selectedProfiles == 0 {
+		failures = append(failures, fmt.Errorf("VC inventory unavailable: no profiles for environment %s", environment))
+	}
 	return refs, failures
+}
+
+// Inventory completeness controls local cleanup, so malformed or truncated
+// responses must not be interpreted as an authoritative empty resource list.
+func (c *VirtualClusterClient) listVCKubeconfigInventoryForProfile(ctx context.Context, profile clientProfile) ([]VirtualCluster, error) {
+	endpoint, err := url.Parse(profile.BaseURL)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
+		return nil, fmt.Errorf("invalid HTTPS platform endpoint")
+	}
+	clusters := make([]VirtualCluster, 0)
+	seenTokens := map[string]bool{}
+	seenPages := map[string]bool{}
+	seenUIDs := map[string]bool{}
+	skip, token := 0, ""
+	var total *int
+	for {
+		reqURL, _ := url.Parse(c.virtualClusterListURL(profile, skip))
+		query := reqURL.Query()
+		if token != "" {
+			query.Set("page_token", token)
+		}
+		reqURL.RawQuery = query.Encode()
+		var payload struct {
+			VirtualClusters []VirtualCluster `json:"virtual_clusters"`
+			Items           []VirtualCluster `json:"items"`
+			NextPageToken   string           `json:"next_page_token"`
+			TotalSize       *int             `json:"total_size"`
+		}
+		if err := c.getJSONWithProfile(ctx, profile, reqURL.String(), &payload); err != nil {
+			return nil, fmt.Errorf("list VC inventory: %w", err)
+		}
+		items := payload.VirtualClusters
+		if items == nil {
+			items = payload.Items
+		}
+		if items == nil {
+			return nil, fmt.Errorf("VC inventory response has no non-null resource array")
+		}
+		if payload.TotalSize != nil {
+			if *payload.TotalSize < 0 || (total != nil && *total != *payload.TotalSize) {
+				return nil, fmt.Errorf("VC inventory total_size is inconsistent")
+			}
+			total = payload.TotalSize
+		}
+		count := skip + len(items)
+		if total != nil && count > *total {
+			return nil, fmt.Errorf("VC inventory exceeds total_size")
+		}
+		more := payload.NextPageToken != "" || (total != nil && count < *total)
+		if len(items) == 0 {
+			if more {
+				return nil, fmt.Errorf("VC inventory is incomplete: empty page before pagination finished")
+			}
+			return clusters, nil
+		}
+		page, _ := json.Marshal(items)
+		if seenPages[string(page)] {
+			return nil, fmt.Errorf("VC inventory is incomplete: repeated page")
+		}
+		seenPages[string(page)] = true
+		for _, item := range items {
+			uid := strings.TrimSpace(item.UID)
+			if uid != "" && seenUIDs[uid] {
+				return nil, fmt.Errorf("VC inventory is incomplete: resource repeated across pages")
+			}
+			seenUIDs[uid] = true
+		}
+		clusters = append(clusters, items...)
+		if !more && (total != nil || len(items) < defaultPageLimit) {
+			return clusters, nil
+		}
+		if payload.NextPageToken != "" {
+			if seenTokens[payload.NextPageToken] {
+				return nil, fmt.Errorf("VC inventory is incomplete: repeated page token")
+			}
+			seenTokens[payload.NextPageToken] = true
+		}
+		skip = count
+		token = payload.NextPageToken
+	}
 }
 
 func (c *VirtualClusterClient) vcCredentialBase(ref VCKubeconfigRef) (clientProfile, string, error) {
