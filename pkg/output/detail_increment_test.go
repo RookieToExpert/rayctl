@@ -51,3 +51,21 @@ func TestMultiObjectLongHasIndependentAnchors(t *testing.T) {
 		t.Fatal(text)
 	}
 }
+
+func TestAFSMultiLongHasPerObjectIncrementsAndFullJSON(t *testing.T) {
+	results := []*service.AFSCheckResult{{AFSName: "afs-one", State: "RUNNING", Capacity: "100Gi", HostPVs: []string{"pv-one"}}, {AFSName: "afs-two", State: "RUNNING", Capacity: "200Gi", HostPVs: []string{"pv-two"}}}
+	text := captureTableOutput(t, func() { PrintAFSCheckSummary(results, true) })
+	if strings.Count(text, "| status=") != 2 || !strings.Contains(text, "pv-one") || !strings.Contains(text, "pv-two") || strings.Contains(text, "CAPACITY") {
+		t.Fatal(text)
+	}
+	session := BeginJSON()
+	defer EndJSON()
+	PrintAFSCheckSummary(results, true)
+	var buffer bytes.Buffer
+	if err := session.Write(&buffer, true, 2, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buffer.String(), "100Gi") || !strings.Contains(buffer.String(), "pv-two") {
+		t.Fatal(buffer.String())
+	}
+}

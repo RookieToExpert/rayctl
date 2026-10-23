@@ -202,8 +202,16 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
 	fmt.Fprintf(os.Stdout, "最多展示 15 个关联 Virtual PVC，每个资源 namespace 仅保留一个。\n")
 }
 
-func PrintAFSCheckSummary(results []*service.AFSCheckResult) {
+func PrintAFSCheckSummary(results []*service.AFSCheckResult, longOutput ...bool) {
 	if captureJSON(results) {
+		return
+	}
+	if len(longOutput) > 0 && longOutput[0] {
+		for _, result := range results {
+			if result != nil {
+				PrintAFSCheckDetail(result, true)
+			}
+		}
 		return
 	}
 	rows := make([][]string, 0, len(results))

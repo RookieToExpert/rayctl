@@ -147,7 +147,7 @@ func runAFSQueries(cmd *cobra.Command, args []string, longOutput bool) error {
 	if len(args) == 1 && len(valid) == 1 {
 		output.PrintAFSCheckDetail(valid[0], longOutput)
 	} else if len(valid) > 0 {
-		output.PrintAFSCheckSummary(valid)
+		output.PrintAFSCheckSummary(valid, longOutput)
 	}
 	return errors.Join(queryErrors...)
 }
