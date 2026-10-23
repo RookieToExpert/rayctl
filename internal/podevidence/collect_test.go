@@ -2,6 +2,7 @@ package podevidence
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +56,11 @@ func TestCollectIncludesCompletedInitAndAllContainers(t *testing.T) {
 	}
 	if init.Comparison.Match != nil {
 		t.Fatal("unknown architecture must not compare false")
+	}
+	for _, warning := range result.Pods[0].Warnings {
+		if strings.Contains(warning, "image lookup skipped") || strings.Contains(warning, "--no-image") {
+			t.Fatalf("explicit no-image generated warning: %s", warning)
+		}
 	}
 }
 

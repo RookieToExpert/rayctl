@@ -100,7 +100,7 @@ func printPodEvidence(result *podevidence.Result, views ...podEvidenceView) {
 			}
 		}
 		if len(mountRows) > 0 {
-			printBoxTable([]string{"CONTAINER", "VOLUME", "TYPE", "SOURCE", "MOUNT", "SUBPATH", "READ ONLY", "PVC STATUS", "AFS/AOSS ENDPOINT"}, mountRows)
+			printPodMountTable(mountRows)
 		}
 		if hiddenMounts > 0 {
 			fmt.Fprintf(os.Stdout, "平台注入挂载：已折叠 %d 项\n", hiddenMounts)

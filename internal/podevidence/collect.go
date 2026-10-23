@@ -184,8 +184,6 @@ func collectPod(ctx context.Context, client kubernetes.Interface, pod corev1.Pod
 			if err != nil {
 				result.Warnings = append(result.Warnings, spec.Name+" image architecture: "+err.Error())
 			}
-		} else {
-			result.Warnings = append(result.Warnings, spec.Name+": image lookup skipped (--no-image)")
 		}
 		item.Comparison.Left = item.Image.Architecture
 		if item.Comparison.Left != nil && item.Comparison.Right != nil {
