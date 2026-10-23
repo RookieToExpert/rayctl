@@ -22,6 +22,7 @@ type SSPCatalogListOptions struct {
 	Queue        string
 	State        string
 	Limit        int
+	LimitChanged bool
 	All          bool
 	CreatedAfter time.Time
 	IncludeNodes bool
@@ -201,7 +202,7 @@ func (s *SSPCatalogService) listWorkspaceCatalog(ctx context.Context, options SS
 	if s.platform == nil {
 		return nil, fmt.Errorf("platform client is required")
 	}
-	limit, err := resolveSSPCatalogLimit(options.Limit, options.All)
+	limit, err := ResolveListLimit(options.Limit, options.All, options.LimitChanged)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +257,7 @@ func (s *SSPCatalogService) listQueueWorkloads(ctx context.Context, queueName st
 	if s.platform == nil {
 		return nil, fmt.Errorf("platform client is required")
 	}
-	limit, err := resolveSSPCatalogLimit(options.Limit, options.All)
+	limit, err := ResolveListLimit(options.Limit, options.All, options.LimitChanged)
 	if err != nil {
 		return nil, err
 	}
@@ -322,19 +323,6 @@ func formatSSPTrainingJobResources(job platform.SSPTrainingJob) string {
 		parts = append(parts, fmt.Sprintf("%s×%d %s", name, replicas, strings.Join(values, "/")))
 	}
 	return strings.Join(parts, "; ")
-}
-
-func resolveSSPCatalogLimit(limit int, all bool) (int, error) {
-	if all {
-		return 5000, nil
-	}
-	if limit == 0 {
-		return 50, nil
-	}
-	if limit < 1 || limit > 1000 {
-		return 0, fmt.Errorf("--limit must be between 1 and 1000")
-	}
-	return limit, nil
 }
 
 func filterAndSortSSPCatalogItems(items []SSPCatalogListItem, state string, limit int) []SSPCatalogListItem {

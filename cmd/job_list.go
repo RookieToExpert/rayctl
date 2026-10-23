@@ -36,8 +36,9 @@ func newECPJobListCmd() *cobra.Command {
 			if !isValidClusterStatusFilter(state) && strings.TrimSpace(state) != "" {
 				return fmt.Errorf("unsupported status filter %q", state)
 			}
-			if !all && (limit < 1 || limit > 1000) {
-				return fmt.Errorf("--limit must be between 1 and 1000")
+			queryLimit, err := service.ResolveListLimit(limit, windowed, cmd.Flags().Changed("limit"))
+			if err != nil {
+				return err
 			}
 			if strings.EqualFold(strings.TrimSpace(state), "all") {
 				includeInactive = true
@@ -48,28 +49,18 @@ func newECPJobListCmd() *cobra.Command {
 				return platformErr
 			}
 			jobService := service.NewJobService(nil, nil, vcClient)
-			queryLimit := limit
-			if all {
-				queryLimit = 0
-			}
-			if windowed {
-				queryLimit = 5000
-			}
 			result, err := jobService.ListCurrentTenantVolcanoJobsSince(cmd.Context(), includeInactive, state, queryLimit, createdAfter)
 			if err != nil {
 				return err
-			}
-			if !all && len(result.Items) > limit {
-				result.Items = result.Items[:limit]
 			}
 			output.PrintECPJobList(result)
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&state, "state", "s", "", "按状态筛选: pending、running、active、failed 或 all")
-	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "最多显示的最新任务数，范围 1-1000")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "最多显示的最新任务数，范围 1-1000；窗口扫描时显式 -n 仍生效，上限 5000")
 	cmd.Flags().BoolVarP(&all, "all", "A", false, "显示最近 --since 时间窗内的任务，默认 7d，最多 5000 条")
-	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制创建时间窗口，例如 24h、7d、30d；单独使用也会启用窗口扫描")
+	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制创建时间窗口，例如 24h、7d、30d；单独使用也会启用窗口扫描；未传 -n 时最多 5000 条")
 	cmd.Flags().BoolVar(&includeInactive, "all-status", false, "查询包括已结束任务在内的历史任务")
 	cmd.AddCommand(newJobListClusterCmd())
 	return cmd

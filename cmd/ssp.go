@@ -54,7 +54,7 @@ func newAIDListCmd() *cobra.Command {
 				catalog.SetKubeClient(clientset)
 			}
 			result, err := catalog.ListAID(cmd.Context(), service.SSPCatalogListOptions{
-				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: windowed, CreatedAfter: createdAfter, IncludeNodes: longOutput,
+				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, LimitChanged: cmd.Flags().Changed("limit"), All: windowed, CreatedAfter: createdAfter, IncludeNodes: longOutput,
 			})
 			if err != nil {
 				return err
@@ -64,7 +64,7 @@ func newAIDListCmd() *cobra.Command {
 		},
 	}
 	addSSPCatalogListFlags(cmd, &workspace, &queue, &state, &limit, &all)
-	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制创建时间窗口，例如 24h、7d、30d；单独使用也会启用窗口扫描")
+	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制创建时间窗口，例如 24h、7d、30d；单独使用也会启用窗口扫描；未传 -n 时最多 5000 条")
 	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示资源规格和创建时间")
 	return cmd
 }
@@ -162,7 +162,7 @@ func newAITListCmd() *cobra.Command {
 				return err
 			}
 			result, err := catalog.ListAIT(cmd.Context(), service.SSPCatalogListOptions{
-				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, All: windowed, CreatedAfter: createdAfter,
+				Region: region, Workspace: workspace, Queue: queue, State: state, Limit: limit, LimitChanged: cmd.Flags().Changed("limit"), All: windowed, CreatedAfter: createdAfter,
 			})
 			if err != nil {
 				return err
@@ -172,7 +172,7 @@ func newAITListCmd() *cobra.Command {
 		},
 	}
 	addSSPCatalogListFlags(cmd, &workspace, &queue, &state, &limit, &all)
-	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制时间窗口；FAILED 按失败时间，其他状态按创建时间，例如 24h、7d、30d")
+	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制时间窗口；FAILED 按失败时间，其他状态按创建时间，例如 24h、7d、30d；单独使用也会启用窗口扫描，未传 -n 时最多 5000 条")
 	return cmd
 }
 
@@ -180,7 +180,7 @@ func addSSPCatalogListFlags(cmd *cobra.Command, workspace *string, queue *string
 	cmd.Flags().StringVarP(workspace, "workspace", "w", "", "只查询指定 workspace")
 	cmd.Flags().StringVarP(queue, "queue", "q", "", "只查询指定 queue；会自动定位所属 workspace")
 	cmd.Flags().StringVarP(state, "state", "s", "", "按状态筛选，例如 Running、Pending")
-	cmd.Flags().IntVarP(limit, "limit", "n", 50, "最多显示的最新记录数，范围 1-1000")
+	cmd.Flags().IntVarP(limit, "limit", "n", 50, "最多显示的最新记录数，范围 1-1000；窗口扫描时显式 -n 仍生效，上限 5000")
 	cmd.Flags().BoolVarP(all, "all", "A", false, "显示最近 --since 时间窗内的记录，默认 7d，最多 5000 条")
 }
 
