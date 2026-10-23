@@ -47,6 +47,7 @@ type VCDetailResult struct {
 	Tenant       string
 	Region       string
 	State        string
+	ControlPlane *VCControlPlaneConfig `json:"control_plane,omitempty"`
 }
 
 type VCNodeListResult struct {

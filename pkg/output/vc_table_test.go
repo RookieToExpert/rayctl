@@ -6,8 +6,26 @@ import (
 	"strings"
 	"testing"
 
+	"rayctl/internal/platform"
 	"rayctl/internal/service"
 )
+
+func TestPrintVCConfigShowsDesiredAppliedAndActual(t *testing.T) {
+	config := &service.VCControlPlaneConfig{
+		Name: "vc-demo", UID: "vc-uid", Environment: "pt", HostNamespace: "vc-vc-uid",
+		AppliedFlavor: "medium", FlavorSource: "VCluster2ControlPlane label",
+		Desired:    &platform.VCControlPlaneFlavor{Name: "large", MaxNodeCount: 500},
+		Deployment: &service.VCControlPlaneDeployment{VCControlPlaneSpec: service.VCControlPlaneSpec{Replicas: 3, Requests: map[string]string{"cpu": "8", "memory": "32Gi"}, Limits: map[string]string{"cpu": "8", "memory": "32Gi"}}, Ready: 3, Updated: 2},
+	}
+	for _, render := range []func(){func() { PrintVCConfig(config) }, func() { PrintVCOverview(&service.VCDetailResult{Name: "vc-demo", ControlPlane: config}, nil) }} {
+		text := captureTableOutput(t, render)
+		for _, expected := range []string{"DESIRED FLAVOR", "large", "medium", "500", "3/3 (updated 2)", "32Gi", "未收敛"} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("missing %q: %s", expected, text)
+			}
+		}
+	}
+}
 
 func TestPrintVCOverviewSummaryOmitsResourceNamespaceTable(t *testing.T) {
 	detail := &service.VCDetailResult{Name: "vc-test", UID: "uid-test", State: "RUNNING"}

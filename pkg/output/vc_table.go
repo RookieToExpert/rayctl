@@ -86,6 +86,7 @@ func printVCOverviewTable(result *service.VCDetailResult, mapping *service.Clust
 			[]string{"RESOURCE NS COUNT", fmt.Sprintf("%d", mapping.ResourceNamespaceCount)},
 		)
 	}
+	rows = append(rows, vcConfigRows(result.ControlPlane)...)
 
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
@@ -96,6 +97,7 @@ func printVCOverviewTable(result *service.VCDetailResult, mapping *service.Clust
 			minWidths:   []int{12, 24},
 		},
 	)
+	printVCConfigWarnings(result.ControlPlane)
 }
 
 func PrintVCNodeList(result *service.VCNodeListResult, longOutput bool) {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"rayctl/internal/kube"
 	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
@@ -20,19 +19,10 @@ type vcGetQueryResult struct {
 	err        error
 }
 
-func runParallelVCGet(ctx context.Context, identifiers []string, platformOnly bool) error {
+func runParallelVCGet(ctx context.Context, identifiers []string, platformOnly bool, explicitKubeconfig ...bool) error {
 	vcClient, vcService, err := newVCPlatformService()
 	if err != nil {
 		return err
-	}
-
-	var clusterService *service.ClusterService
-	if !platformOnly {
-		clientset, err := kube.NewClientset(kubeconfig)
-		if err != nil {
-			return err
-		}
-		clusterService = service.NewClusterService(clientset, vcClient)
 	}
 
 	results := runBoundedQueries(ctx, identifiers, defaultVCGetParallelism, func(queryCtx context.Context, identifier string) vcGetQueryResult {
@@ -45,7 +35,14 @@ func runParallelVCGet(ctx context.Context, identifiers []string, platformOnly bo
 		if result.err != nil || platformOnly {
 			return result
 		}
-		result.mapping, result.err = clusterService.GetResolved(queryCtx, result.detail.Name, result.detail.UID)
+		explicit := len(explicitKubeconfig) > 0 && explicitKubeconfig[0]
+		target, targetErr := hcEnvironmentForVC(result.detail, explicit)
+		if targetErr != nil {
+			result.err = targetErr
+			return result
+		}
+		enrichVCControlPlane(queryCtx, result.detail, target)
+		result.mapping, result.err = service.NewClusterService(target.Client, vcClient).GetResolved(queryCtx, result.detail.Name, result.detail.UID)
 		return result
 	})
 

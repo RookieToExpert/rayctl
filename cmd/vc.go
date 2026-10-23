@@ -25,6 +25,7 @@ func newVCCmd() *cobra.Command {
 	vcCmd.AddCommand(newVCListCmd())
 	vcCmd.AddCommand(newVCRenewCmd())
 	vcCmd.AddCommand(newVCGetCmd())
+	vcCmd.AddCommand(newVCConfigCmd())
 	vcCmd.AddCommand(newVCNodeCmd())
 	vcCmd.AddCommand(newVCWorkloadCmd())
 	vcCmd.AddCommand(newClusterSetCmd())
@@ -69,7 +70,7 @@ func newVCGetCmd() *cobra.Command {
 			if len(args) == 1 {
 				return runVCGet(cmd, args[0], platformOnly)
 			}
-			return runParallelVCGet(cmd.Context(), args, platformOnly)
+			return runParallelVCGet(cmd.Context(), args, platformOnly, explicitHCKubeconfig(cmd))
 		},
 	}
 	cmd.Flags().BoolVar(&platformOnly, "platform-only", false, "只显示平台 VC 信息，不查询 HC namespace 映射")
@@ -90,11 +91,12 @@ func runVCGet(cmd *cobra.Command, identifier string, platformOnly bool) error {
 		return nil
 	}
 
-	clientset, err := kube.NewClientset(kubeconfig)
+	target, err := hcEnvironmentForVC(detail, explicitHCKubeconfig(cmd))
 	if err != nil {
 		return err
 	}
-	mapping, err := service.NewClusterService(clientset, vcClient).GetResolved(cmd.Context(), detail.Name, detail.UID)
+	enrichVCControlPlane(cmd.Context(), detail, target)
+	mapping, err := service.NewClusterService(target.Client, vcClient).GetResolved(cmd.Context(), detail.Name, detail.UID)
 	if err != nil {
 		return err
 	}
