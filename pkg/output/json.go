@@ -16,8 +16,9 @@ import (
 // A command renders sequentially after its concurrent queries have completed.
 // The session collects result objects before any table formatting takes place.
 type JSONSession struct {
-	Items    []any
-	Warnings []string
+	Items      []any
+	Warnings   []string
+	Incomplete bool
 }
 
 var jsonSession *JSONSession
@@ -33,6 +34,9 @@ func IsJSON() bool { return jsonSession != nil }
 func captureJSON(value any) bool {
 	if jsonSession == nil {
 		return false
+	}
+	if completeness, ok := value.(interface{ IsQueryComplete() bool }); ok && !completeness.IsQueryComplete() {
+		jsonSession.Incomplete = true
 	}
 	v := reflect.ValueOf(value)
 	for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) {
@@ -116,7 +120,7 @@ func (s *JSONSession) Write(w io.Writer, list bool, requested int, queryErr erro
 		}
 	}
 	if result == nil {
-		result = map[string]any{"items": items, "summary": map[string]any{"returned": len(items), "total": total, "requested": requested, "complete": queryErr == nil}, "metadata": metadata, "warnings": s.Warnings, "errors": errors}
+		result = map[string]any{"items": items, "summary": map[string]any{"returned": len(items), "total": total, "requested": requested, "complete": queryErr == nil && !s.Incomplete}, "metadata": metadata, "warnings": s.Warnings, "errors": errors}
 	}
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")

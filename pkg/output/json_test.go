@@ -103,6 +103,39 @@ func TestJSONListCollectsResultWarningsAtTopLevel(t *testing.T) {
 	}
 }
 
+func TestJSONSuccessfulAIDKeepsPartialScopeMetadata(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		session := BeginJSON()
+		result := &service.SSPAIDGetResult{Name: "dev-found", QueryIncomplete: partial}
+		if partial {
+			result.Warnings = []string{"部分查询未完成：skip-webhook-test 无权限（403）"}
+		}
+		PrintSSPAIDDetail(result, true, false)
+		PrintSSPAIDDetail(nil, true, false)
+		var buffer bytes.Buffer
+		err := session.Write(&buffer, true, 1, nil)
+		EndJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			Summary  struct{ Complete bool }
+			Warnings []string
+			Errors   []string
+			Items    []map[string]any
+		}
+		if err := json.Unmarshal(buffer.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Summary.Complete == partial || len(payload.Errors) != 0 || len(payload.Items) != 1 {
+			t.Fatal(buffer.String())
+		}
+		if partial && (len(payload.Warnings) != 1 || payload.Items[0]["query_incomplete"] != true) {
+			t.Fatal(buffer.String())
+		}
+	}
+}
+
 func TestJSONResourceUnits(t *testing.T) {
 	value, ok := resourceJSON(".cpu", "500m")
 	if !ok || value.(map[string]any)["unit"] != "millicores" || value.(map[string]any)["value"] != 500.0 {

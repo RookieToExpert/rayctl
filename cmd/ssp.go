@@ -98,9 +98,9 @@ func newSSPAIDGetCmd() *cobra.Command {
 				err        error
 			}
 			results := runBoundedQueries(cmd.Context(), args, 4, func(ctx context.Context, identifier string) queryResult {
-				result, err := service.QueryHCEnvironments(ctx, targets, identifier, func(ctx context.Context, target service.HCEnvironment) (*service.SSPAIDGetResult, error) {
+				result, err := service.QueryAIDEnvironments(ctx, targets, identifier, func(ctx context.Context, target service.HCEnvironment) (*service.SSPAIDGetResult, error) {
 					return service.NewSSPAIDService(target.Client, platformClient).GetAIDInRegion(service.WithPodEvidenceOptions(ctx, noImage, target.Kubeconfig), identifier, workspace, target.Region, longOutput)
-				}, func(err error) bool { var missing *service.AIDNotFoundError; return errors.As(err, &missing) })
+				})
 				return queryResult{identifier, result, err}
 			})
 			queryErrors := make([]error, 0)

@@ -379,6 +379,13 @@ func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool, debugTi
 	if captureJSON(result) {
 		return
 	}
+	if result != nil {
+		defer func() {
+			for _, warning := range result.Warnings {
+				PrintWarning(os.Stderr, warning)
+			}
+		}()
+	}
 	if longOutput && result != nil {
 		printAIDIncrement(result, debugTiming)
 		return

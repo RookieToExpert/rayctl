@@ -30,6 +30,8 @@ type SSPAIDService struct {
 }
 
 type SSPAIDGetResult struct {
+	QueryIncomplete        bool `json:"query_incomplete,omitempty" public:"omitempty"`
+	Warnings               []string
 	Environment            string
 	Region                 string
 	PodEvidence            *podevidence.Result
@@ -176,10 +178,13 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	stageStartedAt = time.Now()
 	candidates, lookupErr := s.findPlatformAIDs(ctx, subscription, region, lookupIdentifier, workspaces)
 	timings.PlatformAID = time.Since(stageStartedAt)
-	if lookupErr != nil {
-		return nil, fmt.Errorf("query SSP AID API: %w", lookupErr)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(candidates) == 0 {
+		if lookupErr != nil {
+			return nil, fmt.Errorf("可访问范围内未找到 AID %q；部分 workspace 查询未完成：%w", identifier, lookupErr)
+		}
 		return nil, &AIDNotFoundError{Identifier: identifier, Region: region, Workspace: workspace}
 	}
 	if len(candidates) > 1 {
@@ -224,6 +229,7 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	})
 	stageStartedAt = time.Now()
 	result := s.buildResult(ctx, aid, hostNamespace, pods, nil, includeLogs)
+	result.QueryIncomplete = lookupErr != nil
 	result.Region = region
 	result.Environment = "d"
 	if region == "cn-pj-03" {
@@ -236,7 +242,7 @@ func (s *SSPAIDService) GetAIDInRegion(ctx context.Context, identifier string, w
 	}
 	timings.Total = time.Since(startedAt)
 	result.Timings = timings
-	return result, nil
+	return result, lookupErr
 }
 
 func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription string, region string, identifier string, workspaces []sspWorkspaceRef) ([]sspAIDCandidate, error) {
@@ -280,13 +286,14 @@ func (s *SSPAIDService) findPlatformAIDs(ctx context.Context, subscription strin
 	var lookupErrors []error
 	for result := range results {
 		if result.err != nil {
-			lookupErrors = append(lookupErrors, result.err)
+			lookupErrors = append(lookupErrors, &SSPWorkspaceQueryError{Workspace: result.workspace.Name, Region: region, Cause: result.err})
 			continue
 		}
 		for _, aid := range result.aids {
 			candidates = append(candidates, sspAIDCandidate{AID: aid, Workspace: result.workspace})
 		}
 	}
+	sort.Slice(lookupErrors, func(i, j int) bool { return lookupErrors[i].Error() < lookupErrors[j].Error() })
 	return candidates, errors.Join(lookupErrors...)
 }
 
