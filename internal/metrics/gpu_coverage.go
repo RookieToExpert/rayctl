@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -80,17 +79,8 @@ func appendGPUCoverage(result *Result, options QueryOptions, cards []*pointSerie
 			}
 		}
 		coverage.MinimumRatio = math.Min(coverage.MinimumRatio, entry.Ratio)
-		if entry.Ratio < 0.9 || len(entry.Gaps) > 0 {
-			if interval == 0 {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("%s 仅有 %d 个采样点，无法确认采样周期和覆盖率；avg/p95 仅代表实际观测数据（UTC+8）", entry.Key, entry.ActualPoints))
-			} else {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("%s 数据覆盖不足：%d/%d 个采样点，覆盖约 %.1f%%；avg/p95 仅代表实际观测数据（UTC+8）", entry.Key, entry.ActualPoints, entry.ExpectedPoints, 100*entry.Ratio))
-			}
-			for _, g := range entry.Gaps {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("%s 数据断档（UTC+8）：%s 至 %s", entry.Key, g.Start, g.End))
-			}
-		}
 		coverage.Series = append(coverage.Series, entry)
 	}
 	result.Coverage = coverage
+	appendGPUCoverageWarnings(result, coverage)
 }
