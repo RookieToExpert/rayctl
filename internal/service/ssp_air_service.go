@@ -111,9 +111,10 @@ type SSPAIRGatewayItem struct {
 }
 
 type SSPAIRJobListResult struct {
-	Items           []SSPAIRJobItem
-	Warnings        []string
-	QueryIncomplete bool `json:"query_incomplete,omitempty" public:"omitempty"`
+	Items             []SSPAIRJobItem
+	Warnings          []string
+	QueryIncomplete   bool `json:"query_incomplete,omitempty" public:"omitempty"`
+	DuplicatesRemoved int  `json:"duplicates_removed,omitempty" public:"omitempty"`
 }
 
 func (r *SSPAIRJobListResult) IsQueryComplete() bool { return r == nil || !r.QueryIncomplete }
@@ -168,9 +169,19 @@ func (s *SSPAIRService) ListJobs(ctx context.Context, region string, workspace s
 	if succeeded == 0 && len(failures) > 0 {
 		return nil, singleLineQueryError{fmt.Errorf("全部 workspace 查询失败：%w", errors.Join(failures...))}
 	}
-	items = filterAIRJobsByState(items, state)
-	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
-	result := &SSPAIRJobListResult{Items: items, QueryIncomplete: len(failures) > 0}
+	uniqueItems := deduplicateAIRJobs(items)
+	duplicatesRemoved := len(items) - len(uniqueItems)
+	items = filterAIRJobsByState(uniqueItems, state)
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].CreatedAt != items[j].CreatedAt {
+			return items[i].CreatedAt > items[j].CreatedAt
+		}
+		if items[i].Name != items[j].Name {
+			return items[i].Name < items[j].Name
+		}
+		return airJobDedupKey(items[i]) < airJobDedupKey(items[j])
+	})
+	result := &SSPAIRJobListResult{Items: items, QueryIncomplete: len(failures) > 0, DuplicatesRemoved: duplicatesRemoved}
 	if len(failures) > 0 {
 		result.Warnings = []string{partialSSPQueryWarning(errors.Join(failures...))}
 	}
@@ -227,6 +238,7 @@ func (s *SSPAIRService) GetJobs(ctx context.Context, identifiers []string, regio
 				}
 			}
 		}
+		matches = deduplicateAIRJobs(matches)
 		switch len(matches) {
 		case 0:
 			if firstErr != nil {
