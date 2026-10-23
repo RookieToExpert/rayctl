@@ -40,6 +40,10 @@ func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {
 	if captureJSON(result) {
 		return
 	}
+	if longOutput && result != nil {
+		printAIRIncrement(result)
+		return
+	}
 	if result != nil && longOutput {
 		defer func() { printPodEvidence(result.PodEvidence) }()
 	}
@@ -171,6 +175,10 @@ func PrintSSPAIRGatewayList(result *service.SSPAIRGatewayListResult) {
 
 func PrintSSPAIRGatewayDetail(result *service.SSPAIRGatewayItem, longOutput bool) {
 	if captureJSON(result) {
+		return
+	}
+	if longOutput && result != nil {
+		printGatewayIncrement(result)
 		return
 	}
 	if result == nil {

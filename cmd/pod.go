@@ -49,12 +49,12 @@ func newPodCmd() *cobra.Command {
 			if platformErr != nil {
 				result.Warnings = append(result.Warnings, "platform enrichment unavailable: "+platformErr.Error())
 			}
-			output.PrintPodLocateResult(result)
+			output.PrintPodLocateResult(result, long)
 			return queryErr
 		},
 	}
 	get.Flags().StringVarP(&namespace, "namespace", "n", "", "HC namespace")
-	get.Flags().BoolVarP(&long, "long", "l", false, "显示 PVC 到 AFS 的映射")
+	get.Flags().BoolVarP(&long, "long", "l", false, "仅显示身份锚点及新增 PVC 到 AFS 映射")
 	get.Flags().BoolVar(&noPlatform, "no-platform", false, "仅查询 Kubernetes，不调用平台 API")
 	parent.AddCommand(get)
 	return parent

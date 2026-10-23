@@ -125,7 +125,7 @@ func newSSPAIDGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免已停止开发机跨 workspace 查询")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 Pod 容器状态、当前/上次日志、架构和挂载详情")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增的 UID、容器状态、日志、架构和挂载证据")
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "打印 AID 查询各阶段耗时")
 	cmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	return cmd
@@ -297,7 +297,7 @@ func newSSPJobGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace 名称，可避免历史任务跨 workspace 查询")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示前 3 个可疑 Pod 的容器状态、当前/上次日志、架构和挂载详情")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及前 3 个可疑 Pod 的新增诊断、日志与挂载证据")
 	cmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
 	cmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	return cmd

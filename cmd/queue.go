@@ -172,7 +172,7 @@ func newQueueGetCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 workspace UID 和节点数等完整详情")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增 workspace UID、节点数和容量详情")
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "打印 queue get 各阶段耗时")
 	return cmd
 }

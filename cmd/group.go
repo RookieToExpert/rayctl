@@ -92,6 +92,6 @@ func newGroupGetCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示组的 POSIX/租户 ID、成员 ID 和协管员是否在组内")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "仅显示身份锚点及新增 POSIX/租户 ID、成员 ID 和组内关系")
 	return cmd
 }

@@ -263,7 +263,7 @@ func newRBACGetCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&selector, "selector", "s", "", "RoleBinding/ClusterRoleBinding labelSelector，默认 resource.compute.sensecore.cn/control")
-	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示 Binding 名和精确到秒的创建时间")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "仅显示身份锚点及新增 Binding 名、类型和精确创建时间")
 	return cmd
 }
 

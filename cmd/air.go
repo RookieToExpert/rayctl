@@ -105,7 +105,7 @@ func newAIRJobGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace，可显著加快精确查询")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示实例时间、卷、镜像和详细资源及 Pod 诊断")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增实例时间、资源、镜像、挂载和 Pod 诊断")
 	cmd.Flags().IntVarP(&workerLimit, "worker-limit", "c", 20, "最多展示的实例及辅助 Pod 数量")
 	cmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	return cmd
@@ -183,7 +183,7 @@ func newAIRGatewayGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "指定 workspace，可显著加快精确查询")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 DNAT 和详细资源")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增 DNAT、镜像和资源")
 	return cmd
 }
 

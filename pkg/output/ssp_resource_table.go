@@ -143,6 +143,17 @@ func PrintSSPWorkspaceDetail(result *service.SSPWorkspaceItem, longOutput bool) 
 	if result == nil {
 		return
 	}
+	if longOutput {
+		printDetailAnchor(result.Name, result.State, "", "", result.Region)
+		rows := [][]string{}
+		for _, queue := range result.Queues {
+			rows = append(rows, []string{queue.Name, queue.UID})
+		}
+		if len(rows) > 0 {
+			printBoxTable([]string{"QUEUE", "UID"}, rows)
+		}
+		return
+	}
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
 		[][]string{
@@ -233,6 +244,10 @@ func PrintSSPQueueList(result *service.SSPQueueListResult) {
 
 func PrintSSPQueueDetail(result *service.SSPQueueItem, longOutput bool) {
 	if captureJSON(result) {
+		return
+	}
+	if longOutput && result != nil {
+		printQueueIncrement(result)
 		return
 	}
 	if result == nil {

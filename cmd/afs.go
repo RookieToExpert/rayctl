@@ -121,7 +121,7 @@ func newAFSGetCmd() *cobra.Command {
 			return runAFSQueries(cmd, args, longOutput)
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "查询并显示 host PV/PVC、租户及最多 15 个关联 Virtual PVC")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增 host PV/PVC、租户和最多 15 个 Virtual PVC")
 	return cmd
 }
 
@@ -165,6 +165,6 @@ func newAFSCheckCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "查询并显示 host PV/PVC、租户及最多 15 个关联 Virtual PVC")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增 host PV/PVC、租户和最多 15 个 Virtual PVC")
 	return cmd
 }

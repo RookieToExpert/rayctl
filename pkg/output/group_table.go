@@ -11,6 +11,27 @@ func PrintGroupGetResult(result *service.GroupGetResult, long bool) {
 	if captureJSON(result) || result == nil {
 		return
 	}
+	if long {
+		printDetailAnchor(result.Name, result.Status, "", "", "")
+		fields := [][]string{}
+		if result.PosixGroupName != "" {
+			fields = append(fields, []string{"POSIX", result.PosixGroupName})
+		}
+		if result.TenantID != "" {
+			fields = append(fields, []string{"TENANT ID", result.TenantID})
+		}
+		if len(fields) > 0 {
+			printResourceDetail(fields)
+		}
+		rows := [][]string{}
+		for _, member := range result.Members {
+			rows = append(rows, []string{member.Username, member.ID, yesNo(member.InGroup)})
+		}
+		if len(rows) > 0 {
+			printBoxTable([]string{"USERNAME", "ID", "IN GROUP"}, rows)
+		}
+		return
+	}
 	fields := [][]string{
 		{"ID", emptyDash(result.ID)},
 		{"NAME", emptyDash(result.Name)},

@@ -86,6 +86,10 @@ func PrintNodeDescribe(details *service.NodeDescribe, debugTiming bool, clientDu
 	if captureJSON(details) {
 		return
 	}
+	if long && details != nil {
+		printNodeIncrement(details)
+		return
+	}
 	headers := []string{"HOST"}
 	row := []string{details.Hostname}
 	maxWidths := []int{24}

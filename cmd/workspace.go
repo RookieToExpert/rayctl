@@ -138,6 +138,6 @@ func newWorkspaceGetCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 Queue UID")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增 Queue UID")
 	return cmd
 }

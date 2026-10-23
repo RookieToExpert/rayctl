@@ -539,7 +539,7 @@ func newNodeGetCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for node get")
 	cmd.Flags().BoolVar(&workloads, "workloads", false, "显示节点所有可见 Pod 的负载归属")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示负载的 VC、workspace、creator、加速卡请求和来源")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及负载新增的 VC、workspace、creator、加速卡请求和来源")
 	cmd.Flags().BoolVar(&noPlatform, "no-platform", false, "不访问平台 API，仅使用 Kubernetes 数据")
 
 	return cmd

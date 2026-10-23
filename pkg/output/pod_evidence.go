@@ -9,15 +9,28 @@ import (
 	"rayctl/internal/podevidence"
 )
 
-func printPodEvidence(result *podevidence.Result) {
+func printPodEvidence(result *podevidence.Result, views ...podEvidenceView) {
 	if result == nil {
 		return
 	}
+	view := podEvidenceView{IncludeHistory: true}
+	if len(views) > 0 {
+		view = views[0]
+	}
+	pvcInfo := map[string]int{}
+	for i, pvc := range view.PVCs {
+		for _, name := range []string{pvc.ClaimName, pvc.Name, pvc.HostPVCName} {
+			if name != "" {
+				pvcInfo[name] = i
+			}
+		}
+	}
+	seenPVCs := map[string]bool{}
 	fmt.Fprintf(os.Stdout, "\nPOD EVIDENCE: %d/%d (omitted %d), current Pod cumulative restarts %d\n", len(result.Pods), result.Total, result.Omitted, result.Restarts)
-	if result.Restarts24h != nil {
+	if view.IncludeHistory && result.Restarts24h != nil {
 		fmt.Fprintf(os.Stdout, "Observed restarts in 24h (%d inspected Pods): %d\n", len(result.HistoryPods), *result.Restarts24h)
 	}
-	if last := result.LastRestart24h; last != nil {
+	if last := result.LastRestart24h; view.IncludeHistory && last != nil {
 		fmt.Fprintf(os.Stdout, "Last observed restart in 24h: %s (UTC+8), %s/%s, reason %s, Pod UID %s\n", last.ObservedAt.In(time.FixedZone("UTC+8", 8*3600)).Format("2006-01-02 15:04:05"), last.Pod, last.Container, emptyDash(last.Reason), emptyDash(last.UID))
 	}
 	for _, pod := range result.Pods {
@@ -52,16 +65,45 @@ func printPodEvidence(result *podevidence.Result) {
 		if pod.Message != "" {
 			fmt.Fprintf(os.Stdout, "status.message: %s\n", redactText(pod.Message))
 		}
-		printBoxTable([]string{"CONTAINER", "KIND", "READY", "RESTARTS", "STATE", "LAST TERMINATION", "EXIT", "INSTANT EXIT"}, rows)
-		printBoxTable([]string{"CONTAINER", "IMAGE", "IMAGE ARCH", "NODE", "NODE ARCH"}, images)
+		if len(rows) > 0 {
+			printBoxTable([]string{"CONTAINER", "KIND", "READY", "RESTARTS", "STATE", "LAST TERMINATION", "EXIT", "INSTANT EXIT"}, rows)
+		}
+		imageHeaders := []string{"CONTAINER", "IMAGE", "IMAGE ARCH", "NODE", "NODE ARCH"}
+		sameImage := view.BaselineImage != "" && len(images) > 0
+		for _, row := range images {
+			sameImage = sameImage && row[1] == view.BaselineImage
+		}
+		if sameImage {
+			imageHeaders = []string{"CONTAINER", "IMAGE ARCH", "NODE", "NODE ARCH"}
+			for i, row := range images {
+				images[i] = []string{row[0], row[2], row[3], row[4]}
+			}
+		}
+		if len(images) > 0 {
+			printBoxTable(imageHeaders, images)
+		}
 		mountRows := [][]string{}
+		hiddenMounts := 0
 		for _, container := range pod.Containers {
 			for _, mount := range container.Mounts {
-				mountRows = append(mountRows, []string{container.Name, mount.Name, mount.Type, emptyDash(mount.Source), mount.Path, emptyDash(mount.SubPath), fmt.Sprint(mount.ReadOnly)})
+				if injectedMount(mount) {
+					hiddenMounts++
+					continue
+				}
+				status, endpoint := "", ""
+				if index, ok := pvcInfo[mount.Source]; ok && mount.Type == "PVC" {
+					pvc := view.PVCs[index]
+					status, endpoint = pvc.Status, pvc.FrontendVolume
+					seenPVCs[firstNonEmptyOutput(pvc.ClaimName, pvc.Name)] = true
+				}
+				mountRows = append(mountRows, []string{container.Name, mount.Name, mount.Type, emptyDash(mount.Source), mount.Path, emptyDash(mount.SubPath), fmt.Sprint(mount.ReadOnly), emptyDash(status), emptyDash(endpoint)})
 			}
 		}
 		if len(mountRows) > 0 {
-			printBoxTable([]string{"CONTAINER", "VOLUME", "TYPE", "SOURCE", "MOUNT", "SUBPATH", "READ ONLY"}, mountRows)
+			printBoxTable([]string{"CONTAINER", "VOLUME", "TYPE", "SOURCE", "MOUNT", "SUBPATH", "READ ONLY", "PVC STATUS", "AFS/AOSS ENDPOINT"}, mountRows)
+		}
+		if hiddenMounts > 0 {
+			fmt.Fprintf(os.Stdout, "平台注入挂载：已折叠 %d 项\n", hiddenMounts)
 		}
 		for _, container := range pod.Containers {
 			for _, log := range []struct {
@@ -69,7 +111,7 @@ func printPodEvidence(result *podevidence.Result) {
 				lines     []string
 				truncated bool
 			}{{"current", container.Logs.Current, container.Logs.CurrentTruncated}, {"previous", container.Logs.Previous, container.Logs.PreviousTruncated}} {
-				if log.lines == nil {
+				if strings.TrimSpace(strings.Join(log.lines, "\n")) == "" {
 					continue
 				}
 				fmt.Fprintf(os.Stdout, "\n%s / %s / %s (tail 30):\n%s\n", pod.Name, container.Name, log.name, redactText(strings.Join(log.lines, "\n")))
@@ -83,8 +125,12 @@ func printPodEvidence(result *podevidence.Result) {
 		}
 	}
 	for _, warning := range result.Warnings {
+		if !view.IncludeHistory && strings.HasPrefix(warning, "采样间隔约") {
+			continue
+		}
 		fmt.Fprintln(os.Stdout, "Warning:", redactText(warning))
 	}
+	printIncrementPVCs(view.PVCs, seenPVCs)
 }
 
 func containerStateLabel(state any) string {

@@ -80,7 +80,7 @@ func newPVCQueryCmd(use string, short string) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "Show additional detail rows such as tenant")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增租户信息")
 	return cmd
 }
 

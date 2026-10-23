@@ -12,6 +12,10 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 	if captureJSON(result) {
 		return
 	}
+	if longOutput && result != nil {
+		printATEIncrement(result, debugTiming)
+		return
+	}
 	if longOutput {
 		defer func() { printPodEvidence(result.PodEvidence) }()
 	}
@@ -151,6 +155,10 @@ func PrintJobDetail(result *service.JobGetResult, longOutput bool, debugTiming b
 
 func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 	if captureJSON(result) {
+		return
+	}
+	if longOutput && result != nil {
+		printAITIncrement(result)
 		return
 	}
 	if result != nil && longOutput {
@@ -369,6 +377,10 @@ func shortAcceleratorResource(value string) string {
 
 func PrintSSPAIDDetail(result *service.SSPAIDGetResult, longOutput bool, debugTiming bool) {
 	if captureJSON(result) {
+		return
+	}
+	if longOutput && result != nil {
+		printAIDIncrement(result, debugTiming)
 		return
 	}
 	if result != nil && longOutput {

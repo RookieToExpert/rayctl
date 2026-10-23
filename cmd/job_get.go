@@ -50,7 +50,7 @@ func newECPJobGetCmd() *cobra.Command {
 
 	getCmd.Flags().BoolVar(&noImage, "no-image", false, "-l 时跳过镜像架构查询")
 	getCmd.Flags().BoolVar(&debugTiming, "debug-timing", false, "Print timing diagnostics for job get")
-	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示容器状态、当前/上次日志、镜像架构与挂载详情")
+	getCmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示身份锚点及新增的 UID、容器状态、日志、架构与挂载证据")
 	getCmd.Flags().DurationVar(&queryTimeout, "timeout", defaultJobGetTimeout, "单个任务的查询超时，例如 5s、30s；设为 0 表示不限制")
 	return getCmd
 }

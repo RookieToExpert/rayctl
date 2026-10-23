@@ -5,8 +5,19 @@ import (
 	"rayctl/internal/service"
 )
 
-func PrintPodLocateResult(r *service.PodLocateResult) {
+func PrintPodLocateResult(r *service.PodLocateResult, long ...bool) {
 	if captureJSON(r) || r == nil {
+		return
+	}
+	if len(long) > 0 && long[0] {
+		printDetailAnchor(r.HostPod, r.Status, r.HostNamespace, r.Node, r.Environment)
+		rows := [][]string{}
+		for _, pvc := range r.PVCs {
+			rows = append(rows, []string{pvc.Namespace, pvc.Name, emptyDash(pvc.AFS), pvc.Warning})
+		}
+		if len(rows) > 0 {
+			printBoxTable([]string{"NAMESPACE", "PVC", "AFS", "WARNING"}, rows)
+		}
 		return
 	}
 	rows := [][]string{

@@ -15,6 +15,10 @@ func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
 	if result == nil {
 		return
 	}
+	if long {
+		printRBACIncrement(result)
+		return
+	}
 
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
@@ -104,6 +108,14 @@ func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
 
 func PrintRBACGetSummary(results []*service.RBACGetResult, includeVC bool, long bool) {
 	if captureJSON(results) {
+		return
+	}
+	if long {
+		for _, result := range results {
+			if result != nil {
+				printRBACIncrement(result)
+			}
+		}
 		return
 	}
 	rows := make([][]string, 0)

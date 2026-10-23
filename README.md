@@ -1,4 +1,6 @@
 # rayctl
+
+`get -l` 使用增量详情：先显示名称、状态、HC namespace、节点的身份锚点，再显示默认视图没有的字段与诊断；多对象分别显示锚点。`list -l` 继续增加列。`-o json` 保留完整的已采集对象，不应用表格去重或隐藏卷的规则。标识字段完整保留；AIR list 默认显示 NAME/STATE/READY/WORKSPACE，`READY 1/1 ×2` 表示就绪组/总组 × 每组实例数，`-n` 默认 50，`-l` 增加队列和创建信息。
 强大的 k8s 工具 for 商汤 dcluster
 =======
 

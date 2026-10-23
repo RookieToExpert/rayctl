@@ -38,13 +38,13 @@ func preserveTableIdentifiers(headers []string, rows [][]string, options tableOp
 
 func identifierHeader(header string) bool {
 	header = strings.ToUpper(strings.TrimSpace(header))
-	for _, word := range []string{"NAME", "UID", "NAMESPACE", "IMAGE", "SECRET", "HOSTNAME", "MOUNT PATH"} {
+	for _, word := range []string{"NAME", "UID", "NAMESPACE", "IMAGE", "SECRET", "HOSTNAME", "PVC", "MOUNT PATH"} {
 		if strings.Contains(header, word) {
 			return true
 		}
 	}
 	switch header {
-	case "POD", "PODS", "HC POD", "VC POD", "INSTANCE", "INSPECT POD", "NODE", "NODES", "HOST", "VC", "WORKSPACE", "QUEUE", "CLUSTER", "PVC", "PV", "VOLUME", "AFS", "AID", "AIT", "ATE", "ECS", "AIS", "CREATOR", "SUBMITTER", "USER", "GROUP", "IP", "HOST IP", "POD IP", "NODE IP":
+	case "POD", "PODS", "HC POD", "VC POD", "PODGROUP", "INSTANCE", "INSPECT POD", "NODE", "NODES", "HOST", "VC", "WORKSPACE", "QUEUE", "CLUSTER", "PVC", "PV", "HOST PV", "VOLUME", "CONTAINER", "SOURCE", "MOUNT", "SUBPATH", "AFS", "AID", "AIT", "ATE", "ECS", "AIS", "CREATOR", "SUBMITTER", "USER", "GROUP", "IP", "HOST IP", "POD IP", "NODE IP":
 		return true
 	}
 	return false

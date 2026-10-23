@@ -143,6 +143,18 @@ func PrintAFSCheckDetail(result *service.AFSCheckResult, longOutput bool) {
 	if captureJSON(result) {
 		return
 	}
+	if longOutput && result != nil {
+		printDetailAnchor(result.AFSName, result.State, "", "", "")
+		printResourceDetail([][]string{{"租户", result.Tenant}, {"HOST PVC", joinOrDash(result.HostPVCs)}, {"HOST PV", joinOrDash(result.HostPVs)}})
+		if len(result.VirtualPVCs) > 0 {
+			rows := [][]string{}
+			for _, pvc := range result.VirtualPVCs {
+				rows = append(rows, []string{pvc})
+			}
+			printBoxTable([]string{"VIRTUAL PVC"}, rows)
+		}
+		return
+	}
 	rows := [][]string{
 		{"AFS", emptyDash(result.AFSName)},
 		{"UID", emptyDash(result.UID)},
@@ -211,6 +223,13 @@ func PrintAFSCheckSummary(results []*service.AFSCheckResult) {
 
 func PrintPVCCheckDetail(result *service.PVCCheckResult, longOutput bool) {
 	if captureJSON(result) {
+		return
+	}
+	if longOutput && result != nil {
+		for _, item := range result.Items {
+			printDetailAnchor(item.PVCName, "", "", "", "")
+			printResourceDetail([][]string{{"租户", item.Tenant}})
+		}
 		return
 	}
 	if len(result.Items) == 0 {
