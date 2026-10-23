@@ -11,8 +11,9 @@ import (
 
 func TestPlatformRequestTimeoutLeavesGatewayHeadroom(t *testing.T) {
 	client := newPlatformHTTPClient()
-	if client.Timeout != 20*time.Second || client.Timeout <= 15*time.Second {
-		t.Fatalf("timeout=%v", client.Timeout)
+	transport := client.Transport.(*platformTransport)
+	if client.Timeout != 0 || transport.requestTimeout != 20*time.Second || transport.requestTimeout <= 15*time.Second || transport.queueTimeout <= 0 {
+		t.Fatalf("client=%v network=%v queue=%v", client.Timeout, transport.requestTimeout, transport.queueTimeout)
 	}
 }
 

@@ -11,5 +11,7 @@ import (
 const platformRequestTimeout = 20 * time.Second
 
 func newPlatformHTTPClient() *http.Client {
-	return &http.Client{Timeout: platformRequestTimeout, Transport: newPlatformTransport(http.DefaultTransport)}
+	// Admission and network attempts have separate bounded budgets; the caller's
+	// context still bounds the entire command, including retries and body reads.
+	return &http.Client{Transport: newPlatformTransport(http.DefaultTransport)}
 }

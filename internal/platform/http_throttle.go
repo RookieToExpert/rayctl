@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
@@ -25,13 +26,15 @@ type platformEndpointBudget struct {
 }
 
 type platformTransport struct {
-	base  http.RoundTripper
-	mu    sync.Mutex
-	hosts map[string]*platformEndpointBudget
+	base           http.RoundTripper
+	mu             sync.Mutex
+	hosts          map[string]*platformEndpointBudget
+	queueTimeout   time.Duration
+	requestTimeout time.Duration
 }
 
 func newPlatformTransport(base http.RoundTripper) *platformTransport {
-	return &platformTransport{base: base, hosts: map[string]*platformEndpointBudget{}}
+	return &platformTransport{base: base, hosts: map[string]*platformEndpointBudget{}, queueTimeout: platformRequestTimeout, requestTimeout: platformRequestTimeout}
 }
 
 func (t *platformTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -43,18 +46,23 @@ func (t *platformTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		t.hosts[key] = budget
 	}
 	t.mu.Unlock()
+	queueCtx, cancelQueue := context.WithTimeout(req.Context(), t.queueTimeout)
+	defer cancelQueue()
 	select {
 	case budget.slots <- struct{}{}:
-	case <-req.Context().Done():
-		return nil, req.Context().Err()
+	case <-queueCtx.Done():
+		return nil, fmt.Errorf("等待平台并发槽位超时或取消: %w", queueCtx.Err())
 	}
 	release := func() { <-budget.slots }
-	if err := budget.wait(req.Context()); err != nil {
+	if err := budget.wait(queueCtx); err != nil {
 		release()
-		return nil, err
+		return nil, fmt.Errorf("等待平台限流冷却超时或取消: %w", err)
 	}
-	resp, err := t.base.RoundTrip(req)
+	cancelQueue()
+	requestCtx, cancelRequest := context.WithTimeout(req.Context(), t.requestTimeout)
+	resp, err := t.base.RoundTrip(req.Clone(requestCtx))
 	if err != nil {
+		cancelRequest()
 		release()
 		return resp, err
 	}
@@ -72,9 +80,10 @@ func (t *platformTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		budget.mu.Unlock()
 	}
 	if resp.Body == nil {
+		cancelRequest()
 		release()
 	} else {
-		resp.Body = &budgetResponseBody{ReadCloser: resp.Body, release: release}
+		resp.Body = &budgetResponseBody{ReadCloser: resp.Body, release: func() { cancelRequest(); release() }}
 	}
 	return resp, nil
 }
