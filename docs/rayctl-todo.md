@@ -52,11 +52,12 @@
 
 ## UX-04：list 类 -l 也只输出增量列
 
-- 状态：已实现，待 AIS 验收。
+- 状态：已实现，`1dd678d`；全部 12 个命令及多 VC 变体已在 AIS 验收。
 - 范围：命令树全部 12 个 list -l：AIR job、AID、user、group、AFS、VPC、subnet、NAT gateway、ECS、node、queue node、VC node（含多 VC）。
 - 规则：一列主标识 + 默认表头的补集；仅在 AID/AIR 同名时追加 WORKSPACE 或 UID 区分。
 - 不改变筛选、limit 和行序；JSON 保留完整对象。标识与日期时间不截断、不折行。
 - 各命令的帮助文本、列说明与示例见 [列表增量输出](list-incremental-output.md)。
+- 默认/-l 的真实表头、表宽与行序证据见 [AIT 与 UX-04 验收](validation/rayctl-ait-workspace-ux04-20261023.md)。
 
 ## AIT-01：get 默认 workspace 范围统一到平台清单
 
@@ -64,6 +65,7 @@
 - AIT 旧版同样把 HC namespace 标签与 RMH 合并，且可能按名字合并不同 subscription 的 workspace、吞掉部分失败。
 - 现在与 AID 共用平台候选范围规则，保留显式 workspace 直查；HC 只参与 Pod 定位和诊断。部分成功有警告和 query_incomplete；未命中且有失败时保留真实错误。
 - 已补范围、同名不同 subscription、部分成功/未命中、取消回归，并在 AIS 验证当前 list 选出的任务名与不存在名称。
+- D/PT 样本与耗时见 [AIT 与 UX-04 验收](validation/rayctl-ait-workspace-ux04-20261023.md)。
 
 ## AIT-02：UID 与 Pod 名查询遗留问题
 

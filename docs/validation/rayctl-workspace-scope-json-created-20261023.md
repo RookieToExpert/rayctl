@@ -1,6 +1,8 @@
 # 2026-10-23 workspace 查询范围、JSON requested 与 CREATED 验收
 
-基线 `36b6554`。三项实现分别提交：
+基线 `36b6554`。以下保留当时三项提交与验收结果。
+
+后续 AIT 已统一平台 workspace 范围，所有 list -l 已改为增量列；以下保留当时对照，最新列及宽度见 [AIT 与 UX-04 验收](rayctl-ait-workspace-ux04-20261023.md)。
 
 | 项目 | 提交 | 结果 |
 |---|---|---|
