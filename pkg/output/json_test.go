@@ -136,6 +136,29 @@ func TestJSONSuccessfulAIDKeepsPartialScopeMetadata(t *testing.T) {
 	}
 }
 
+func TestJSONAIRPartialListDoesNotClaimCompleteDespiteSuccessfulExit(t *testing.T) {
+	session := BeginJSON()
+	defer EndJSON()
+	PrintSSPAIRJobList(&service.SSPAIRJobListResult{Items: []service.SSPAIRJobItem{{Name: "found", UID: "uid"}}, Warnings: []string{"部分查询未完成：skip-webhook-test 无权限（403）"}, QueryIncomplete: true})
+	var buffer bytes.Buffer
+	if err := session.Write(&buffer, true, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Items    []map[string]any
+		Summary  struct{ Complete bool }
+		Warnings []string
+		Errors   []string
+		Metadata []map[string]any
+	}
+	if err := json.Unmarshal(buffer.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Summary.Complete || len(payload.Items) != 1 || len(payload.Warnings) != 1 || len(payload.Errors) != 0 || len(payload.Metadata) != 1 || payload.Metadata[0]["query_incomplete"] != true {
+		t.Fatal(buffer.String())
+	}
+}
+
 func TestJSONResourceUnits(t *testing.T) {
 	value, ok := resourceJSON(".cpu", "500m")
 	if !ok || value.(map[string]any)["unit"] != "millicores" || value.(map[string]any)["value"] != 500.0 {

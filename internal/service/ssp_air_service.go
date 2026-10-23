@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -109,7 +110,14 @@ type SSPAIRGatewayItem struct {
 	Raw           platform.SSPAIRGateway
 }
 
-type SSPAIRJobListResult struct{ Items []SSPAIRJobItem }
+type SSPAIRJobListResult struct {
+	Items           []SSPAIRJobItem
+	Warnings        []string
+	QueryIncomplete bool `json:"query_incomplete,omitempty" public:"omitempty"`
+}
+
+func (r *SSPAIRJobListResult) IsQueryComplete() bool { return r == nil || !r.QueryIncomplete }
+
 type SSPAIRGatewayListResult struct{ Items []SSPAIRGatewayItem }
 
 type SSPAIRService struct {
@@ -124,37 +132,49 @@ func NewSSPAIRService(platformClient *platform.VirtualClusterClient) *SSPAIRServ
 }
 
 func (s *SSPAIRService) ListJobs(ctx context.Context, region string, workspace string, state string) (*SSPAIRJobListResult, error) {
-	workspaces, err := s.resolveWorkspaces(ctx, region, workspace)
-	if err != nil {
-		return nil, err
+	workspaces, inventoryErr := s.resolveWorkspacesWithStatus(ctx, region, workspace)
+	if inventoryErr != nil && len(workspaces) == 0 {
+		return nil, singleLineQueryError{inventoryErr}
 	}
 	type load struct {
-		items []platform.SSPAIRJob
-		err   error
+		workspace platform.SSPWorkspace
+		items     []platform.SSPAIRJob
+		err       error
 	}
 	loads := boundedMap(ctx, workspaces, 12, func(ctx context.Context, workspace platform.SSPWorkspace) load {
 		items, queryErr := s.platform.ListSSPAIRJobs(ctx, workspace, "")
-		return load{items: items, err: queryErr}
+		return load{workspace: workspace, items: items, err: queryErr}
 	})
 	items := make([]SSPAIRJobItem, 0)
-	var firstErr error
+	var failures []error
+	if inventoryErr != nil {
+		failures = append(failures, inventoryErr)
+	}
+	succeeded := 0
 	for _, result := range loads {
 		if result.err != nil {
-			if firstErr == nil {
-				firstErr = result.err
-			}
+			failures = append(failures, &SSPWorkspaceQueryError{Workspace: result.workspace.Name, Region: result.workspace.Region, Cause: result.err})
 			continue
 		}
+		succeeded++
 		for _, item := range result.items {
 			items = append(items, s.airJobItem(item))
 		}
 	}
-	if len(items) == 0 && firstErr != nil {
-		return nil, firstErr
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(failures, func(i, j int) bool { return failures[i].Error() < failures[j].Error() })
+	if succeeded == 0 && len(failures) > 0 {
+		return nil, singleLineQueryError{fmt.Errorf("全部 workspace 查询失败：%w", errors.Join(failures...))}
 	}
 	items = filterAIRJobsByState(items, state)
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
-	return &SSPAIRJobListResult{Items: items}, nil
+	result := &SSPAIRJobListResult{Items: items, QueryIncomplete: len(failures) > 0}
+	if len(failures) > 0 {
+		result.Warnings = []string{partialSSPQueryWarning(errors.Join(failures...))}
+	}
+	return result, nil
 }
 
 func filterAIRJobsByState(items []SSPAIRJobItem, state string) []SSPAIRJobItem {
@@ -466,6 +486,14 @@ func airLooksLikeUUID(value string) bool {
 }
 
 func (s *SSPAIRService) resolveWorkspaces(ctx context.Context, region string, identifier string) ([]platform.SSPWorkspace, error) {
+	items, err := s.resolveWorkspacesWithStatus(ctx, region, identifier)
+	if len(items) > 0 {
+		return items, nil
+	}
+	return items, err
+}
+
+func (s *SSPAIRService) resolveWorkspacesWithStatus(ctx context.Context, region string, identifier string) ([]platform.SSPWorkspace, error) {
 	if s.platform == nil {
 		return nil, fmt.Errorf("platform client is required")
 	}
@@ -474,20 +502,19 @@ func (s *SSPAIRService) resolveWorkspaces(ctx context.Context, region string, id
 		regions = s.platform.ConfiguredSSPRegions()
 	}
 	type load struct {
-		items []platform.SSPWorkspace
-		err   error
+		region string
+		items  []platform.SSPWorkspace
+		err    error
 	}
 	loads := boundedMap(ctx, regions, 3, func(ctx context.Context, region string) load {
 		items, queryErr := s.platform.ListSSPWorkspaces(ctx, region)
-		return load{items: items, err: queryErr}
+		return load{region: region, items: items, err: queryErr}
 	})
 	items := make([]platform.SSPWorkspace, 0)
-	var firstErr error
+	var failures []error
 	for _, result := range loads {
 		if result.err != nil {
-			if firstErr == nil {
-				firstErr = result.err
-			}
+			failures = append(failures, &SSPWorkspaceQueryError{Workspace: "workspace 清单", Region: result.region, Cause: result.err})
 			continue
 		}
 		for _, workspace := range result.items {
@@ -497,14 +524,14 @@ func (s *SSPAIRService) resolveWorkspaces(ctx context.Context, region string, id
 		}
 	}
 	if len(items) == 0 {
-		if firstErr != nil {
-			return nil, firstErr
+		if len(failures) > 0 {
+			return nil, errors.Join(failures...)
 		}
 		if identifier != "" {
 			return nil, fmt.Errorf("workspace %q not found", identifier)
 		}
 	}
-	return items, nil
+	return items, errors.Join(failures...)
 }
 
 func (s *SSPAIRService) airJobItem(job platform.SSPAIRJob) SSPAIRJobItem {

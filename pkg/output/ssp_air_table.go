@@ -13,6 +13,13 @@ func PrintSSPAIRJobList(result *service.SSPAIRJobListResult, long ...bool) {
 	if captureJSON(result) {
 		return
 	}
+	if result != nil {
+		defer func() {
+			for _, warning := range result.Warnings {
+				PrintWarning(os.Stderr, warning)
+			}
+		}()
+	}
 	rows := make([][]string, 0)
 	wide := len(long) > 0 && long[0]
 	if result != nil {
