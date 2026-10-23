@@ -129,7 +129,11 @@ func explicitHCKubeconfig(cmd *cobra.Command) bool {
 func hcEnvironmentForVC(detail *service.VCDetailResult, explicit bool) (service.HCEnvironment, error) {
 	var zero service.HCEnvironment
 	if effectiveEnvironmentSelection() == "dcloud" {
-		return zero, fmt.Errorf("Dcloud 控制面规格接口尚未验证；请使用 --platform-only")
+		targets, err := resolveHCTargets("dcloud", kube.ResolvedKubeconfigPath(kubeconfig), explicit)
+		if err != nil {
+			return zero, err
+		}
+		return targets[0], targets[0].Err
 	}
 	environment := ""
 	switch detail.Region {
@@ -157,6 +161,9 @@ func hcEnvironmentForVC(detail *service.VCDetailResult, explicit bool) (service.
 }
 
 func vcConfigServiceFor(target service.HCEnvironment) (*service.VCConfigService, error) {
+	if target.Name == "dcloud" {
+		return nil, fmt.Errorf("Dcloud 控制面规格接口尚未验证，未采集规格")
+	}
 	dynamicClient, err := kube.NewDynamicClient(target.Kubeconfig)
 	if err != nil {
 		return nil, err
@@ -167,7 +174,7 @@ func vcConfigServiceFor(target service.HCEnvironment) (*service.VCConfigService,
 func enrichVCControlPlane(ctx context.Context, detail *service.VCDetailResult, target service.HCEnvironment) {
 	configService, err := vcConfigServiceFor(target)
 	if err != nil {
-		detail.ControlPlane = &service.VCControlPlaneConfig{Warnings: []string{err.Error()}}
+		detail.ControlPlane = &service.VCControlPlaneConfig{Name: detail.Name, UID: detail.UID, Environment: target.Name, Warnings: []string{err.Error()}}
 		return
 	}
 	// VC details remain useful when the operation API is unavailable. The

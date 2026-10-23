@@ -1,9 +1,19 @@
 package cmd
 
 import (
+	"context"
+	"rayctl/internal/service"
 	"strings"
 	"testing"
 )
+
+func TestVCOverviewDcloudStillAllowsHCMappingWithoutFlavorAPI(t *testing.T) {
+	detail := &service.VCDetailResult{Name: "vc-cloud", UID: "uid-cloud"}
+	enrichVCControlPlane(context.Background(), detail, service.HCEnvironment{Name: "dcloud"})
+	if detail.ControlPlane == nil || detail.ControlPlane.Desired != nil || detail.ControlPlane.AppliedFlavor != "" || len(detail.ControlPlane.Warnings) != 1 || !strings.Contains(detail.ControlPlane.Warnings[0], "未采集") {
+		t.Fatalf("config=%+v", detail.ControlPlane)
+	}
+}
 
 func TestVCConfigUpdateRejectsInvalidOptionsBeforePlatformAccess(t *testing.T) {
 	for _, test := range []struct {
