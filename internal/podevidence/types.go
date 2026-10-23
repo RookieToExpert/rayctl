@@ -66,14 +66,24 @@ type Pod struct {
 	Warnings         []string    `json:"warnings"`
 }
 
+type RestartObservation struct {
+	ObservedAt   time.Time `json:"observed_at"`
+	Pod          string    `json:"pod"`
+	Container    string    `json:"container"`
+	UID          string    `json:"uid"`
+	RestartCount int64     `json:"restart_count"`
+	Reason       string    `json:"reason"`
+}
+
 type Result struct {
-	Pods        []Pod    `json:"pods"`
-	Total       int      `json:"total"`
-	Omitted     int      `json:"omitted"`
-	Restarts    int64    `json:"restarts"`
-	Restarts24h *int64   `json:"restarts_24h"`
-	HistoryPods []string `json:"history_pods"`
-	Warnings    []string `json:"warnings"`
+	Pods           []Pod               `json:"pods"`
+	Total          int                 `json:"total"`
+	Omitted        int                 `json:"omitted"`
+	Restarts       int64               `json:"restarts"`
+	Restarts24h    *int64              `json:"restarts_24h"`
+	LastRestart24h *RestartObservation `json:"last_restart_24h"`
+	HistoryPods    []string            `json:"history_pods"`
+	Warnings       []string            `json:"warnings"`
 }
 
 type Options struct {

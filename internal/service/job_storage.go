@@ -183,6 +183,7 @@ func (s *JobService) resolveVolumeClaimRef(ctx context.Context, identity *jobIde
 					current.BackendPV = strings.TrimSpace(current.PVName)
 				}
 			}
+			s.enrichAFSVolumeClaimRefFromPVC(ctx, pvc, &current)
 			s.enrichObjectStorageVolumeClaimRefFromVirtualCluster(ctx, identity, namespace, pvc, &current)
 		} else {
 			current.Status = "Unknown"
@@ -197,6 +198,7 @@ func (s *JobService) resolveVolumeClaimRef(ctx context.Context, identity *jobIde
 			current.Status = dashIfEmpty(string(pvc.Status.Phase))
 			current.Message = firstNonEmpty(firstPVCConditionMessage(pvc), strings.TrimSpace(pvc.Spec.VolumeName))
 			current.BackendPV = strings.TrimSpace(pvc.Spec.VolumeName)
+			s.enrichAFSVolumeClaimRefFromPVC(ctx, pvc, &current)
 		} else {
 			current.Status = "Unknown"
 			current.Message = classifyPVCErrorMessage(err)
@@ -211,6 +213,40 @@ func (s *JobService) resolveVolumeClaimRef(ctx context.Context, identity *jobIde
 	s.enrichHostVolumeClaimRef(ctx, &current)
 	current.DisplayPV = firstNonEmpty(current.BackendPV, current.PVName)
 	return current
+}
+
+func afsResourceUIDFromPVC(pvc *corev1.PersistentVolumeClaim) string {
+	if pvc == nil {
+		return ""
+	}
+	return afsResourceUIDFromAnnotations(pvc.Annotations)
+}
+
+func afsResourceUIDFromAnnotations(annotations map[string]string) string {
+	endpoint := strings.TrimSpace(annotations["afs.endpoint"])
+	if !strings.HasPrefix(endpoint, "csi://") {
+		return ""
+	}
+	uid := strings.TrimPrefix(endpoint, "csi://")
+	if !looksLikeUUID(uid) {
+		return ""
+	}
+	return uid
+}
+
+func (s *JobService) enrichAFSVolumeClaimRefFromPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim, ref *VolumeClaimRef) {
+	if ref == nil || strings.TrimSpace(ref.FrontendVolume) != "" || s.vcClient == nil {
+		return
+	}
+	uid := afsResourceUIDFromPVC(pvc)
+	if uid == "" {
+		return
+	}
+	// The AFS endpoint is available before the PVC binds to a PV.
+	resource, err := s.vcClient.FindStorageVolumeResourceByUID(ctx, uid)
+	if err == nil && resource != nil {
+		ref.FrontendVolume = firstNonEmpty(resource.Name, resource.DisplayName, resource.ID)
+	}
 }
 
 func ensurePVCGetDiagnosis(status string, terminal bool, stage string, diagnosis []string, refs []VolumeClaimRef) (string, []string) {
@@ -259,7 +295,7 @@ func (s *JobService) enrichHostVolumeClaimRef(ctx context.Context, ref *VolumeCl
 		ref.HostPVCNamespace = strings.TrimSpace(pv.Spec.ClaimRef.Namespace)
 	}
 
-	if s.vcClient == nil || strings.TrimSpace(ref.HostPVCName) == "" {
+	if s.vcClient == nil || strings.TrimSpace(ref.HostPVCName) == "" || strings.TrimSpace(ref.FrontendVolume) != "" {
 		return
 	}
 
@@ -358,6 +394,10 @@ func objectStorageBucketFromPVC(pvc *corev1.PersistentVolumeClaim) string {
 }
 
 func looksLikeObjectStoragePVC(storageClass string, annotations map[string]string) bool {
+	if afsResourceUIDFromAnnotations(annotations) != "" {
+		// AFS credential annotations do not identify an AOSS endpoint.
+		return false
+	}
 	storageClass = strings.ToLower(strings.TrimSpace(storageClass))
 	if strings.Contains(storageClass, "aoss") || strings.Contains(storageClass, "s3") {
 		return true

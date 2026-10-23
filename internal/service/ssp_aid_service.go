@@ -406,7 +406,7 @@ func (s *SSPAIDService) buildResult(ctx context.Context, aid platform.SSPAID, ho
 	if !includeLogs {
 		defer func() {
 			count, _ := podevidence.RestartSummary(pods)
-			if result.Stage == "running" && count > 0 {
+			if result.Stage == "running" {
 				result.PodEvidence = enrichRestartHistory(ctx, s.platform, pods, aid.Name, "aid", result.Workspace, &podevidence.Result{Restarts: count, Total: len(pods), Warnings: []string{}})
 				result.Diagnosis = []string{aidRestartDiagnosis(pods, result.PodEvidence)}
 			}

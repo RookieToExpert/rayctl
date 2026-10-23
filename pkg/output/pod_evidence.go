@@ -13,9 +13,12 @@ func printPodEvidence(result *podevidence.Result) {
 	if result == nil {
 		return
 	}
-	fmt.Fprintf(os.Stdout, "\nPOD EVIDENCE: %d/%d (omitted %d), cumulative restarts %d\n", len(result.Pods), result.Total, result.Omitted, result.Restarts)
+	fmt.Fprintf(os.Stdout, "\nPOD EVIDENCE: %d/%d (omitted %d), current Pod cumulative restarts %d\n", len(result.Pods), result.Total, result.Omitted, result.Restarts)
 	if result.Restarts24h != nil {
 		fmt.Fprintf(os.Stdout, "Observed restarts in 24h (%d inspected Pods): %d\n", len(result.HistoryPods), *result.Restarts24h)
+	}
+	if last := result.LastRestart24h; last != nil {
+		fmt.Fprintf(os.Stdout, "Last observed restart in 24h: %s (UTC+8), %s/%s, reason %s, Pod UID %s\n", last.ObservedAt.In(time.FixedZone("UTC+8", 8*3600)).Format("2006-01-02 15:04:05"), last.Pod, last.Container, emptyDash(last.Reason), emptyDash(last.UID))
 	}
 	for _, pod := range result.Pods {
 		rows := [][]string{}
