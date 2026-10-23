@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -76,6 +77,8 @@ func (e *SSPKubeconfigMismatchError) Error() string {
 }
 
 type SSPJobGetResult struct {
+	QueryIncomplete        bool `json:"query_incomplete,omitempty" public:"omitempty"`
+	Warnings               []string
 	PodEvidence            *podevidence.Result
 	Name                   string
 	UID                    string
@@ -174,7 +177,7 @@ func (s *SSPJobService) listPlatformWorkspaces(ctx context.Context, region strin
 	s.workspaceLoads[region] = load
 	s.workspaceMu.Unlock()
 
-	load.workspaces, load.err = s.platform.ListSSPWorkspaces(ctx, region)
+	load.workspaces, load.err = s.platform.ListSSPWorkspacesWithStatus(ctx, region)
 	close(load.done)
 	return load.workspaces, load.err
 }
@@ -365,6 +368,9 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 	}
 	regions := s.resolveJobLookupRegions(ctx, requestedRegion, seedPods)
 	candidates, lookupErr := s.findPlatformJobsAcrossRegions(ctx, identifier, workspace, seedPods, regions)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(candidates) == 0 {
 		if lookupErr != nil {
 			return nil, fmt.Errorf("query SSP TrainingJob API: %w", lookupErr)
@@ -406,7 +412,15 @@ func (s *SSPJobService) getJob(ctx context.Context, identifier string, workspace
 		return nil, &SSPKubeconfigMismatchError{Job: job.Name, Workspace: job.WorkspaceName}
 	}
 
-	return s.buildResult(ctx, job, hostNamespace, pods, workers, workerTotal, includeLogs), nil
+	result := s.buildResult(ctx, job, hostNamespace, pods, workers, workerTotal, includeLogs)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if lookupErr != nil {
+		result.QueryIncomplete = true
+		result.Warnings = []string{partialSSPQueryWarning(lookupErr)}
+	}
+	return result, nil
 }
 
 func (s *SSPJobService) resolveWorkspaceCandidates(ctx context.Context, requested string, pods []corev1.Pod) ([]sspWorkspaceRef, error) {
@@ -492,108 +506,14 @@ func selectSSPJobLookupRegions(requested string, detected string, configured []s
 	return result
 }
 
-func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context, requested string, pods []corev1.Pod, region string) ([]sspWorkspaceRef, error) {
+func (s *SSPJobService) resolveWorkspaceCandidatesForRegion(ctx context.Context, requested string, _ []corev1.Pod, region string) ([]sspWorkspaceRef, error) {
 	region = firstNonEmpty(strings.TrimSpace(region), sspDefaultRegion)
-	if requested != "" {
-		workspaces, err := s.listPlatformWorkspaces(ctx, region)
-		if err == nil {
-			for _, workspace := range workspaces {
-				if strings.EqualFold(strings.TrimSpace(workspace.Name), requested) {
-					return []sspWorkspaceRef{{
-						Name:         workspace.Name,
-						Subscription: workspace.Subscription,
-						ProfileName:  workspace.ProfileName,
-					}}, nil
-				}
-			}
-		}
-		return []sspWorkspaceRef{{Name: requested}}, nil
+	workspaces, err := s.listPlatformWorkspaces(ctx, region)
+	result := platformWorkspaceCandidates(workspaces, requested)
+	if err != nil {
+		return result, fmt.Errorf("list AIT workspace inventory: %w", err)
 	}
-
-	byName := make(map[string]sspWorkspaceRef)
-	podWorkspaceNames := make(map[string]struct{})
-	for _, pod := range pods {
-		name := strings.TrimSpace(pod.Labels[sspWorkspaceNameLabel])
-		if name == "" {
-			continue
-		}
-		byName[name] = sspWorkspaceRef{
-			Name: name,
-			Subscription: firstNonEmpty(
-				pod.Labels[sspSubscriptionIDLabel],
-				pod.Annotations[sspSubscriptionIDLabel],
-				pod.Labels[sspTenantIDLabel],
-				pod.Annotations[sspTenantIDLabel],
-				pod.Labels[sspIdentityTenantIDLabel],
-			),
-			HostNamespace:    pod.Namespace,
-			VirtualNamespace: strings.TrimSpace(pod.Annotations[sspVirtualNamespaceAnno]),
-		}
-		podWorkspaceNames[name] = struct{}{}
-	}
-	if len(byName) == 0 {
-		namespaces, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
-			LabelSelector: sspWorkspaceNameLabel,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list SSP workspace namespaces: %w", err)
-		}
-		for _, namespace := range namespaces.Items {
-			name := strings.TrimSpace(namespace.Labels[sspWorkspaceNameLabel])
-			if name == "" {
-				continue
-			}
-			// A workspace can contain multiple virtual namespaces. Select the
-			// exact host namespace only after the platform job reveals its namespace.
-			byName[name] = sspWorkspaceRef{Name: name}
-		}
-	}
-	platformWorkspaces, platformErr := s.listPlatformWorkspaces(ctx, region)
-	for _, workspace := range platformWorkspaces {
-		name := strings.TrimSpace(workspace.Name)
-		if name == "" {
-			continue
-		}
-		if existing, exists := byName[name]; exists {
-			if existing.Subscription == "" {
-				existing.Subscription = strings.TrimSpace(workspace.Subscription)
-			}
-			if existing.ProfileName == "" {
-				existing.ProfileName = strings.TrimSpace(workspace.ProfileName)
-			}
-			byName[name] = existing
-		} else {
-			byName[name] = sspWorkspaceRef{
-				Name:         name,
-				Subscription: strings.TrimSpace(workspace.Subscription),
-				ProfileName:  strings.TrimSpace(workspace.ProfileName),
-			}
-		}
-	}
-	if len(podWorkspaceNames) > 0 {
-		podWorkspaces := make(map[string]sspWorkspaceRef, len(podWorkspaceNames))
-		for name := range podWorkspaceNames {
-			podWorkspaces[name] = byName[name]
-		}
-		return sortedSSPWorkspaceRefs(podWorkspaces), nil
-	}
-	if len(byName) == 0 {
-		if platformErr != nil {
-			return nil, fmt.Errorf("resolve SSP workspaces from current kubeconfig and platform API: %w", platformErr)
-		}
-		return nil, fmt.Errorf("no SSP workspace found in region %s", region)
-	}
-
-	return sortedSSPWorkspaceRefs(byName), nil
-}
-
-func sortedSSPWorkspaceRefs(byName map[string]sspWorkspaceRef) []sspWorkspaceRef {
-	result := make([]sspWorkspaceRef, 0, len(byName))
-	for _, ref := range byName {
-		result = append(result, ref)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
-	return result
+	return result, nil
 }
 
 func (s *SSPJobService) resolveSubscription(ctx context.Context, pods []corev1.Pod) (string, error) {
@@ -667,24 +587,18 @@ func (s *SSPJobService) findPlatformJobs(ctx context.Context, subscription strin
 	close(results)
 
 	candidates := make([]sspJobCandidate, 0)
-	var firstErr error
-	successfulLookups := 0
+	var failures []error
 	for result := range results {
 		if result.err != nil {
-			if firstErr == nil {
-				firstErr = result.err
-			}
+			failures = append(failures, &SSPWorkspaceQueryError{Workspace: result.workspace.Name, Region: region, Cause: result.err})
 			continue
 		}
-		successfulLookups++
 		for _, job := range result.jobs {
 			candidates = append(candidates, sspJobCandidate{Job: job, Workspace: result.workspace, Region: region})
 		}
 	}
-	if successfulLookups > 0 {
-		firstErr = nil
-	}
-	return candidates, firstErr
+	sort.Slice(failures, func(i, j int) bool { return failures[i].Error() < failures[j].Error() })
+	return candidates, errors.Join(failures...)
 }
 
 func (s *SSPJobService) findPlatformJobsAcrossRegions(ctx context.Context, identifier string, requestedWorkspace string, pods []corev1.Pod, regions []string) ([]sspJobCandidate, error) {
@@ -699,9 +613,9 @@ func (s *SSPJobService) findPlatformJobsAcrossRegions(ctx context.Context, ident
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			workspaces, err := s.resolveWorkspaceCandidatesForRegion(ctx, requestedWorkspace, pods, region)
-			if err != nil {
-				results <- lookupResult{err: err}
+			workspaces, inventoryErr := s.resolveWorkspaceCandidatesForRegion(ctx, requestedWorkspace, pods, region)
+			if inventoryErr != nil && len(workspaces) == 0 {
+				results <- lookupResult{err: inventoryErr}
 				return
 			}
 			subscription, err := s.resolveSubscriptionForRegion(ctx, pods, region)
@@ -710,29 +624,22 @@ func (s *SSPJobService) findPlatformJobsAcrossRegions(ctx context.Context, ident
 				return
 			}
 			candidates, err := s.findPlatformJobs(ctx, subscription, region, identifier, workspaces)
-			results <- lookupResult{candidates: candidates, err: err}
+			results <- lookupResult{candidates: candidates, err: errors.Join(inventoryErr, err)}
 		}()
 	}
 	wg.Wait()
 	close(results)
 
 	candidates := make([]sspJobCandidate, 0)
-	var firstErr error
-	successfulLookups := 0
+	var failures []error
 	for result := range results {
 		if result.err != nil {
-			if firstErr == nil {
-				firstErr = result.err
-			}
-			continue
+			failures = append(failures, result.err)
 		}
-		successfulLookups++
 		candidates = append(candidates, result.candidates...)
 	}
-	if successfulLookups > 0 {
-		firstErr = nil
-	}
-	return candidates, firstErr
+	sort.Slice(failures, func(i, j int) bool { return failures[i].Error() < failures[j].Error() })
+	return candidates, errors.Join(failures...)
 }
 
 func (s *SSPJobService) findTrainingJobPods(ctx context.Context, identifier string, namespace string) ([]corev1.Pod, error) {

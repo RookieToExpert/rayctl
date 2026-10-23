@@ -157,6 +157,13 @@ func PrintSSPJobDetail(result *service.SSPJobGetResult, longOutput bool) {
 	if captureJSON(result) {
 		return
 	}
+	if result != nil {
+		defer func() {
+			for _, warning := range result.Warnings {
+				PrintWarning(os.Stderr, warning)
+			}
+		}()
+	}
 	if longOutput && result != nil {
 		printAITIncrement(result)
 		return
