@@ -1,6 +1,6 @@
 # 2026-10-23 五项补测修复
 
-基线 `cf9a30d`。此记录对应用户补测反馈，区分自动回归、真实二进制的本机模拟接口验收，以及未完成的 AIS 实测。
+基线 `cf9a30d`。此记录对应用户补测反馈，区分自动回归、真实二进制的本机模拟接口验收，以及 AIS D/PT 只读实测。
 
 | 项目 | 提交 | 实现 |
 |---|---|---|
@@ -46,10 +46,24 @@
 
 这验证实际命令的退出码、输出封装和 limit 顺序，不能代替 AIS 真实接口验收。
 
-## 构建、安装与 AIS 状态
+## AIS D/PT 只读实测
 
-本机 `~/.local/libexec/rayctl` 已备份并原子替换。已从本地源码构建 Linux ARM64 版本，准备安装至 AIS `/usr/local/bin/rayctl`。
+SSH 起初在身份认证前被 reset；按用户“再试试”重连后恢复。已备份远端旧版本，安装本地源码构建的 Linux ARM64 版本至 `/usr/local/bin/rayctl`，SHA-256 与本地构建产物一致。以下在同一 AIS 上用旧版 `cf9a30d` 和新版执行，只读查询，没有修改 workspace 权限或集群资源。
 
-本轮 AIS SSH 多次在身份认证前失败：TCP 建立后，在 SSH version/key exchange 阶段被关闭或 reset。已使用用户提供的同一入口直接连接、间隔重试及诊断，尚未成功读取远端版本、上传新二进制或完成真实 D/PT 复验。此限制与 HTTP 403 不同，未据此修改 SSH/VPN/集群配置，也没有把上一轮的线上结果充作本轮验收。
+| 实测 | 结果 |
+|---|---|
+| `aid get dev-yifan-gpu2 -e all` | PT 命中，表格退出 0，1.785s；stderr 仅一行部分查询警告，包含 D 两个测试 workspace 的 403，不含 URL |
+| 同命令 `-o json` | 退出 0，0.506s；environment=pt、query_incomplete=true、errors=[]，保留未完成范围 |
+| `aid get rayctl-verified-absent-followups-20261023-b3nw2tm -e all -o json` | 退出 1，0.429s；明确“可访问范围内未找到”，列出两个无权限 workspace，不含 URL，没有把部分扫描说成完整不存在 |
+| `air job list -e d -n 1000 -o json` | 退出 0，412 条、412 个唯一 UID。本次 AIR workspace 清单不包含两个测试 workspace，显式指定各自返回 workspace not found；因此此次线上没有触发 AIR 的部分 403 分支，该分支由本机命令级模拟和 service/JSON 回归覆盖 |
+| `air job list -e d -w ws-d-a3-trustrouter -n 1000`，表格与 JSON 各连续 3 次 | 每次都退出 0；各为 21 条，JSON 21 个唯一 UID，名称集合完全一致。包含用户原始 `infer-glm-53-flash-w8a8c16-zjw1`；没有复现原先偶发重复，未把本次无重复等同于已确认其根因 |
+| 上述 AIR 任务 `get -l --no-image`，200 列终端 | 主挂载表从 212 列降至 126 列；3 条 PVC 行重复的 VOLUME/SOURCE 单元格从 3 处降至 0，ConfigMap 表从 182 列降至 139 列；跳过镜像警告从 3 条降至 0 |
+| 上述 AIR 任务，80 列终端及 JSON | 旧版 ConfigMap 被折行，新版完整显示；旧新版 JSON 均保留 9 项挂载（含 3 项 PVC），名称、source、path、subPath、read_only 证据完全一致 |
+| `aid get dev-yifan-gpu2 -e pt -l --no-image` | 挂载表从 167 列降至 157 列，镜像跳过警告从 4 条降至 0；不同的 VOLUME 别名仍保留 |
+| PT `metrics gpu dev-5dc5d665 -w ws-t-vcg -k ~/kubeconfigpt --start '2026-10-22 12:00:00' --end '2026-10-23 11:00:00' -o json` | 旧新版都退出 0；两张卡各 395/5521 点，覆盖约 7.2%，共同断档为 10-22 12:00:00 至 10-23 09:21:23（UTC+8）；覆盖/断档从 4 行合并为 1 行，另保留原有一行采样间隔提示；逐卡 coverage、series、samples 完全一致 |
 
-最终交付的 Git HEAD、本机/ARM64 文件校验值与远端推送状态在交付时核对；若 AIS 恢复可达，应先部署本轮版本，再复测用户原始 AID、AIR、挂载和 metrics 命令。
+耗时为当次观测，不作为固定性能承诺。表格宽度统计仅针对挂载表；标识符保持完整时可超过终端宽度。
+
+## 最终构建与安装
+
+本机 `~/.local/libexec/rayctl` 和 AIS `/usr/local/bin/rayctl` 均以最终干净 Git HEAD 重新构建、原子替换，并核对 SHA-256；旧版本备份保留。最终 Git 提交、文件校验值与远端推送状态在交付时再核对。
