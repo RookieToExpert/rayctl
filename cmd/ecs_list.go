@@ -43,6 +43,6 @@ func newECSListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&options.Name, "name", "", "按名称、显示名称或 UID 筛选，忽略大小写")
 	cmd.Flags().StringVarP(&options.State, "state", "s", "", "按平台状态筛选，忽略大小写")
 	cmd.Flags().IntVarP(&options.Limit, "limit", "n", 100, "最多显示的资源数；0 表示全部，筛选后生效")
-	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示租户、UID、机器规格和 VPC")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "仅显示 NAME 及新增 TENANT、UID、MACHINE、VPC 列")
 	return cmd
 }

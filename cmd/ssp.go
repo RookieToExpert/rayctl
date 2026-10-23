@@ -65,7 +65,7 @@ func newAIDListCmd() *cobra.Command {
 	}
 	addSSPCatalogListFlags(cmd, &workspace, &queue, &state, &limit, &all)
 	cmd.Flags().StringVar(&since, "since", "7d", "配合 -A 限制创建时间窗口，例如 24h、7d、30d；单独使用也会启用窗口扫描；未传 -n 时最多 5000 条")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示资源规格和创建时间")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 NAME 及新增 NODE、RESOURCE、CREATED 列；同名时增加 WORKSPACE 或 UID 区分")
 	return cmd
 }
 

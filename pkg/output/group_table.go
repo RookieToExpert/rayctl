@@ -66,6 +66,7 @@ func PrintGroupList(items []service.GroupListItem, long bool) {
 		return
 	}
 	headers := []string{"GROUP", "DISPLAY NAME"}
+	base := append([]string{}, headers...)
 	widths := []int{40, 40}
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
@@ -86,7 +87,7 @@ func PrintGroupList(items []service.GroupListItem, long bool) {
 		}
 		rows = append(rows, row)
 	}
-	printBoxTableWithOptions(headers, rows, widths, tableOptions{})
+	printListTable(base, headers, rows, widths, tableOptions{}, long)
 	fmt.Fprintf(os.Stdout, "\n共 %d 个用户组。\n", len(items))
 }
 

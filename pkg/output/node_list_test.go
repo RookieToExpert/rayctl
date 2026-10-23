@@ -63,12 +63,12 @@ func TestNodeListDefaultColumns(t *testing.T) {
 
 func TestNodeListLongColumns(t *testing.T) {
 	got := captureNodeListOutput(t, true)
-	for _, value := range []string{"HOSTNAME", "MODEL", "USE", "PROD", "CLUSTER", "QUEUE", "TENANT", "910C", "queue-demo", "SSP", "ecp-private", "cluster-demo"} {
+	for _, value := range []string{"HOSTNAME", "MODEL", "PROD", "QUEUE", "TENANT", "910C", "queue-demo", "ecp-private"} {
 		if !strings.Contains(got, value) {
 			t.Fatalf("missing %q in %s", value, got)
 		}
 	}
-	for _, value := range []string{"RDY", "SCH", "RPR"} {
+	for _, value := range []string{"RDY", "SCH", "RPR", "USE", "CLUSTER", "SSP", "cluster-demo"} {
 		if strings.Contains(got, value) {
 			t.Fatalf("unexpected %q in long view: %s", value, got)
 		}

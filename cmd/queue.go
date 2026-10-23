@@ -219,7 +219,7 @@ func newQueueNodeListCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示 ACN UID、machine type 和 model")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 HOST 及新增 ACN UID 列")
 	return cmd
 }
 

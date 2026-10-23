@@ -353,22 +353,24 @@ func PrintSSPAITList(result *service.SSPCatalogListResult) {
 	if captureJSON(result) {
 		return
 	}
-	printSSPCatalogList(result, false, false, true)
+	printSSPCatalogList(result, false, false, true, false)
 }
 
 func PrintSSPAIDList(result *service.SSPCatalogListResult, longOutput bool) {
 	if captureJSON(result) {
 		return
 	}
-	printSSPCatalogList(result, longOutput, longOutput, longOutput)
+	printSSPCatalogList(result, longOutput, longOutput, longOutput, longOutput)
 }
 
-func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool, includeResource bool, includeCreated bool) {
+func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool, includeResource bool, includeCreated bool, incremental bool) {
 	rows := make([][]string, 0)
+	uids := []string{}
 	total := 0
 	if result != nil {
 		total = len(result.Items)
 		for _, item := range result.Items {
+			uids = append(uids, item.UID)
 			row := []string{
 				emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Workspace),
 				emptyDash(item.Queue), emptyDash(item.Creator),
@@ -404,6 +406,7 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool,
 		maxWidths = append(maxWidths, 8)
 		minWidths = append(minWidths, 8)
 	}
+	base := append([]string{}, headers...)
 	if includeNode {
 		headers = append(headers, "NODE")
 		maxWidths = append(maxWidths, 30)
@@ -430,13 +433,14 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool,
 		}
 		rows = append(rows, row)
 	}
-	printBoxTableWithOptions(
+	printListTable(
+		base,
 		headers, rows,
 		maxWidths,
 		tableOptions{
 			noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), 0, 1, 2, 3, 4)...),
 			minWidths:   minWidths,
-		},
+		}, incremental, listIdentity{Scope: "WORKSPACE", UIDs: uids},
 	)
 	fmt.Fprintf(os.Stdout, "\n本次筛选共 %d 条。\n", total)
 }
@@ -446,6 +450,13 @@ func PrintSSPQueueNodeList(result *service.SSPQueueNodeListResult, longOutput bo
 		return
 	}
 	if result == nil {
+		return
+	}
+	if longOutput {
+		if result.SharedVCPool {
+			fmt.Fprintln(os.Stdout, "NODE SCOPE: VC 共享候选池（非队列独占节点）")
+		}
+		printQueueNodeListItems(result.Items, true)
 		return
 	}
 	rows := [][]string{
@@ -469,7 +480,7 @@ func PrintSSPQueueNodeList(result *service.SSPQueueNodeListResult, longOutput bo
 		tableOptions{minWidths: []int{12, 24}},
 	)
 	fmt.Fprintln(os.Stdout)
-	printVCNodeItems(result.Items, longOutput, false)
+	printQueueNodeListItems(result.Items, false)
 }
 
 func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {

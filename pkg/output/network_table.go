@@ -6,7 +6,9 @@ import (
 )
 
 func printInventoryWithTenants(headers []string, rows [][]string, widths []int, options tableOptions, tenants []string, longOutput []bool) {
-	if len(longOutput) > 0 && longOutput[0] {
+	base := append([]string{}, headers...)
+	long := len(longOutput) > 0 && longOutput[0]
+	if long {
 		headers = append(headers, "TENANT")
 		widths = append(widths, 36)
 		options.minWidths = append(options.minWidths, 8)
@@ -18,7 +20,7 @@ func printInventoryWithTenants(headers []string, rows [][]string, widths []int, 
 			rows[i] = append(rows[i], tenant)
 		}
 	}
-	printBoxTableWithOptions(headers, rows, widths, options)
+	printListTable(base, headers, rows, widths, options, long)
 }
 
 func PrintVPCList(result *service.VPCListResult, longOutput ...bool) {

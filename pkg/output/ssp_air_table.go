@@ -21,9 +21,11 @@ func PrintSSPAIRJobList(result *service.SSPAIRJobListResult, long ...bool) {
 		}()
 	}
 	rows := make([][]string, 0)
+	uids := []string{}
 	wide := len(long) > 0 && long[0]
 	if result != nil {
 		for _, item := range result.Items {
+			uids = append(uids, item.UID)
 			row := []string{emptyDash(item.Name), emptyDash(item.State), fmt.Sprintf("%d/%d ×%s", item.ReadyReplicas, item.Replicas, formatAIRGroupSize(item.GroupSize)), emptyDash(item.Workspace)}
 			if wide {
 				row = append(row, emptyDash(item.Queue), emptyDash(item.Creator), emptyDash(item.CreatedAt))
@@ -42,7 +44,7 @@ func PrintSSPAIRJobList(result *service.SSPAIRJobListResult, long ...bool) {
 		widths = append(widths, 48, 22, 20)
 		options.noWrapCells = makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), len(headers)-1)...)
 	}
-	printBoxTableWithOptions(headers, rows, widths, options)
+	printListTable([]string{"NAME", "STATE", "READY", "WORKSPACE"}, headers, rows, widths, options, wide, listIdentity{Scope: "WORKSPACE", UIDs: uids})
 }
 
 func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {

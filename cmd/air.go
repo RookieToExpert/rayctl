@@ -61,7 +61,7 @@ func newAIRJobListCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "只查询指定 workspace")
 	cmd.Flags().StringVarP(&state, "state", "s", "", "按状态筛选，例如 Running、Pending")
 	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "最多显示的最新记录数，范围 1-1000；筛选后应用")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "增加 queue、创建人和创建时间列")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 NAME 及新增 QUEUE、CREATOR、CREATED 列；同名时增加 WORKSPACE 或 UID 区分")
 	return cmd
 }
 

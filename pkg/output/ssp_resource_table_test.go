@@ -173,7 +173,7 @@ func TestPrintSSPQueueDetailLongIncludesRuntimeLimits(t *testing.T) {
 	}
 }
 
-func TestPrintSSPQueueNodeListLongOmitsDuplicateACNName(t *testing.T) {
+func TestPrintSSPQueueNodeListLongOnlyShowsNewUID(t *testing.T) {
 	result := &service.SSPQueueNodeListResult{
 		Queue: service.SSPQueueItem{Name: "queue-demo", UID: "queue-uid"},
 		Items: []service.VCNodeListItem{{
@@ -185,9 +185,14 @@ func TestPrintSSPQueueNodeListLongOmitsDuplicateACNName(t *testing.T) {
 	if strings.Count(text, "ACN") != 1 {
 		t.Fatalf("unexpected duplicate ACN column:\n%s", text)
 	}
-	for _, expected := range []string{"HOST", "MODEL", "ACN UID", "MXC550-PL", "acn-uid"} {
+	for _, expected := range []string{"HOST", "ACN UID", "acn-uid"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("missing %q:\n%s", expected, text)
+		}
+	}
+	for _, omitted := range []string{"MODEL", "MXC550-PL", "MACHINE TYPE", "STATE", "QUEUE UID"} {
+		if strings.Contains(text, omitted) {
+			t.Fatalf("default field %q repeated in incremental view:\n%s", omitted, text)
 		}
 	}
 }

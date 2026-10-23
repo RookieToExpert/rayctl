@@ -51,14 +51,15 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 		minWidths = []int{19, 12, 3, 8, 12, 18, 8}
 	}
 
-	printBoxTableWithOptions(
+	printListTable(
+		[]string{"HOSTNAME", "RDY", "SCH", "RPR", "USE", "IP", "CLUSTER"},
 		headers,
 		rows,
 		maxWidths,
 		tableOptions{
 			noWrapCells: makeNoWrapCells(noWrapCells...),
 			minWidths:   minWidths,
-		},
+		}, longOutput,
 	)
 
 	if total == 0 {
@@ -309,6 +310,7 @@ func PrintUserList(items []service.UserListItem, long bool) {
 		return
 	}
 	headers := []string{"USERNAME", "NAME", "STATUS", "SOURCE"}
+	base := append([]string{}, headers...)
 	widths := []int{30, 24, 10, 12}
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
@@ -329,7 +331,7 @@ func PrintUserList(items []service.UserListItem, long bool) {
 		}
 		rows = append(rows, row)
 	}
-	printBoxTableWithOptions(headers, rows, widths, tableOptions{})
+	printListTable(base, headers, rows, widths, tableOptions{}, long)
 	fmt.Fprintf(os.Stdout, "\n共 %d 个用户。\n", len(items))
 }
 

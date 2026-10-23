@@ -165,7 +165,7 @@ func newVCNodeListCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 hostname、model、ACN 名称和 ACN UID")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 HOST 及新增 MODEL、ACN、ACN UID 列")
 	return cmd
 }
 

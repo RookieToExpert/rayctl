@@ -11,10 +11,11 @@ func PrintECSList(result *service.ECSListResult, long bool) {
 	if captureJSON(result) || result == nil {
 		return
 	}
-	headers := []string{"TYPE", "NAME", "STATE", "INTERNAL IP", "CREATOR"}
-	widths := []int{6, 64, 16, 40, 32}
-	minimums := []int{4, 20, 10, 12, 12}
-	noWrapColumns := []int{1, 3, 4}
+	base := []string{"NAME", "TYPE", "STATE", "INTERNAL IP", "CREATOR"}
+	headers := append([]string{}, base...)
+	widths := []int{64, 6, 16, 40, 32}
+	minimums := []int{20, 4, 10, 12, 12}
+	noWrapColumns := []int{0, 3, 4}
 	if long {
 		headers = append(headers, "TENANT", "UID", "MACHINE", "VPC")
 		widths = append(widths, 32, 36, 32, 64)
@@ -23,7 +24,7 @@ func PrintECSList(result *service.ECSListResult, long bool) {
 	}
 	rows := make([][]string, 0, len(result.Items))
 	for _, item := range result.Items {
-		row := []string{emptyDash(item.ResourceType), emptyDash(item.Name), emptyDash(item.State), emptyDash(item.InternalIP), emptyDash(item.Creator)}
+		row := []string{emptyDash(item.Name), emptyDash(item.ResourceType), emptyDash(item.State), emptyDash(item.InternalIP), emptyDash(item.Creator)}
 		if long {
 			row = append(row, emptyDash(item.Tenant), emptyDash(item.UID), emptyDash(item.MachineType), emptyDash(item.VPC))
 		}
@@ -39,10 +40,10 @@ func PrintECSList(result *service.ECSListResult, long bool) {
 		}
 		rows = append(rows, row)
 	}
-	printBoxTableWithOptions(headers, rows, widths, tableOptions{
+	printListTable(base, headers, rows, widths, tableOptions{
 		minWidths:   minimums,
 		noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), noWrapColumns...)...),
-	})
+	}, long)
 	fmt.Fprintf(os.Stdout, "Showing %d of %d matching resources", len(result.Items), result.Total)
 	if result.Truncated {
 		fmt.Fprint(os.Stdout, "; use -n 0 to show all")

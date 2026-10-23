@@ -1,6 +1,8 @@
 # rayctl
 
-`get -l` 使用增量详情：先显示名称、状态、HC namespace、节点的身份锚点，再显示默认视图没有的字段与诊断；多对象分别显示锚点。`list -l` 继续增加列。`-o json` 保留完整的已采集对象，不应用表格去重或隐藏卷的规则。标识字段完整保留；AIR list 默认显示 NAME/STATE/READY/WORKSPACE，`READY 1/1 ×2` 表示就绪组/总组 × 每组实例数，`-n` 默认 50，`-l` 增加队列和创建信息，CREATED 保留完整年月日和时分秒。
+`get -l` 使用增量详情：先显示名称、状态、HC namespace、节点的身份锚点，再显示默认视图没有的字段与诊断；多对象分别显示锚点。`list -l` 也使用增量列：只保留一列主标识及默认表没有的列，不重印 STATE、WORKSPACE 等默认列。同名 AID/AIR 才额外用 WORKSPACE 或 UID 区分。`-o json` 始终保留完整的已采集对象。标识和日期时间不截断、不折行，必要时允许超出终端宽度。各命令的列和示例见 [列表增量输出](docs/list-incremental-output.md)。
+
+AIR list 默认显示 NAME/STATE/READY/WORKSPACE，`READY 1/1 ×2` 表示就绪组/总组 × 每组实例数，`-n` 默认 50；`-l` 仅显示 NAME/QUEUE/CREATOR/CREATED。
 
 带 `-n/--limit` 且不接收位置参数的列表，JSON `summary.requested` 表示实际请求的条数上限：例如 `ait list -n 3`、`air job list -n 3` 为 3，默认普通列表为 50；AIT 的时间窗口扫描未显式指定 `-n` 时为 5000。按多个位置参数查询对象时仍表示目标数量。
 强大的 k8s 工具 for 商汤 dcluster
@@ -77,12 +79,12 @@ rayctl ecs list -n 0 -o json
 # ecs list 分页汇总当前环境中已配置且有权限的各租户 ECS/AIS，隔离其他平台环境。
 # 平台机器规格为空时，仅对筛选和截取后展示的资源按 UID 查询 HC VM/VMI，显示实际 vCPU / 内存；无 HC 配置仍可列出平台数据。
 # 默认按类型、名称排序并最多显示 100 条；--name/--state 筛选后再应用 -n，-n 0 显示全部。
-# -l 增加 TENANT、UID、机器规格、VPC；JSON 同时保留 tenant_id。创建人按所属租户补全，失败保留 ID；清单部分失败保留成功结果并返回错误。
+# -l 仅显示 NAME/TENANT/UID/MACHINE/VPC；JSON 同时保留 tenant_id。创建人按所属租户补全，失败保留 ID；清单部分失败保留成功结果并返回错误。
 rayctl ecs get ais-a ecs-b ais-c
 # ecs get 同时展示所属租户及 DNAT 外部地址:端口 -> 内部地址:端口、协议、状态和 NAT 网关。
 # 资源接口缺失 DNAT 时按所属租户、VPC 和内网 IP 查询；查询失败保留机器详情并提示告警。
 
-# 汇总当前环境各已配置租户的资源，或按名称/UID 查看单个资源；list -l 显示 TENANT
+# 汇总当前环境各已配置租户的资源，或按名称/UID 查看单个资源；list -l 仅显示资源名称和 TENANT
 rayctl vpc list
 rayctl vpc get vpc-muxi-ailab
 rayctl subnet list
@@ -173,6 +175,8 @@ rayctl queue node usage queue-d-reserved-a3-ai4s --free
 
 # AIR 推理任务和推理网关；gateway 可缩写为 gw
 rayctl air job list -n 50
+rayctl air job list -n 50 -l
+# -l 仅显示 NAME/QUEUE/CREATOR/CREATED；默认表与增量表使用相同筛选和顺序。
 # 部分 workspace 失败时保留可用结果、退出 0 并汇总警告；全部失败仍退出非零。
 # JSON 的 summary.complete=false 保留不完整范围；UID 去重后再筛选和限条数，metadata 可含 duplicates_removed。
 rayctl air job get <job-name-or-uid>

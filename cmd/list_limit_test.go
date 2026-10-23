@@ -75,7 +75,7 @@ func TestListWindowPreservesExplicitLimit(t *testing.T) {
 		name string
 		new  func() *cobra.Command
 		args []string
-	}{{"ait", newAITListCmd, nil}, {"aid", newAIDListCmd, nil}, {"ate", newECPJobListCmd, nil}, {"ait queue", newAITListCmd, []string{"-q", "queue-test"}}, {"aid queue", newAIDListCmd, []string{"-q", "queue-test"}}} {
+	}{{"ait", newAITListCmd, nil}, {"aid", newAIDListCmd, nil}, {"aid incremental", newAIDListCmd, []string{"-l"}}, {"ate", newECPJobListCmd, nil}, {"ait queue", newAITListCmd, []string{"-q", "queue-test"}}, {"aid queue", newAIDListCmd, []string{"-q", "queue-test"}}, {"aid queue incremental", newAIDListCmd, []string{"-q", "queue-test", "-l"}}} {
 		for _, test := range []struct {
 			name string
 			args []string

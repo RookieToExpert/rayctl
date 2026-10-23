@@ -38,7 +38,7 @@ func newVPCListCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示租户信息")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 VPC 及新增 TENANT 列")
 	return cmd
 }
 
@@ -100,7 +100,7 @@ func newSubnetListCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示租户信息")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 SUBNET 及新增 TENANT 列")
 	return cmd
 }
 
@@ -162,7 +162,7 @@ func newNATGatewayListCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示租户信息")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 NATGW 及新增 TENANT 列")
 	return cmd
 }
 

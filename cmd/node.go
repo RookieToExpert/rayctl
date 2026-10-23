@@ -295,7 +295,7 @@ func newNodeListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&showAll, "all", "A", false, "Show all nodes")
-	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "显示型号、当前用途、原始产品标签、队列和租户")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "仅显示 HOSTNAME 及新增 MODEL、PROD、QUEUE、TENANT 列")
 	cmd.Flags().StringVarP(&queueFilter, "queue", "q", "", "只显示指定 SSP Queue 下的节点（名称或 UID）")
 	cmd.Flags().StringVarP(&vcFilter, "vc", "v", "", "只显示指定 VC 下的节点（名称或 UID）")
 	cmd.Flags().StringVarP(&workspaceFilter, "workspace", "w", "", "只显示指定 SSP Workspace 下的节点（名称或 UID）")

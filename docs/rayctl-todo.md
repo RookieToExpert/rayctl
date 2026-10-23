@@ -37,7 +37,7 @@
 
 - 状态：已实现，`5cfed1d`；补漏 `a0f7b55`、`1f8aa72`。AIT/AID/ATE/AIR/gateway 已做 AIS 复验，其余详情路径有输出回归测试。
 - 现象：`ait get <job> -l` 重印默认摘要；`air job get <job> -l` 重印默认字段后继续输出大量详情，查问题时先看到重复内容。
-- 范围：有 `-l` 的只读 get/详情命令，包括 AIT、AID、ATE、AIR job/gateway、AFS、Pod、Node 的适用详情路径。list 的 `-l` 仍按加列处理；不改变修改类命令的 `-l`。
+- 范围：有 `-l` 的只读 get/详情命令，包括 AIT、AID、ATE、AIR job/gateway、AFS、Pod、Node 的适用详情路径。原先排除的 list 类现由 UX-04 统一为增量列；不改变修改类命令的 `-l`。
 
 验收要求：
 
@@ -49,6 +49,27 @@
 6. 更新命令帮助和 README；测试单对象、多对象、无日志、注入卷、重复 PVC，以及 JSON 完整性。
 
 实现方向：在各领域 output 文件中区分摘要和增量段，JSON 捕获在展示过滤之前完成，不修改服务层返回对象来实现隐藏。
+
+## UX-04：list 类 -l 也只输出增量列
+
+- 状态：已实现，待 AIS 验收。
+- 范围：命令树全部 12 个 list -l：AIR job、AID、user、group、AFS、VPC、subnet、NAT gateway、ECS、node、queue node、VC node（含多 VC）。
+- 规则：一列主标识 + 默认表头的补集；仅在 AID/AIR 同名时追加 WORKSPACE 或 UID 区分。
+- 不改变筛选、limit 和行序；JSON 保留完整对象。标识与日期时间不截断、不折行。
+- 各命令的帮助文本、列说明与示例见 [列表增量输出](list-incremental-output.md)。
+
+## AIT-01：get 默认 workspace 范围统一到平台清单
+
+- 状态：已修复并推送，`1edb1a3`。
+- AIT 旧版同样把 HC namespace 标签与 RMH 合并，且可能按名字合并不同 subscription 的 workspace、吞掉部分失败。
+- 现在与 AID 共用平台候选范围规则，保留显式 workspace 直查；HC 只参与 Pod 定位和诊断。部分成功有警告和 query_incomplete；未命中且有失败时保留真实错误。
+- 已补范围、同名不同 subscription、部分成功/未命中、取消回归，并在 AIS 验证当前 list 选出的任务名与不存在名称。
+
+## AIT-02：UID 与 Pod 名查询遗留问题
+
+- 状态：待修复；AIS 同机对照 `e5f6d76` 与 `1edb1a3` 均可复现，属于既有问题。
+- 样本 `aircraft-grpo-64k-1023-r16` 的 UID 查询返回 400，服务端不支持 trainingJobs 的 uid 过滤；Pod 名查询虽能识别工作负载类型，但查平台时未转回任务名。
+- 本轮只修复默认 workspace 范围，未把这两项既有失败写成通过。后续应覆盖有 Pod/历史无 Pod 的 UID、Pod 名及取消/超时行为，再做稳定翻页或身份映射。
 
 ## UX-02：标识类字段不截断、不折行
 

@@ -107,6 +107,10 @@ func PrintVCNodeList(result *service.VCNodeListResult, longOutput bool) {
 	if result == nil {
 		return
 	}
+	if longOutput {
+		printVCNodeListItems(result.Items, true)
+		return
+	}
 	printBoxTableWithOptions(
 		[]string{"FIELD", "VALUE"},
 		[][]string{
@@ -130,19 +134,20 @@ func PrintVCNodeListMany(results []*service.VCNodeListResult, longOutput bool) {
 	for _, result := range results {
 		for _, item := range result.Items {
 			if longOutput {
-				rows = append(rows, []string{emptyDash(result.ClusterName), emptyDash(item.HostName), emptyDash(item.Model), emptyDash(item.Name), emptyDash(item.UID)})
+				rows = append(rows, []string{emptyDash(item.HostName), emptyDash(item.Model), emptyDash(item.Name), emptyDash(item.UID)})
 			} else {
-				rows = append(rows, []string{emptyDash(result.ClusterName), emptyDash(item.HostName), emptyDash(item.HostIP), emptyDash(item.State), emptyDash(item.MachineType)})
+				rows = append(rows, []string{emptyDash(item.HostName), emptyDash(result.ClusterName), emptyDash(item.HostIP), emptyDash(item.State), emptyDash(item.MachineType)})
 			}
 		}
 	}
-	headers := []string{"VC", "HOST", "IP", "STATE", "MACHINE TYPE"}
-	widths := []int{28, 20, 15, 10, 18}
-	minimums := []int{14, 16, 15, 8, 12}
+	base := []string{"HOST", "VC", "IP", "STATE", "MACHINE TYPE"}
+	headers := append([]string{}, base...)
+	widths := []int{20, 28, 15, 10, 18}
+	minimums := []int{16, 14, 15, 8, 12}
 	if longOutput {
-		headers = []string{"VC", "HOST", "MODEL", "ACN", "ACN UID"}
-		widths = []int{28, 22, 24, 48, 36}
-		minimums = []int{16, 20, 14, 28, 36}
+		headers = []string{"HOST", "MODEL", "ACN", "ACN UID"}
+		widths = []int{22, 24, 48, 36}
+		minimums = []int{20, 14, 28, 36}
 	}
 	if len(rows) == 0 {
 		row := make([]string, len(headers))
@@ -153,12 +158,12 @@ func PrintVCNodeListMany(results []*service.VCNodeListResult, longOutput bool) {
 	}
 	noWrapColumns := []int{len(headers) - 1}
 	if longOutput {
-		noWrapColumns = []int{1, 3, 4}
+		noWrapColumns = []int{0, 2, 3}
 	}
-	printBoxTableWithOptions(headers, rows, widths, tableOptions{
+	printListTable(base, headers, rows, widths, tableOptions{
 		noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), noWrapColumns...)...),
 		minWidths:   minimums,
-	})
+	}, longOutput)
 }
 
 func printVCNodeListItems(items []service.VCNodeListItem, longOutput bool) {
@@ -189,10 +194,10 @@ func printVCNodeListItems(items []service.VCNodeListItem, longOutput bool) {
 	if longOutput {
 		noWrapColumns = []int{0, 2, 3}
 	}
-	printBoxTableWithOptions(headers, rows, widths, tableOptions{
+	printListTable([]string{"HOST", "IP", "STATE", "MACHINE TYPE"}, headers, rows, widths, tableOptions{
 		noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), noWrapColumns...)...),
 		minWidths:   minimums,
-	})
+	}, longOutput)
 }
 
 func PrintVCNodeRemoveResult(result *service.VCNodeRemoveResult, longOutput bool, showPayload bool) {

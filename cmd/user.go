@@ -51,7 +51,7 @@ func newUserListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVarP(&limit, "limit", "n", 0, "最多显示的用户数；0 表示全部")
-	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示用户 ID、租户代码和创建时间")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "仅显示 USERNAME 及新增 ID、TENANT CODE、CREATED 列")
 	return cmd
 }
 

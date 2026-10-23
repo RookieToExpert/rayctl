@@ -46,7 +46,7 @@ func newGroupListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVarP(&limit, "limit", "n", 0, "最多显示的用户组数；0 表示全部")
-	cmd.Flags().BoolVarP(&long, "long", "l", false, "显示组 ID、POSIX、租户 ID 和创建时间")
+	cmd.Flags().BoolVarP(&long, "long", "l", false, "仅显示 GROUP 及新增 ID、POSIX、TENANT ID、CREATED 列")
 	return cmd
 }
 
