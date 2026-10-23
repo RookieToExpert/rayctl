@@ -13,7 +13,7 @@ func TestRBACCreateDate(t *testing.T) {
 
 func TestWrapCellNoWrapPreservesExplicitLines(t *testing.T) {
 	lines := wrapCell("cluster-admin-49glr\ncluster-admin-very-long-name", 20, true)
-	want := []string{"cluster-admin-49glr", "cluster-admin-ver..."}
+	want := []string{"cluster-admin-49glr", "cluster-admin-very-long-name"}
 	if len(lines) != len(want) {
 		t.Fatalf("line count = %d, want %d", len(lines), len(want))
 	}

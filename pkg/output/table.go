@@ -101,6 +101,7 @@ func printBoxTableWithMaxWidths(headers []string, rows [][]string, maxWidths []i
 }
 
 func printBoxTableWithOptions(headers []string, rows [][]string, maxWidths []int, options tableOptions) {
+	options = preserveTableIdentifiers(headers, rows, options)
 	widths := make([]int, len(headers))
 	for i, header := range headers {
 		widths[i] = textWidth(header)
@@ -109,14 +110,17 @@ func printBoxTableWithOptions(headers []string, rows [][]string, maxWidths []int
 		}
 	}
 
-	for _, row := range rows {
+	for rowIdx, row := range rows {
 		for i := range headers {
 			cell := ""
 			if i < len(row) {
 				cell = row[i]
 			}
-			cellLen := textWidth(cell)
-			if i < len(maxWidths) && maxWidths[i] > 0 && cellLen > maxWidths[i] {
+			cellLen := 0
+			for _, line := range strings.Split(cell, "\n") {
+				cellLen = max(cellLen, textWidth(line))
+			}
+			if !noWrapCell(options, rowIdx, i) && i < len(maxWidths) && maxWidths[i] > 0 && cellLen > maxWidths[i] {
 				cellLen = maxWidths[i]
 			}
 			if cellLen > widths[i] {
@@ -296,7 +300,7 @@ func wrapCell(value string, width int, noWrap bool) []string {
 		paragraphs := strings.Split(value, "\n")
 		lines := make([]string, 0, len(paragraphs))
 		for _, paragraph := range paragraphs {
-			lines = append(lines, truncateCell(strings.TrimRight(paragraph, " "), width))
+			lines = append(lines, strings.TrimRight(paragraph, " "))
 		}
 		return lines
 	}
