@@ -25,6 +25,7 @@ func PrintAuthAFSResult(result *service.AuthAFSResult) {
 		resourceRows = [][]string{{"AFS", emptyDash(firstNonEmptyOutput(result.AFSName, result.ResourceName))}}
 	}
 	summaryRows := append(resourceRows, [][]string{
+		{"PROFILE", emptyDash(result.ProfileName)},
 		{"SCOPE", emptyDash(formatAuthScopeForDisplay(result.Scope))},
 		{"授权数量", strconv.Itoa(len(result.Items))},
 	}...)

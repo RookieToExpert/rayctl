@@ -52,6 +52,7 @@ func newAuthCheckCmd() *cobra.Command {
 	}
 	checkCmd.AddCommand(newAuthCheckAFSCmd())
 	checkCmd.AddCommand(newAuthCheckResourceCmd("vc", "查看 VC 归属的用户/用户组授权"))
+	checkCmd.AddCommand(newAuthCheckQueueCmd())
 	checkCmd.AddCommand(newAuthCheckResourceCmd("ccr", "查看 CCR namespace 归属的用户/用户组授权"))
 	checkCmd.AddCommand(newAuthCheckResourceCmd("subnet", "查看 Subnet 归属的用户/用户组授权"))
 	checkCmd.AddCommand(newAuthCheckResourceCmd("ais", "查看开发机 AI Space 归属的用户/用户组授权"))
@@ -758,6 +759,9 @@ func runAuthCheckResources(cmd *cobra.Command, resourceType string, resourceName
 			continue
 		}
 		valid = append(valid, query.result)
+		for _, warning := range query.result.Warnings {
+			fmt.Fprintln(cmd.ErrOrStderr(), "warning:", warning)
+		}
 	}
 	if len(valid) == 0 {
 		return errors.Join(queryErrors...)

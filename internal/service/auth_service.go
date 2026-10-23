@@ -18,9 +18,11 @@ type AuthService struct {
 type AuthAFSResult struct {
 	ResourceType string
 	ResourceName string
+	ProfileName  string
 	Scope        string
 	AFSName      string
 	Items        []AuthAFSItem
+	Warnings     []string
 }
 
 type AuthAFSItem struct {
@@ -174,19 +176,24 @@ func (s *AuthService) GetResourceAuthWithBearer(ctx context.Context, resourceTyp
 		return nil, fmt.Errorf("%s name is required", resourceType)
 	}
 
-	resource, err := s.findGrantResource(ctx, resourceType, resourceName, bearerToken)
+	resource, err := s.findAuthResource(ctx, resourceType, resourceName, bearerToken)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s scope: %w", resourceType, err)
 	}
-	scope := ensureRMScope(resource.RID)
-	if scope == "" {
-		return nil, fmt.Errorf("%s scope is empty", resourceType)
-	}
 	resourceName = firstNonEmpty(strings.TrimSpace(resource.Name), resourceName)
-
-	policies, err := s.vcClient.ListIAMBindingPoliciesForResourceProfile(ctx, resource.ProfileName, resourceName)
+	var policies []platform.IAMBindingPolicy
+	var warnings []string
+	if resourceType == "vc" && strings.TrimSpace(resource.ID) == "" {
+		resource, policies, warnings, err = s.resolveUnverifiedVCAuth(ctx, resourceName, resource)
+	} else {
+		policies, err = s.vcClient.ListIAMBindingPoliciesForResourceProfile(ctx, resource.ProfileName, resourceName)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list binding policies for profile %q: %w", firstNonEmpty(resource.ProfileName, s.vcClient.CurrentProfileName()), err)
+	}
+	scope := ensureRMScope(resource.RID)
+	if scope == "" && len(warnings) == 0 {
+		return nil, fmt.Errorf("%s scope is empty", resourceType)
 	}
 
 	items := make([]AuthAFSItem, 0)
@@ -223,9 +230,11 @@ func (s *AuthService) GetResourceAuthWithBearer(ctx context.Context, resourceTyp
 	return &AuthAFSResult{
 		ResourceType: strings.ToUpper(resourceType),
 		ResourceName: resourceName,
+		ProfileName:  resource.ProfileName,
 		Scope:        scope,
 		AFSName:      resourceName,
 		Items:        items,
+		Warnings:     warnings,
 	}, nil
 }
 

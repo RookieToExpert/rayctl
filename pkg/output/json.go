@@ -90,7 +90,7 @@ func (s *JSONSession) Write(w io.Writer, list bool, requested int, queryErr erro
 				for _, child := range children {
 					if item, ok := child.(map[string]any); ok && len(s.Items) > 1 {
 						context := map[string]any{}
-						for _, key := range []string{"queue", "cluster_name", "cluster_uid", "profile_name", "workspace"} {
+						for _, key := range []string{"queue", "cluster_name", "cluster_uid", "profile_name", "workspace", "resource_type", "resource_name", "scope"} {
 							if value, ok := object[key]; ok {
 								context[key] = value
 							}

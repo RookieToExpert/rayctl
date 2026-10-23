@@ -8,7 +8,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"rayctl/internal/concurrent"
 )
+
+const iamSubjectPolicyBatchSize = 5
 
 type IAMUser struct {
 	ID            string `json:"id"`
@@ -435,7 +439,10 @@ func (c *VirtualClusterClient) FindUsersForProfile(ctx context.Context, profileN
 		return exact, nil
 	}
 
-	users, err := c.listUsersForProfile(ctx, profile)
+	if err := canceledIAMUserLookup(ctx, exactErr); err != nil {
+		return nil, err
+	}
+	result, err := c.findUsersForProfileFallback(ctx, profile, identifier)
 	if err != nil {
 		if exactErr != nil {
 			return nil, fmt.Errorf("find exact user: %v; list users: %w", exactErr, err)
@@ -443,37 +450,6 @@ func (c *VirtualClusterClient) FindUsersForProfile(ctx context.Context, profileN
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 
-	exact = make([]IAMUser, 0)
-	prefix := make([]IAMUser, 0)
-	contains := make([]IAMUser, 0)
-	lowerID := strings.ToLower(identifier)
-	for _, user := range users {
-		username := strings.TrimSpace(user.Username)
-		id := strings.TrimSpace(user.ID)
-		name := strings.TrimSpace(user.Name)
-		switch {
-		case username == identifier || id == identifier:
-			exact = append(exact, user)
-		case strings.HasPrefix(strings.ToLower(username), lowerID) || strings.HasPrefix(strings.ToLower(id), lowerID) || strings.HasPrefix(strings.ToLower(name), lowerID):
-			prefix = append(prefix, user)
-		case strings.Contains(strings.ToLower(username), lowerID) || strings.Contains(strings.ToLower(id), lowerID) || strings.Contains(strings.ToLower(name), lowerID):
-			contains = append(contains, user)
-		}
-	}
-
-	result := exact
-	if len(result) == 0 {
-		result = prefix
-	}
-	if len(result) == 0 {
-		result = contains
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if strings.TrimSpace(result[i].Username) != strings.TrimSpace(result[j].Username) {
-			return strings.TrimSpace(result[i].Username) < strings.TrimSpace(result[j].Username)
-		}
-		return strings.TrimSpace(result[i].ID) < strings.TrimSpace(result[j].ID)
-	})
 	if len(result) == 0 {
 		return nil, &IAMUserNotFoundError{Identifier: identifier}
 	}
@@ -699,10 +675,9 @@ func (c *VirtualClusterClient) ListIAMBindingPoliciesForSubjectsProfile(ctx cont
 		return nil, nil
 	}
 
-	result := make([]IAMBindingPolicy, 0)
-	seenPolicies := make(map[string]struct{})
-	for start := 0; start < len(unique); start += 20 {
-		end := min(start+20, len(unique))
+	filters := make([]string, 0, (len(unique)+iamSubjectPolicyBatchSize-1)/iamSubjectPolicyBatchSize)
+	for start := 0; start < len(unique); start += iamSubjectPolicyBatchSize {
+		end := min(start+iamSubjectPolicyBatchSize, len(unique))
 		terms := make([]string, 0, (end-start)*2)
 		for _, identifier := range unique[start:end] {
 			escaped := escapeIAMFilterValue(identifier)
@@ -711,12 +686,44 @@ func (c *VirtualClusterClient) ListIAMBindingPoliciesForSubjectsProfile(ctx cont
 				fmt.Sprintf(`scope="*%s*"`, escaped),
 			)
 		}
-		items, err := c.listIAMBindingPoliciesWithProfile(ctx, profile, "("+strings.Join(terms, " OR ")+")")
-		if err != nil {
-			return nil, err
+		filters = append(filters, "("+strings.Join(terms, " OR ")+")")
+	}
+	type policyResult struct {
+		items []IAMBindingPolicy
+		err   error
+	}
+	chunks := concurrent.Map(ctx, filters, 4, func(ctx context.Context, filter string) policyResult {
+		if err := ctx.Err(); err != nil {
+			return policyResult{err: err}
 		}
-		for _, policy := range items {
-			key := firstNonEmpty(strings.TrimSpace(policy.ID), strings.Join([]string{policy.Scope, policy.MemberType, policy.MemberValue, policy.MemberIdentify}, "|"))
+		items, err := c.listIAMBindingPoliciesWithProfile(ctx, profile, filter)
+		return policyResult{items: items, err: err}
+	})
+	result := make([]IAMBindingPolicy, 0)
+	type bindingIdentity struct {
+		id             string
+		scope          string
+		memberType     string
+		memberValue    string
+		memberIdentify string
+	}
+	seenPolicies := make(map[bindingIdentity]struct{})
+	for _, chunk := range chunks {
+		if chunk.err != nil {
+			return nil, chunk.err
+		}
+		for _, policy := range chunk.items {
+			// A policy ID can grant the same roles to multiple members. Deduplicate
+			// repeated bindings, rather than dropping other members of that policy.
+			key := bindingIdentity{
+				id:          strings.TrimSpace(policy.ID),
+				scope:       strings.TrimSpace(policy.Scope),
+				memberType:  strings.ToUpper(strings.TrimSpace(policy.MemberType)),
+				memberValue: strings.TrimSpace(policy.MemberValue),
+			}
+			if key.id == "" || key.memberValue == "" {
+				key.memberIdentify = strings.TrimSpace(policy.MemberIdentify)
+			}
 			if _, exists := seenPolicies[key]; exists {
 				continue
 			}
@@ -982,6 +989,14 @@ func (c *VirtualClusterClient) DeleteIAMPolicy(ctx context.Context, policyID str
 	}
 	_, err := c.doRequestWithProfile(ctx, profile, http.MethodDelete, u.String(), "", nil)
 	return err
+}
+
+func (c *VirtualClusterClient) ResolveCurrentProfileUsernames(ctx context.Context, ids []string) (map[string]string, error) {
+	profile, ok := c.currentClientProfile()
+	if !ok {
+		return nil, fmt.Errorf("no current platform profile available")
+	}
+	return c.resolveUsernamesWithProfile(ctx, profile, ids)
 }
 
 func (c *VirtualClusterClient) ResolveUsernames(ctx context.Context, ids []string) (map[string]string, error) {
