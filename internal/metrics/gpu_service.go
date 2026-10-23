@@ -96,6 +96,7 @@ func (s *Service) gpuForIdentity(ctx context.Context, options QueryOptions, iden
 	}
 	grouped := aggregateSeriesWithTolerance(merged, options.By, aggregateMax, tolerance)
 	result := buildResult("gpu", options, identity, grouped)
+	appendGPUCoverage(result, options, merged)
 	result.Warnings = append(result.Warnings, identity.Warnings...)
 	if len(result.Samples) == 0 {
 		return nil, fmt.Errorf("工作负载 %q 没有加速卡指标", options.Workload)

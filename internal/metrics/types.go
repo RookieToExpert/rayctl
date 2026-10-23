@@ -114,6 +114,25 @@ type Result struct {
 	Capabilities []GPUCapability `json:"capabilities,omitempty"`
 	Health       *GPUHealth      `json:"health,omitempty"`
 	Baseline     *GPUBaseline    `json:"baseline,omitempty"`
+	Coverage     *GPUCoverage    `json:"coverage,omitempty"`
+}
+
+type GPUCoverage struct {
+	Requested       TimeRange           `json:"requested"`
+	IntervalSeconds float64             `json:"sample_interval_seconds"`
+	MinimumRatio    float64             `json:"minimum_ratio"`
+	RatioKnown      bool                `json:"ratio_known"`
+	Series          []GPUCoverageSeries `json:"series"`
+}
+
+type GPUCoverageSeries struct {
+	Key            string      `json:"key"`
+	Observed       TimeRange   `json:"observed"`
+	ActualPoints   int         `json:"actual_points"`
+	ExpectedPoints int         `json:"expected_points"`
+	Ratio          float64     `json:"ratio"`
+	RatioKnown     bool        `json:"ratio_known"`
+	Gaps           []TimeRange `json:"gaps"`
 }
 
 type GPUCapability struct {
