@@ -211,10 +211,10 @@ func TestGPUShortStepPreservesEveryRequestedTimestamp(t *testing.T) {
 }
 
 func TestNPUHealthDeduplicatesSingleDoubleAndIsolatedPages(t *testing.T) {
-	labels := map[string]string{"pod": "p", "node": "n", "gpu": "0", "extended_resource__type": "npu.com/gpu"}
+	labels := map[string]string{"pod": "p", "node": "n", "gpu": "0", "uuid": "physical-uuid", "extended_resource__type": "npu.com/gpu"}
 	cards := []RawSeries{{Metric: labels}}
 	values := []RawSeries{}
-	for name, value := range map[string]float64{"single": 2, "double": 3} {
+	for name, value := range map[string]float64{"npu_chip_info_hbm_ecc_single_bit_error_cnt": 2, "npu_chip_info_hbm_ecc_double_bit_error_cnt": 3} {
 		for i := 0; i < 3; i++ {
 			l := cloneLabels(labels)
 			l["__name__"] = name
@@ -222,7 +222,7 @@ func TestNPUHealthDeduplicatesSingleDoubleAndIsolatedPages(t *testing.T) {
 		}
 	}
 	h := gpuHealth(cards, map[string][]RawSeries{"ecc": values, "isolated_pages": {{Metric: labels, Values: []float64{1}}}})
-	if len(h.Anomalies) != 1 || *h.Anomalies[0].ECC != 5 || *h.Anomalies[0].IsolatedPages != 1 {
+	if len(h.Anomalies) != 1 || *h.Anomalies[0].ECC != 3 || *h.Anomalies[0].ECCSingleBit != 2 || *h.Anomalies[0].IsolatedPages != 1 {
 		t.Fatalf("health=%+v", h)
 	}
 }

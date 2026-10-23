@@ -145,6 +145,7 @@ type GPUHealth struct {
 	HealthyCards int             `json:"healthy_cards"`
 	UnknownCards int             `json:"unknown_cards"`
 	Anomalies    []GPUHealthCard `json:"anomalies"`
+	Information  []GPUHealthCard `json:"information,omitempty"`
 }
 
 type GPUHealthCard struct {
@@ -155,6 +156,7 @@ type GPUHealthCard struct {
 	Pod           string   `json:"pod"`
 	RAS           *float64 `json:"ras"`
 	ECC           *float64 `json:"ecc"`
+	ECCSingleBit  *float64 `json:"ecc_sbe,omitempty"`
 	ErrorCode     *float64 `json:"error_code"`
 	IsolatedPages *float64 `json:"isolated_pages"`
 }

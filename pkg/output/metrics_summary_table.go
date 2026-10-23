@@ -72,6 +72,14 @@ func printGPUHealth(result *metricsquery.Result) {
 		return
 	}
 	fmt.Fprintf(os.Stdout, "\n健康指标: %d 张卡，%d 张卡无错误计数，%d 张异常，%d 张健康指标无数据\n", health.TotalCards, health.HealthyCards, len(health.Anomalies), health.UnknownCards)
+	if len(health.Information) > 0 {
+		rows := [][]string{}
+		for _, card := range health.Information {
+			rows = append(rows, []string{card.Node, card.GPU, card.UUID, card.Pod, healthNumber(card.ECCSingleBit)})
+		}
+		fmt.Fprintln(os.Stdout, "SBE 累计计数（信息项，不单独判异常）：")
+		printBoxTable([]string{"NODE", "GPU", "UUID", "POD", "SBE"}, rows)
+	}
 	if len(health.Anomalies) == 0 {
 		return
 	}

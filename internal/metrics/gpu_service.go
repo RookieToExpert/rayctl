@@ -159,6 +159,12 @@ func (s *Service) gpuForIdentity(ctx context.Context, options QueryOptions, iden
 	}
 	if options.Health {
 		result.Health = gpuHealth(raw, allHealth)
+		for _, card := range raw {
+			if card.Metric["uuid"] == "" {
+				result.Warnings = append(result.Warnings, "部分卡缺少可验证的物理 UUID，健康指标身份不可确认，未按节点和卡序号推测关联")
+				break
+			}
+		}
 	}
 	return result, nil
 }
@@ -248,7 +254,11 @@ func normalizeGPU(raw []RawSeries, cards []RawSeries) []RawSeries {
 		// Node-level totals/health must only attach to physical cards belonging
 		// to this workload, never to an unrelated card on the same host.
 		for _, card := range cards {
-			if !sameGPU(labels, card.Metric) {
+			matched := sameGPU(labels, card.Metric)
+			if !gpuHealthMetric(name) {
+				matched = sameGPUPodMemory(labels, card.Metric)
+			}
+			if !matched {
 				continue
 			}
 			copyItem := item
@@ -275,13 +285,25 @@ func sameGPU(a, b map[string]string) bool {
 	if a["node"] != "" && b["node"] != "" && a["node"] != b["node"] {
 		return false
 	}
-	if a["uuid"] != "" && b["uuid"] != "" {
-		return a["uuid"] == b["uuid"]
+	return a["uuid"] != "" && b["uuid"] != "" && a["uuid"] == b["uuid"]
+}
+
+func gpuHealthMetric(name string) bool {
+	name = strings.ToLower(name)
+	return strings.Contains(name, "ecc") || strings.Contains(name, "ras_count") || strings.Contains(name, "error_code") || strings.Contains(name, "xid_errors") || strings.Contains(name, "isolated_pages")
+}
+
+func sameGPUPodMemory(a, b map[string]string) bool {
+	if sameGPU(a, b) {
+		return true
 	}
-	if a["gpu"] == "" || a["gpu"] != b["gpu"] {
+	if a["extended_resource__type"] != b["extended_resource__type"] || (a["node"] != "" && b["node"] != "" && a["node"] != b["node"]) {
 		return false
 	}
-	return (a["pod"] != "" && a["pod"] == b["pod"]) || (a["node"] != "" && a["node"] == b["node"])
+	if a["uuid"] != "" && b["uuid"] != "" {
+		return false
+	}
+	return a["pod"] != "" && a["pod"] == b["pod"] && a["gpu"] != "" && a["gpu"] == b["gpu"]
 }
 
 // Platform wrappers and native exporters may expose the same physical GPU
@@ -459,19 +481,33 @@ func gpuHealth(cards []RawSeries, dimensions map[string][]RawSeries) *GPUHealth 
 				continue
 			}
 			value := 0.0
-			for _, v := range maxima {
+			hasSeverityCounter := false
+			for name, v := range maxima {
+				if dimension == "ecc" && (strings.Contains(strings.ToLower(name), "single_bit_error") || strings.Contains(name, "_SBE_")) {
+					if card.ECCSingleBit == nil {
+						card.ECCSingleBit = new(float64)
+					}
+					*card.ECCSingleBit += v
+					continue
+				}
+				hasSeverityCounter = true
 				value += v
 			}
 			switch dimension {
 			case "ras":
 				card.RAS = &value
 			case "ecc":
-				card.ECC = &value
+				if hasSeverityCounter {
+					card.ECC = &value
+				}
 			case "error_code":
 				card.ErrorCode = &value
 			case "isolated_pages":
 				card.IsolatedPages = &value
 			}
+		}
+		if card.ECCSingleBit != nil && *card.ECCSingleBit > 0 {
+			health.Information = append(health.Information, card)
 		}
 		bad := false
 		for _, v := range []*float64{card.RAS, card.ECC, card.ErrorCode, card.IsolatedPages} {
