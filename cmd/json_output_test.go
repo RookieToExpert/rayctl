@@ -86,11 +86,14 @@ func TestJSONCommandSuppressesHeadingsAndKeepsResults(t *testing.T) {
 		if err := root.Execute(); err != nil {
 			t.Fatal(err)
 		}
-		var payload struct{ Items []struct{ Name string } }
+		var payload struct {
+			Items   []struct{ Name string }
+			Summary struct{ Requested int }
+		}
 		if err := json.Unmarshal(buffer.Bytes(), &payload); err != nil {
 			t.Fatal(err, buffer.String())
 		}
-		if len(payload.Items) != 2 || payload.Items[1].Name != "b" {
+		if len(payload.Items) != 2 || payload.Items[1].Name != "b" || payload.Summary.Requested != 2 {
 			t.Fatal(buffer.String())
 		}
 	}

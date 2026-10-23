@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"rayctl/internal/service"
 	"rayctl/pkg/output"
 )
 
@@ -65,6 +66,27 @@ func installJSONCommands(command *cobra.Command) {
 		defer output.EndJSON()
 		err := run(cmd, args)
 		isList := cmd.Name() == "list" || cmd.Name() == "usage" || len(args) > 1
-		return errors.Join(err, session.Write(writer, isList, len(args), err))
+		return errors.Join(err, session.Write(writer, isList, jsonRequestedCount(cmd, args), err))
 	}
+}
+
+func jsonRequestedCount(cmd *cobra.Command, args []string) int {
+	// Positional target lists retain their target count. Bounded inventory
+	// lists report the requested row limit rather than their zero arguments.
+	if cmd.Name() != "list" || len(args) > 0 || cmd.Flags().Lookup("limit") == nil {
+		return len(args)
+	}
+	limit, err := cmd.Flags().GetInt("limit")
+	if err != nil {
+		return len(args)
+	}
+	// SSP catalog windows use a larger default unless -n was explicit.
+	if cmd.Flags().Lookup("since") != nil && cmd.Flags().Lookup("all") != nil {
+		all, _ := cmd.Flags().GetBool("all")
+		windowed := all || cmd.Flags().Changed("since")
+		if resolved, err := service.ResolveListLimit(limit, windowed, cmd.Flags().Changed("limit")); err == nil {
+			return resolved
+		}
+	}
+	return limit
 }
