@@ -36,11 +36,13 @@ func PrintSSPAIRJobList(result *service.SSPAIRJobListResult, long ...bool) {
 	}
 	headers := []string{"NAME", "STATE", "READY", "WORKSPACE"}
 	widths := []int{48, 9, 12, 28}
+	options := tableOptions{}
 	if wide {
 		headers = append(headers, "QUEUE", "CREATOR", "CREATED")
 		widths = append(widths, 48, 22, 20)
+		options.noWrapCells = makeNoWrapCells(noWrapCellsForSingleColumn(len(rows), len(headers)-1)...)
 	}
-	printBoxTableWithMaxWidths(headers, rows, widths)
+	printBoxTableWithOptions(headers, rows, widths, options)
 }
 
 func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {

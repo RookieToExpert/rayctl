@@ -23,3 +23,27 @@ func TestAIRJobListCompactAndWide(t *testing.T) {
 		t.Fatal(wide)
 	}
 }
+
+func TestAIRJobListWidePreservesCreatedTimestamp(t *testing.T) {
+	const created = "2026-10-23 09:12:34"
+	const name = "infer-glm-53-flash-w8a8c16-long-name"
+	for _, columns := range []string{"80", "120", "200"} {
+		t.Run(columns, func(t *testing.T) {
+			t.Setenv("COLUMNS", columns)
+			result := &service.SSPAIRJobListResult{Items: []service.SSPAIRJobItem{{
+				Name: name, State: "RUNNING", Workspace: "ws-d-a3-trustrouter",
+				Queue: "queue-d-reserved-a3-trustrouter", Creator: "creator", CreatedAt: created,
+			}}}
+			text := captureTableOutput(t, func() { PrintSSPAIRJobList(result, true) })
+			found := false
+			for _, line := range strings.Split(text, "\n") {
+				if strings.Contains(line, name) && strings.Contains(line, created) {
+					found = true
+				}
+			}
+			if !found || strings.Count(text, created) != 1 {
+				t.Fatalf("timestamp must remain intact on its job row at %s columns:\n%s", columns, text)
+			}
+		})
+	}
+}
