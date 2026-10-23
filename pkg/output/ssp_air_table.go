@@ -9,28 +9,31 @@ import (
 	"rayctl/internal/service"
 )
 
-func PrintSSPAIRJobList(result *service.SSPAIRJobListResult) {
+func PrintSSPAIRJobList(result *service.SSPAIRJobListResult, long ...bool) {
 	if captureJSON(result) {
 		return
 	}
 	rows := make([][]string, 0)
+	wide := len(long) > 0 && long[0]
 	if result != nil {
 		for _, item := range result.Items {
-			rows = append(rows, []string{
-				emptyDash(item.Name), emptyDash(item.State), emptyDash(item.Workspace), emptyDash(item.Queue),
-				fmt.Sprintf("%d/%d", item.ReadyReplicas, item.Replicas),
-				formatAIRGroupSize(item.GroupSize), formatAIRTotalInstances(item), emptyDash(item.Creator), emptyDash(item.CreatedAt),
-			})
+			row := []string{emptyDash(item.Name), emptyDash(item.State), fmt.Sprintf("%d/%d ×%s", item.ReadyReplicas, item.Replicas, formatAIRGroupSize(item.GroupSize)), emptyDash(item.Workspace)}
+			if wide {
+				row = append(row, emptyDash(item.Queue), emptyDash(item.Creator), emptyDash(item.CreatedAt))
+			}
+			rows = append(rows, row)
 		}
 	}
 	if len(rows) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-", "-", "-", "-", "-", "-"})
+		rows = append(rows, []string{"-", "-", "-", "-"})
 	}
-	printBoxTableWithOptions(
-		[]string{"NAME", "STATE", "WORKSPACE", "QUEUE", "GROUPS READY/TOTAL", "INSTANCES/GROUP", "TOTAL INSTANCES", "CREATOR", "CREATED"}, rows,
-		[]int{48, 12, 38, 48, 18, 16, 16, 22, 20},
-		tableOptions{noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), 0, 2, 3, 7)...), minWidths: []int{28, 8, 22, 26, 18, 16, 16, 14, 19}},
-	)
+	headers := []string{"NAME", "STATE", "READY", "WORKSPACE"}
+	widths := []int{48, 9, 12, 28}
+	if wide {
+		headers = append(headers, "QUEUE", "CREATOR", "CREATED")
+		widths = append(widths, 48, 22, 20)
+	}
+	printBoxTableWithMaxWidths(headers, rows, widths)
 }
 
 func PrintSSPAIRJobDetail(result *service.SSPAIRJobItem, longOutput bool) {

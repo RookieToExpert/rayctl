@@ -28,11 +28,17 @@ func newAIRJobCmd() *cobra.Command {
 func newAIRJobListCmd() *cobra.Command {
 	var workspace string
 	var state string
+	var limit int
+	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出 AIR 推理任务",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			resolvedLimit, err := service.ResolveListLimit(limit, false, cmd.Flags().Changed("limit"))
+			if err != nil {
+				return err
+			}
 			region, err := selectedSSPRegion()
 			if err != nil {
 				return err
@@ -45,12 +51,17 @@ func newAIRJobListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			output.PrintSSPAIRJobList(result)
+			if len(result.Items) > resolvedLimit {
+				result.Items = result.Items[:resolvedLimit]
+			}
+			output.PrintSSPAIRJobList(result, longOutput)
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "只查询指定 workspace")
 	cmd.Flags().StringVarP(&state, "state", "s", "", "按状态筛选，例如 Running、Pending")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "最多显示的最新记录数，范围 1-1000；筛选后应用")
+	cmd.Flags().BoolVarP(&longOutput, "long", "l", false, "增加 queue、创建人和创建时间列")
 	return cmd
 }
 

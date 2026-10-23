@@ -158,7 +158,7 @@ func TestPrintAIRJobListShowsGroupSizeAndConfiguredTotal(t *testing.T) {
 			values = cells
 		}
 	}
-	for column, want := range map[string]string{"GROUPS READY/TOTAL": "1/1", "INSTANCES/GROUP": "8", "TOTAL INSTANCES": "8"} {
+	for column, want := range map[string]string{"READY": "1/1 ×8"} {
 		found := false
 		for index, header := range headers {
 			if header == column {
