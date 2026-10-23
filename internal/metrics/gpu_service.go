@@ -337,6 +337,12 @@ func attachGPUMemory(result *Result, used, total []*pointSeries) {
 		totalByName[item.name] = item
 	}
 	targets := map[string]*Series{}
+	indexes := map[*pointSeries]*gpuTimeIndex{}
+	for _, set := range [][]*pointSeries{used, total} {
+		for _, item := range set {
+			indexes[item] = newGPUTimeIndex(item.points)
+		}
+	}
 	for i := range result.Series {
 		targets[result.Series[i].Name] = &result.Series[i]
 	}
@@ -344,10 +350,10 @@ func attachGPUMemory(result *Result, used, total []*pointSeries) {
 		sample := &result.Samples[i]
 		at, _ := time.Parse(time.RFC3339Nano, sample.Timestamp)
 		if item := usedByName[sample.Series]; item != nil {
-			sample.MemoryUsedGiB = nearbyGPUValue(item.points, at.UnixMilli())
+			sample.MemoryUsedGiB = indexes[item].nearby(at.UnixMilli())
 		}
 		if item := totalByName[sample.Series]; item != nil {
-			sample.MemoryTotalGiB = nearbyGPUValue(item.points, at.UnixMilli())
+			sample.MemoryTotalGiB = indexes[item].nearby(at.UnixMilli())
 		}
 		if sample.MemoryUsedGiB != nil && sample.MemoryTotalGiB != nil && *sample.MemoryTotalGiB > 0 {
 			value := *sample.MemoryUsedGiB / *sample.MemoryTotalGiB * 100
@@ -365,20 +371,7 @@ func attachGPUMemory(result *Result, used, total []*pointSeries) {
 }
 
 func nearbyGPUValue(points map[int64]float64, at int64) *float64 {
-	var result *float64
-	closest := int64(120001)
-	for timestamp, value := range points {
-		delta := timestamp - at
-		if delta < 0 {
-			delta = -delta
-		}
-		if delta < closest {
-			closest = delta
-			v := value
-			result = &v
-		}
-	}
-	return result
+	return newGPUTimeIndex(points).nearby(at)
 }
 
 func completeSeriesSummary(summary *SeriesSummary, points map[int64]float64) {
