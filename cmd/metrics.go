@@ -92,6 +92,12 @@ func newMetricsGPUCmd() *cobra.Command {
 			svc.SetPodResolver(newPlatformMetricsPodResolver(platformClient))
 			result, err := svc.GPU(cmd.Context(), options)
 			if err != nil {
+				// A completed empty query still has useful coverage evidence.
+				if result != nil {
+					if renderErr := output.PrintMetrics(result, flags.output); renderErr != nil {
+						return fmt.Errorf("%w; render coverage: %v", err, renderErr)
+					}
+				}
 				return err
 			}
 			return output.PrintMetrics(result, flags.output)

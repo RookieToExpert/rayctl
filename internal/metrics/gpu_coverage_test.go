@@ -1,10 +1,19 @@
 package metrics
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestGPUEmptyQueryRetainsCoverageAndMissingDataError(t *testing.T) {
+	client := &gpuFixtureClient{data: []RawSeries{{Metric: map[string]string{"__name__": memoryMetric, "pod": "demo-0", "container": "main", workloadNameLabel: "demo", workspaceNameLabel: "ws", workloadTypeLabel: "aid", "sco_srm_type": workspaceResourceType}, Values: []float64{1}, Timestamps: []int64{1000000}}}}
+	result, err := NewService(client, "pt").GPU(context.Background(), QueryOptions{Workload: "demo", Workspace: "ws", Start: time.Unix(1000, 0), End: time.Unix(1600, 0), By: "pod"})
+	if err == nil || result == nil || result.Coverage == nil || result.Coverage.MinimumRatio != 0 || len(result.Coverage.Series[0].Gaps) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
 
 func TestGPUCoverageDetectsEdgesAndInternalGapsPerCard(t *testing.T) {
 	options := QueryOptions{Start: time.Unix(1000, 0), End: time.Unix(1600, 0), UseStep: true, Step: 15 * time.Second}

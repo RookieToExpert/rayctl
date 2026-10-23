@@ -56,7 +56,7 @@ func (s *Service) GPU(ctx context.Context, options QueryOptions) (*Result, error
 	selectedPods := append([]string{}, options.Pods...)
 	result, err := s.gpuForIdentity(ctx, applyIdentity(options, identity), identity)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	if len(selectedPods) > 0 && len(identity.AllPods) > len(identity.Pods) {
 		all := identity
@@ -99,7 +99,7 @@ func (s *Service) gpuForIdentity(ctx context.Context, options QueryOptions, iden
 	appendGPUCoverage(result, options, merged)
 	result.Warnings = append(result.Warnings, identity.Warnings...)
 	if len(result.Samples) == 0 {
-		return nil, fmt.Errorf("工作负载 %q 没有加速卡指标", options.Workload)
+		return result, fmt.Errorf("工作负载 %q 没有加速卡指标", options.Workload)
 	}
 	allHealth := map[string][]RawSeries{}
 	for _, vendor := range gpuVendors {
@@ -309,29 +309,28 @@ func sameGPUPodMemory(a, b map[string]string) bool {
 // Platform wrappers and native exporters may expose the same physical GPU
 // with different container labels. Canonicalize before grouping or summing.
 func canonicalGPUInventory(raw []RawSeries) []RawSeries {
+	keyFor := func(labels map[string]string) string {
+		// A container-local index cannot prove UUID identity. In particular,
+		// never copy a UUID into an unverified series or overwrite a conflict.
+		return strings.Join([]string{labels["node"], labels["pod"], labels["gpu"], labels["extended_resource__type"], labels["uuid"]}, "\x00")
+	}
 	groups := map[string]map[string]string{}
 	for _, item := range raw {
-		key := item.Metric["node"] + "/" + item.Metric["pod"] + "/" + item.Metric["gpu"] + "/" + item.Metric["extended_resource__type"]
-		if item.Metric["gpu"] == "" {
-			key += "/" + item.Metric["uuid"]
-		}
+		key := keyFor(item.Metric)
 		target := groups[key]
 		if target == nil {
 			target = cloneLabels(item.Metric)
 			groups[key] = target
 		}
-		for _, field := range []string{"container", "node", "uuid", "model"} {
+		for _, field := range []string{"container", "node", "model"} {
 			if target[field] == "" {
 				target[field] = item.Metric[field]
 			}
 		}
 	}
 	for i := range raw {
-		key := raw[i].Metric["node"] + "/" + raw[i].Metric["pod"] + "/" + raw[i].Metric["gpu"] + "/" + raw[i].Metric["extended_resource__type"]
-		if raw[i].Metric["gpu"] == "" {
-			key += "/" + raw[i].Metric["uuid"]
-		}
-		for _, field := range []string{"container", "node", "uuid", "model"} {
+		key := keyFor(raw[i].Metric)
+		for _, field := range []string{"container", "node", "model"} {
 			raw[i].Metric[field] = groups[key][field]
 		}
 	}
@@ -391,10 +390,6 @@ func attachGPUMemory(result *Result, used, total []*pointSeries) {
 		}
 	}
 
-}
-
-func nearbyGPUValue(points map[int64]float64, at int64) *float64 {
-	return newGPUTimeIndex(points).nearby(at)
 }
 
 func completeSeriesSummary(summary *SeriesSummary, points map[int64]float64) {

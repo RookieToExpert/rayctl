@@ -15,6 +15,28 @@ func TestGPUHealthRequiresPhysicalIdentity(t *testing.T) {
 	}
 }
 
+func TestGPUInventoryDoesNotInventUUIDFromContainerIndex(t *testing.T) {
+	for _, uuids := range [][]string{{"", "physical-a", "physical-b"}, {"physical-b", "physical-a", ""}} {
+		raw := []RawSeries{}
+		for _, uuid := range uuids {
+			raw = append(raw, RawSeries{Metric: map[string]string{"node": "n", "pod": "p", "gpu": "0", "uuid": uuid, "extended_resource__type": "nvidia.com/gpu"}})
+		}
+		canonical := canonicalGPUInventory(raw)
+		for i, uuid := range uuids {
+			if canonical[i].Metric["uuid"] != uuid {
+				t.Fatalf("UUID changed: want=%q got=%q", uuid, canonical[i].Metric["uuid"])
+			}
+		}
+		healthLabels := cloneLabels(raw[0].Metric)
+		healthLabels["uuid"] = "physical-a"
+		healthLabels["__name__"] = "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL"
+		h := gpuHealth(canonical, map[string][]RawSeries{"ecc": {{Metric: healthLabels, Values: []float64{3}}}})
+		if h.TotalCards != 3 || len(h.Anomalies) != 1 || h.Anomalies[0].UUID != "physical-a" || h.UnknownCards != 2 {
+			t.Fatalf("incorrect card association: %+v", h)
+		}
+	}
+}
+
 func TestGPUHealthSingleBitCounterIsInformational(t *testing.T) {
 	labels := map[string]string{"node": "n", "gpu": "0", "uuid": "physical-a", "pod": "p", "extended_resource__type": "nvidia.com/gpu"}
 	sbe, dbe := cloneLabels(labels), cloneLabels(labels)
