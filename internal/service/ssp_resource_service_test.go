@@ -243,13 +243,14 @@ func TestQueueDetailReasons(t *testing.T) {
 		includeDetails bool
 		want           string
 	}{
-		{name: "fast path", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled, NodeCountKnown: true}},
+		{name: "fast path", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", WorkspaceUID: "workspace-uid", SpotLending: &enabled, NodeCountKnown: true}},
 		{name: "missing workspace", details: platform.SSPQueueResourceDetails{SpotLending: &enabled, NodeCountKnown: true}, want: "workspace"},
-		{name: "default fills missing lending", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", NodeCountKnown: true}, want: "spot-lending"},
-		{name: "default ignores missing node count", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled}},
-		{name: "long loads runtime detail", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled, NodeCountKnown: true}, includeDetails: true, want: "full-details"},
-		{name: "long fills missing node count", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled}, includeDetails: true, want: "node-count"},
-		{name: "long fills both", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo"}, includeDetails: true, want: "spot-lending,node-count"},
+		{name: "missing workspace UID", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", SpotLending: &enabled, NodeCountKnown: true}, want: "workspace"},
+		{name: "default fills missing lending", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", WorkspaceUID: "workspace-uid", NodeCountKnown: true}, want: "spot-lending"},
+		{name: "default ignores missing node count", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", WorkspaceUID: "workspace-uid", SpotLending: &enabled}},
+		{name: "long loads runtime detail", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", WorkspaceUID: "workspace-uid", SpotLending: &enabled, NodeCountKnown: true}, includeDetails: true, want: "full-details"},
+		{name: "long fills missing node count", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", WorkspaceUID: "workspace-uid", SpotLending: &enabled}, includeDetails: true, want: "node-count"},
+		{name: "long fills both", details: platform.SSPQueueResourceDetails{WorkspaceName: "ws-demo", WorkspaceUID: "workspace-uid"}, includeDetails: true, want: "spot-lending,node-count"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := strings.Join(queueDetailReasons(test.details, test.includeDetails), ","); got != test.want {
@@ -412,19 +413,6 @@ func TestLikelyQueueWorkspaces(t *testing.T) {
 		got := likelyQueueWorkspaces(queueName, workspaces)
 		if len(got) != 1 || got[0].Name != want {
 			t.Fatalf("likelyQueueWorkspaces(%q) = %#v, want %q", queueName, got, want)
-		}
-	}
-}
-
-func TestInferWorkspaceNameFromQueue(t *testing.T) {
-	for queue, want := range map[string]string{
-		"queue-d-reserved-a3-llm-share":   "ws-d-a3-llm-share",
-		"queue-d-elastic-muxi-830pdf":     "ws-d-muxi-830pdf",
-		"queue-t-exclusive-wamcritic":     "ws-t-wamcritic",
-		"queue-without-known-type-marker": "-",
-	} {
-		if got := inferWorkspaceNameFromQueue(queue); got != want {
-			t.Fatalf("inferWorkspaceNameFromQueue(%q) = %q, want %q", queue, got, want)
 		}
 	}
 }

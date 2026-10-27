@@ -27,6 +27,12 @@ func TestQueueListMatchesGetAndKeepsFiveQueuesWithoutWorkspaceMetadata(t *testin
 				resources = append(resources, platform.StorageVolumeResource{ID: fmt.Sprintf("uid-%d", i), Name: fmt.Sprintf("queue-%d", i), Type: "compute.ssp.v1.queue", State: "CREATING", Region: "cn-pj-01", RID: fmt.Sprintf("/subscriptions/sub/resourceGroups/default/regions/cn-pj-01/clusters/cluster/queues/queue-%d", i), Properties: properties})
 			}
 			json.NewEncoder(w).Encode(map[string]any{"resources": resources, "total_size": 6})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/clusters/cluster/queues"):
+			queues := []map[string]any{}
+			for i := 0; i < 6; i++ {
+				queues = append(queues, map[string]any{"name": fmt.Sprintf("queue-%d", i), "uid": fmt.Sprintf("uid-%d", i), "state": "RUNNING", "workspace_name": "ws-demo", "properties": map[string]any{"workspace": map[string]string{"name": "ws-demo", "uid": "ws-uid"}}})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"queues": queues, "total_size": len(queues)})
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/clusters/cluster/queues/queue-"):
 			name := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 			fmt.Fprintf(w, `{"name":%q,"state":"RUNNING","workspace_name":"ws-demo","properties":{"advanced_settings":{"provide_spot_resource_enabled":false}}}`, name)
@@ -55,16 +61,8 @@ func TestQueueListMatchesGetAndKeepsFiveQueuesWithoutWorkspaceMetadata(t *testin
 		t.Fatal(err)
 	}
 	for _, item := range list.Items {
-		if item.State != "RUNNING" || item.State != get.State {
+		if item.State != "RUNNING" || item.State != get.State || item.Workspace != "ws-demo" {
 			t.Fatalf("list/get mismatch: %+v / %+v", item, get)
 		}
-	}
-}
-
-func TestQueueAuthoritativeStateDoesNotCrossTenantForSameName(t *testing.T) {
-	items := []SSPQueueItem{{Profile: "a", Name: "same", State: "CREATING"}, {Profile: "b", Name: "same", State: "CREATING"}}
-	queues := []platform.SSPQueue{{ProfileName: "a", Name: "same", State: "RUNNING"}, {ProfileName: "b", Name: "same", State: "DELETING"}}
-	if err := mergeAuthoritativeQueueStates(items, []string{"a/same", "b/same"}, queues); err != nil || items[0].State != "RUNNING" || items[1].State != "DELETING" {
-		t.Fatal(items, err)
 	}
 }

@@ -160,6 +160,8 @@ rayctl workspace workload list ws-d-a3-ai4s
 rayctl ws wl list ws-d-a3-ai4s -t aid --state Running
 rayctl ws workload list ws-d-a3-ai4s ws-d-a3-frontier -o json
 rayctl queue list
+# WORKSPACE 及其 UID 缺失时补查平台队列详情，与 queue get 使用同一关联来源。
+# 平台未提供关联时保持未知，不按 queue 名称拼出 workspace。
 rayctl queue get queue-d-reserved-a3-ai4s
 rayctl queue workload list queue-d-reserved-a3-ai4s
 rayctl queue wl list queue-d-reserved-a3-ai4s -t job
