@@ -14,7 +14,7 @@ const (
 )
 
 func (r *SSPQueueNodeUsageResult) IsQueryComplete() bool {
-	return r != nil && r.QuotaError == "" && r.NodeUsageError == ""
+	return r != nil && r.QuotaError == "" && r.NodeUsageError == "" && r.OwnershipError == "" && (r.Ownership == nil || r.Ownership.UnknownNodes == 0)
 }
 
 // Keep the quota and node queries independent: a failure on one side must not

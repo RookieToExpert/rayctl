@@ -191,6 +191,10 @@ type SSPQueueNodeUsageItem struct {
 	RDMATotal            string
 	AcceleratorFree      int64
 	AcceleratorTotal     int64
+	Ownership            string   `json:"ownership,omitempty" public:"omitempty"`
+	OwnerQueueUIDs       []string `json:"owner_queue_uids,omitempty" public:"omitempty"`
+	OwnerQueueNames      []string `json:"owner_queue_names,omitempty" public:"omitempty"`
+	acnUID               string
 }
 
 type SSPQueueNodeUsageResult struct {
@@ -201,8 +205,12 @@ type SSPQueueNodeUsageResult struct {
 	Scope          string
 	NodeCount      int
 	FreeOnly       bool
-	QuotaError     string `public:"omitempty"`
-	NodeUsageError string `public:"omitempty"`
+	QuotaError     string                    `public:"omitempty"`
+	NodeUsageError string                    `public:"omitempty"`
+	Ownership      *SSPQueueOwnershipSummary `public:"omitempty"`
+	OwnershipError string                    `public:"omitempty"`
+	Warnings       []string                  `public:"omitempty"`
+	vclusterUID    string
 }
 
 type SSPWorkspaceNodeUsageResult struct {
@@ -220,6 +228,23 @@ func (r *SSPQueueNodeUsageResult) FilterFreeNodes() {
 		r.NodeCount = len(r.Items)
 	}
 	r.FreeOnly = true
+	if r.SharedVCPool {
+		r.Scope = queueUsageScopeOwnedOrUnassigned
+		if r.Ownership == nil {
+			if r.OwnershipError == "" && r.NodeUsageError == "" {
+				r.OwnershipError = "节点归属尚未核实，不能将 VC 共享池直接当作本队列候选"
+			}
+			r.Items = nil
+			return
+		}
+		eligible := r.Items[:0]
+		for _, item := range r.Items {
+			if item.Ownership == queueNodeOwned || item.Ownership == queueNodeUnassigned {
+				eligible = append(eligible, item)
+			}
+		}
+		r.Items = eligible
+	}
 	r.Items = filterFreeSSPNodeUsageItems(r.Items)
 }
 
@@ -1442,7 +1467,7 @@ func (s *SSPResourceService) getSharedVCQueueNodeUsage(ctx context.Context, queu
 	}
 	items := queueNodeUsageItemsFromVC(usage.Items)
 	queue.NodeCount = len(items)
-	return &SSPQueueNodeUsageResult{Queue: *queue, Items: items, SharedVCPool: true}, nil
+	return &SSPQueueNodeUsageResult{Queue: *queue, Items: items, SharedVCPool: true, vclusterUID: usage.ClusterUID}, nil
 }
 
 func queueUsesSharedVCNodes(queue SSPQueueItem) bool {
@@ -1454,6 +1479,7 @@ func queueNodeUsageItemsFromVC(items []VCNodeResourceUsageItem) []SSPQueueNodeUs
 	result := make([]SSPQueueNodeUsageItem, 0, len(items))
 	for _, item := range items {
 		result = append(result, SSPQueueNodeUsageItem{
+			acnUID:               item.UID,
 			HostName:             item.HostName,
 			HostIP:               item.HostIP,
 			State:                item.State,

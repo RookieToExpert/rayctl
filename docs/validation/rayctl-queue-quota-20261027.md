@@ -2,6 +2,8 @@
 
 验收时间：2026-10-27 18:27（UTC+8）。环境：AIS，Linux aarch64，D 真实平台。平台及 Kubernetes 查询均为只读。
 
+后续已将 ELASTIC `--free` 的节点范围收窄为本队列占用及公共池未归属节点，见[归属过滤验收](rayctl-queue-ownership-20261027.md)。本文保留当时的共享池筛选结果。
+
 ## 问题与数据来源
 
 `queue-d-elastic-muxi-830pdf` 是 ELASTIC 队列，关联 `vc-muxi-550pl-ailab`。原命令直接展示整个 VC 的资源水位，无法与网页的队列配额比较。

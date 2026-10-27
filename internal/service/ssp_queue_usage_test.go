@@ -68,9 +68,9 @@ func TestQueueNodeUsageRetainsQuotaAndPartialResults(t *testing.T) {
 
 func TestQueueFreeFilterDoesNotSpendOrHideQuota(t *testing.T) {
 	quota := &platform.SSPQueueQuota{Resources: []platform.SSPResourceSummary{{ResourceType: "CPU", Total: "128", Allocated: "128", Unallocated: "0"}}}
-	result := &SSPQueueNodeUsageResult{SharedVCPool: true, Scope: queueUsageScopeSharedVC, Quota: quota, Items: []SSPQueueNodeUsageItem{
-		{HostName: "partial", CPUTotal: "16", CPUAllocated: "8", MemoryTotal: "32GiB", MemoryAllocated: "16GiB", AcceleratorTotal: 8, AcceleratorFree: 1},
-		{HostName: "full", CPUTotal: "16", CPUAllocated: "16", MemoryTotal: "32GiB", MemoryAllocated: "16GiB", AcceleratorTotal: 8, AcceleratorFree: 1},
+	result := &SSPQueueNodeUsageResult{SharedVCPool: true, Scope: queueUsageScopeSharedVC, Quota: quota, Ownership: &SSPQueueOwnershipSummary{OwnedNodes: 2, EligibleNodes: 2}, Items: []SSPQueueNodeUsageItem{
+		{HostName: "partial", Ownership: queueNodeOwned, CPUTotal: "16", CPUAllocated: "8", MemoryTotal: "32GiB", MemoryAllocated: "16GiB", AcceleratorTotal: 8, AcceleratorFree: 1},
+		{HostName: "full", Ownership: queueNodeOwned, CPUTotal: "16", CPUAllocated: "16", MemoryTotal: "32GiB", MemoryAllocated: "16GiB", AcceleratorTotal: 8, AcceleratorFree: 1},
 	}}
 	before := append([]platform.SSPResourceSummary(nil), quota.Resources...)
 	result.FilterFreeNodes()
