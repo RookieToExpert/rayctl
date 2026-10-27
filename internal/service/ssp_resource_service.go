@@ -194,9 +194,15 @@ type SSPQueueNodeUsageItem struct {
 }
 
 type SSPQueueNodeUsageResult struct {
-	Queue        SSPQueueItem
-	Items        []SSPQueueNodeUsageItem
-	SharedVCPool bool
+	Queue          SSPQueueItem
+	Items          []SSPQueueNodeUsageItem
+	SharedVCPool   bool
+	Quota          *platform.SSPQueueQuota `public:"omitempty"`
+	Scope          string
+	NodeCount      int
+	FreeOnly       bool
+	QuotaError     string `public:"omitempty"`
+	NodeUsageError string `public:"omitempty"`
 }
 
 type SSPWorkspaceNodeUsageResult struct {
@@ -210,6 +216,10 @@ func (r *SSPQueueNodeUsageResult) FilterFreeNodes() {
 	if r == nil {
 		return
 	}
+	if r.NodeCount == 0 {
+		r.NodeCount = len(r.Items)
+	}
+	r.FreeOnly = true
 	r.Items = filterFreeSSPNodeUsageItems(r.Items)
 }
 
@@ -1329,7 +1339,10 @@ func (s *SSPResourceService) GetQueueNodeUsage(ctx context.Context, identifier s
 	if err != nil {
 		return nil, err
 	}
-	return s.getQueueNodeUsage(ctx, queue)
+	if err := s.ensureQueuePlatformLocation(ctx, queue); err != nil {
+		return nil, err
+	}
+	return s.getQueueNodeUsageWithQuota(ctx, *queue)
 }
 
 func (s *SSPResourceService) GetWorkspaceNodeUsage(ctx context.Context, identifier string, region string) (*SSPWorkspaceNodeUsageResult, error) {

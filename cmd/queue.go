@@ -227,9 +227,12 @@ func newQueueNodeUsageCmd() *cobra.Command {
 	var freeOnly bool
 	cmd := &cobra.Command{
 		Use:   "usage <queue-name-or-uid> [queue-name-or-uid...]",
-		Short: "并行查看一个或多个 SSP 队列的逐节点资源水位",
-		Long:  "ALLOC/TOTAL 表示用户工作负载已申请资源/节点可分配资源。",
-		Args:  cobra.MinimumNArgs(1),
+		Short: "查看 SSP 队列配额及逐节点资源水位",
+		Long: "先显示与平台资源页一致的队列配额，再显示节点资源水位。\n" +
+			"ELASTIC 队列按需使用 VC 共享候选池；池中空闲不等于该队列的剩余配额。\n" +
+			"节点表的 ALLOC/TOTAL 表示已申请资源/节点可分配资源，CPU/内存优先采用 Kubernetes allocatable。\n" +
+			"--free 只筛选节点的 CPU、内存及加速卡余量，不校验队列配额或保证可调度；配额表不受筛选影响。",
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			region, err := selectedSSPRegionForLookup()
 			if err != nil {
@@ -253,6 +256,8 @@ func newQueueNodeUsageCmd() *cobra.Command {
 			for _, result := range results {
 				if result.err != nil {
 					queryErrors = append(queryErrors, fmt.Errorf("queue %q: %w", result.identifier, result.err))
+				}
+				if result.result == nil {
 					continue
 				}
 				if freeOnly {
@@ -264,7 +269,7 @@ func newQueueNodeUsageCmd() *cobra.Command {
 			return errors.Join(queryErrors...)
 		},
 	}
-	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "只显示 CPU、内存均有余量且加速卡未满的节点；CPU-only 节点检查 CPU/内存")
+	cmd.Flags().BoolVarP(&freeOnly, "free", "f", false, "仅筛选节点余量，不校验队列配额或保证可调度；CPU、内存均须有余量，加速卡未满（如有）；配额表不变")
 	return cmd
 }
 
