@@ -62,14 +62,8 @@ func PrintNodeList(nodes []service.NodeListItem, resolvedSelector string, total 
 		}, longOutput,
 	)
 
-	if total == 0 {
-		return
-	}
-
-	if limit > 0 {
-		fmt.Fprintf(os.Stdout, "Showing %d-%d of %d nodes. Use -A to show all.\n", start, end, total)
-	} else {
-		fmt.Fprintf(os.Stdout, "Showing all %d nodes.\n", total)
+	if limit > 0 && end < total {
+		fmt.Fprintf(os.Stdout, "匹配共 %d 个节点，当前显示 %d-%d；使用 -A 显示全部。\n", total, start, end)
 	}
 }
 
@@ -332,7 +326,6 @@ func PrintUserList(items []service.UserListItem, long bool) {
 		rows = append(rows, row)
 	}
 	printListTable(base, headers, rows, widths, tableOptions{}, long)
-	fmt.Fprintf(os.Stdout, "\n共 %d 个用户。\n", len(items))
 }
 
 func userGroupNames(groups []service.AuthGroupItem) string {

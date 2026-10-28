@@ -2,6 +2,8 @@
 
 `get -l` 使用增量详情：先显示名称、状态、HC namespace、节点的身份锚点，再显示默认视图没有的字段与诊断；多对象分别显示锚点。`list -l` 也使用增量列：只保留一列主标识及默认表没有的列，不重印 STATE、WORKSPACE 等默认列。同名 AID/AIR 才额外用 WORKSPACE 或 UID 区分。`-o json` 始终保留完整的已采集对象。标识和日期时间不截断、不折行，必要时允许超出终端宽度。各命令的列和示例见 [列表增量输出](docs/list-incremental-output.md)。
 
+所有 `list` 表格最后统一显示 `本次输出 N 条。`，按筛选和限量后的实际数据计数，空结果为 0，多对象合计一次；警告和查询错误放在汇总之前。JSON 保持原有结构。详见[列表条数汇总](docs/list-output-summary.md)。
+
 `queue node usage` 先显示队列配额，再显示节点水位。ELASTIC 默认只显示本队列占用节点；`--free` 显示本队列有余量节点及未归属公共节点，剩余额度见配额表 REMAINING。详见[队列配额与节点水位](docs/queue-node-usage.md)。
 
 AIR list 默认显示 NAME/STATE/READY/WORKSPACE，`READY 1/1 ×2` 表示就绪组/总组 × 每组实例数，`-n` 默认 50；`-l` 仅显示 NAME/QUEUE/CREATOR/CREATED。

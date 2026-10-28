@@ -48,6 +48,7 @@ func init() {
 	rootCmd.AddCommand(newWorkspaceCmd())
 	rootCmd.AddCommand(newSubnetCmd())
 	installJSONCommands(rootCmd)
+	installListSummaries(rootCmd)
 }
 
 func Execute() error {

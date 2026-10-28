@@ -18,11 +18,11 @@ func TestPrintSSPQueueListKeepsLongQueueOnOneLine(t *testing.T) {
 		Region:    "cn-pj-01",
 	}}}
 
-	text := captureTableOutput(t, func() { PrintSSPQueueList(result) })
+	text := captureListTableOutput(t, func() { PrintSSPQueueList(result) })
 	if !strings.Contains(text, "queue-d-reserved-muxi-h3c") {
 		t.Fatalf("queue name is missing from output:\n%s", text)
 	}
-	if !strings.Contains(text, "本次共 1 条。") {
+	if !strings.Contains(text, "本次输出 1 条。") {
 		t.Fatalf("queue total is missing from output:\n%s", text)
 	}
 	dataLines := 0
@@ -110,8 +110,8 @@ func TestPrintSSPCatalogListColumns(t *testing.T) {
 	result := &service.SSPCatalogListResult{Items: []service.SSPCatalogListItem{{
 		Name: "job-demo", State: "Running", Workspace: "ws-demo", Queue: "queue-demo", Creator: "test-user", CreatedAt: "2026-09-02 12:00:00",
 	}}}
-	text := captureTableOutput(t, func() { PrintSSPAITList(result) })
-	for _, expected := range []string{"NAME", "STATE", "WORKSPACE", "QUEUE", "CREATOR", "CREATED", "job-demo", "queue-demo", "本次筛选共 1 条。"} {
+	text := captureListTableOutput(t, func() { PrintSSPAITList(result) })
+	for _, expected := range []string{"NAME", "STATE", "WORKSPACE", "QUEUE", "CREATOR", "CREATED", "job-demo", "queue-demo", "本次输出 1 条。"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("catalog output does not contain %q:\n%s", expected, text)
 		}

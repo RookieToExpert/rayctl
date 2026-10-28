@@ -30,12 +30,12 @@ func TestJobResourceSpecRowsKeepsHeterogeneousTasksSeparate(t *testing.T) {
 }
 
 func TestPrintECPJobListUsesSingleCompactTable(t *testing.T) {
-	text := captureTableOutput(t, func() {
+	text := captureListTableOutput(t, func() {
 		PrintECPJobList(&service.JobClusterListResult{Items: []service.JobClusterItem{
 			{JobName: "job-a", Status: "Running", ClusterName: "vc-a", Submitter: "user-a", CreatedAt: "2026-09-03 12:00:00"},
 		}})
 	})
-	for _, expected := range []string{"NAME", "STATE", "VC", "CREATOR", "CREATED", "job-a", "本次筛选共 1 条"} {
+	for _, expected := range []string{"NAME", "STATE", "VC", "CREATOR", "CREATED", "job-a", "本次输出 1 条"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("ECP list output does not contain %q:\n%s", expected, text)
 		}

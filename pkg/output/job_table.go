@@ -609,9 +609,7 @@ func PrintECPJobList(result *service.JobClusterListResult) {
 		return
 	}
 	rows := make([][]string, 0)
-	total := 0
 	if result != nil {
-		total = len(result.Items)
 		for _, item := range result.Items {
 			rows = append(rows, []string{
 				emptyDash(item.JobName),
@@ -634,7 +632,6 @@ func PrintECPJobList(result *service.JobClusterListResult) {
 			minWidths:   []int{28, 12, 18, 14, 19},
 		},
 	)
-	fmt.Fprintf(os.Stdout, "\n本次筛选共 %d 条。\n", total)
 	if result != nil && len(result.Warnings) > 0 {
 		const warningLimit = 5
 		for index, warning := range result.Warnings {

@@ -239,7 +239,6 @@ func PrintSSPQueueList(result *service.SSPQueueListResult) {
 			minWidths:   []int{28, 8, 10, 24, 18, 10},
 		},
 	)
-	fmt.Fprintf(os.Stdout, "\n本次共 %d 条。\n", len(result.Items))
 }
 
 func PrintSSPQueueDetail(result *service.SSPQueueItem, longOutput bool) {
@@ -366,9 +365,7 @@ func PrintSSPAIDList(result *service.SSPCatalogListResult, longOutput bool) {
 func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool, includeResource bool, includeCreated bool, incremental bool) {
 	rows := make([][]string, 0)
 	uids := []string{}
-	total := 0
 	if result != nil {
-		total = len(result.Items)
 		for _, item := range result.Items {
 			uids = append(uids, item.UID)
 			row := []string{
@@ -442,7 +439,6 @@ func printSSPCatalogList(result *service.SSPCatalogListResult, includeNode bool,
 			minWidths:   minWidths,
 		}, incremental, listIdentity{Scope: "WORKSPACE", UIDs: uids},
 	)
-	fmt.Fprintf(os.Stdout, "\n本次筛选共 %d 条。\n", total)
 }
 
 func PrintSSPQueueNodeList(result *service.SSPQueueNodeListResult, longOutput bool) {

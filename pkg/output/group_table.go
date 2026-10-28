@@ -88,7 +88,6 @@ func PrintGroupList(items []service.GroupListItem, long bool) {
 		rows = append(rows, row)
 	}
 	printListTable(base, headers, rows, widths, tableOptions{}, long)
-	fmt.Fprintf(os.Stdout, "\n共 %d 个用户组。\n", len(items))
 }
 
 func PrintGroupGetSummary(results []*service.GroupGetResult, long bool) {

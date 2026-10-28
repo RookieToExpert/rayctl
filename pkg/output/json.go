@@ -33,6 +33,7 @@ func IsJSON() bool { return jsonSession != nil }
 
 func captureJSON(value any) bool {
 	if jsonSession == nil {
+		recordListSummary(value)
 		return false
 	}
 	if completeness, ok := value.(interface{ IsQueryComplete() bool }); ok && !completeness.IsQueryComplete() {

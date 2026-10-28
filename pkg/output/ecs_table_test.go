@@ -13,8 +13,8 @@ func TestECSListCompactAndLongOutput(t *testing.T) {
 		Items: []service.ECSListItem{{ResourceType: "ECS", Name: "ecs-production-long-name", State: "RUNNING", InternalIP: "10.0.0.1", Creator: "alice", UID: "uid-a", MachineType: "flavor-a", VPC: "vpc-production", Tenant: "tenant-a"}},
 		Total: 2, Truncated: true,
 	}
-	compact := captureTableOutput(t, func() { PrintECSList(result, false) })
-	for _, value := range []string{"TYPE", "NAME", "STATE", "INTERNAL IP", "CREATOR", "ecs-production-long-name", "RUNNING", "10.0.0.1", "alice", "Showing 1 of 2", "-n 0"} {
+	compact := captureListTableOutput(t, func() { PrintECSList(result, false) })
+	for _, value := range []string{"TYPE", "NAME", "STATE", "INTERNAL IP", "CREATOR", "ecs-production-long-name", "RUNNING", "10.0.0.1", "alice", "匹配共 2 条", "-n 0", "本次输出 1 条。"} {
 		if !strings.Contains(compact, value) {
 			t.Fatalf("compact table missing %q:\n%s", value, compact)
 		}
@@ -33,8 +33,8 @@ func TestECSListCompactAndLongOutput(t *testing.T) {
 }
 
 func TestECSListEmptyOutputReportsZeroResources(t *testing.T) {
-	text := captureTableOutput(t, func() { PrintECSList(&service.ECSListResult{}, false) })
-	if !strings.Contains(text, "Showing 0 of 0 matching resources") || strings.Contains(text, "-n 0") {
+	text := captureListTableOutput(t, func() { PrintECSList(&service.ECSListResult{}, false) })
+	if !strings.Contains(text, "本次输出 0 条。") || strings.Contains(text, "-n 0") {
 		t.Fatalf("incorrect empty inventory:\n%s", text)
 	}
 }

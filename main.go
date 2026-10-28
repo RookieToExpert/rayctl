@@ -18,7 +18,9 @@ func main() {
 		stop()
 	}()
 	if err := cmd.ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if !cmd.ErrorAlreadyReported(err) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 	if code := cmd.RequestedProcessExitCode(); code != 0 {

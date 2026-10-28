@@ -44,11 +44,9 @@ func PrintECSList(result *service.ECSListResult, long bool) {
 		minWidths:   minimums,
 		noWrapCells: makeNoWrapCells(noWrapCellsForColumns(len(rows), noWrapColumns...)...),
 	}, long)
-	fmt.Fprintf(os.Stdout, "Showing %d of %d matching resources", len(result.Items), result.Total)
 	if result.Truncated {
-		fmt.Fprint(os.Stdout, "; use -n 0 to show all")
+		fmt.Fprintf(os.Stdout, "匹配共 %d 条，使用 -n 0 显示全部。\n", result.Total)
 	}
-	fmt.Fprintln(os.Stdout)
 }
 
 func PrintECSCheckDetail(result *service.ECSCheckResult) {
