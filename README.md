@@ -2,7 +2,7 @@
 
 `get -l` 使用增量详情：先显示名称、状态、HC namespace、节点的身份锚点，再显示默认视图没有的字段与诊断；多对象分别显示锚点。`list -l` 也使用增量列：只保留一列主标识及默认表没有的列，不重印 STATE、WORKSPACE 等默认列。同名 AID/AIR 才额外用 WORKSPACE 或 UID 区分。`-o json` 始终保留完整的已采集对象。标识和日期时间不截断、不折行，必要时允许超出终端宽度。各命令的列和示例见 [列表增量输出](docs/list-incremental-output.md)。
 
-`queue node usage` 先显示队列配额，再显示节点水位。ELASTIC 的 `--free` 先保留本队列占用和公共池未归属节点，再筛资源余量；其他队列和未知归属排除，剩余额度见配额表 REMAINING。详见[队列配额与节点水位](docs/queue-node-usage.md)。
+`queue node usage` 先显示队列配额，再显示节点水位。ELASTIC 默认只显示本队列占用节点；`--free` 显示本队列有余量节点及未归属公共节点，剩余额度见配额表 REMAINING。详见[队列配额与节点水位](docs/queue-node-usage.md)。
 
 AIR list 默认显示 NAME/STATE/READY/WORKSPACE，`READY 1/1 ×2` 表示就绪组/总组 × 每组实例数，`-n` 默认 50；`-l` 仅显示 NAME/QUEUE/CREATOR/CREATED。
 
@@ -177,10 +177,12 @@ rayctl queue node list queue-d-reserved-a3-ai4s
 rayctl queue node usage queue-d-reserved-a3-ai4s
 rayctl queue node usage queue-d-reserved-a3-ai4s --free
 # usage 先显示平台资源页的队列配额，再显示节点水位。
-# ELASTIC 默认下表展示完整 VC 共享池；--free 只保留本队列占用和公共池未归属节点，再筛资源余量。
-# 归属按 VC 节点标签、已绑定活跃 Pod 及分配数据判定，排除其他队列和未知归属；OWNERSHIP 显示来源类别。
+# ELASTIC 默认只显示本队列占用节点，包括资源已满的节点。
+# --free 显示本队列有余量节点和公共池未归属节点；完整 VC 池使用 rayctl vc node usage <vc>。
+# 归属按 VC 节点标签、已绑定活跃 Pod 及分配数据判定，排除其他队列和未知归属；--free 的 OWNERSHIP 显示来源类别。
 # --free 不按配额裁剪节点，剩余额度见上表 REMAINING；配额表不变，候选不保证可调度。
-# JSON 的 metadata 保留 quota、scope、node_count（筛选前节点数）和 free_only。
+# 固定口径说明见 --help；表格只显示配额、节点和简短计数，真实警告仍保留。
+# JSON 的 metadata 保留 quota、scope、node_count（筛选前节点数）、ownership 和 free_only。
 # 配额与 --free 的详细口径见 docs/queue-node-usage.md。
 
 # AIR 推理任务和推理网关；gateway 可缩写为 gw

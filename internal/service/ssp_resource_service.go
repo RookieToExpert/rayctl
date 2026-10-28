@@ -224,27 +224,8 @@ func (r *SSPQueueNodeUsageResult) FilterFreeNodes() {
 	if r == nil {
 		return
 	}
-	if r.NodeCount == 0 {
-		r.NodeCount = len(r.Items)
-	}
 	r.FreeOnly = true
-	if r.SharedVCPool {
-		r.Scope = queueUsageScopeOwnedOrUnassigned
-		if r.Ownership == nil {
-			if r.OwnershipError == "" && r.NodeUsageError == "" {
-				r.OwnershipError = "节点归属尚未核实，不能将 VC 共享池直接当作本队列候选"
-			}
-			r.Items = nil
-			return
-		}
-		eligible := r.Items[:0]
-		for _, item := range r.Items {
-			if item.Ownership == queueNodeOwned || item.Ownership == queueNodeUnassigned {
-				eligible = append(eligible, item)
-			}
-		}
-		r.Items = eligible
-	}
+	r.filterQueueOwnership(true)
 	r.Items = filterFreeSSPNodeUsageItems(r.Items)
 }
 

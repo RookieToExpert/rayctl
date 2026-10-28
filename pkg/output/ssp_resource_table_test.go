@@ -197,7 +197,7 @@ func TestPrintSSPQueueNodeListLongOnlyShowsNewUID(t *testing.T) {
 	}
 }
 
-func TestPrintElasticQueueNodeViewsExplainSharedVCPool(t *testing.T) {
+func TestPrintElasticQueueNodeListAndUsageHaveDistinctScopes(t *testing.T) {
 	queue := service.SSPQueueItem{Name: "queue-elastic", Type: "ELASTIC", VCluster: "vc-cpu"}
 	listText := captureTableOutput(t, func() {
 		PrintSSPQueueNodeList(&service.SSPQueueNodeListResult{Queue: queue, SharedVCPool: true}, false)
@@ -205,13 +205,15 @@ func TestPrintElasticQueueNodeViewsExplainSharedVCPool(t *testing.T) {
 	usageText := captureTableOutput(t, func() {
 		PrintSSPQueueNodeUsage([]*service.SSPQueueNodeUsageResult{{Queue: queue, SharedVCPool: true}})
 	})
-	for _, output := range []string{listText, usageText} {
-		for _, expected := range []string{"ELASTIC", "共享候选池", "优先复用", "非队列独占"} {
-			if !strings.Contains(output, expected) {
-				t.Fatalf("missing %q:\n%s", expected, output)
-			}
+	for _, expected := range []string{"ELASTIC", "共享候选池", "优先复用", "非队列独占"} {
+		if !strings.Contains(listText, expected) {
+			t.Fatalf("missing %q:\n%s", expected, listText)
 		}
 	}
+	if !strings.Contains(usageText, "本队列占用节点") || strings.Contains(usageText, "共享候选池") {
+		t.Fatal(usageText)
+	}
+	assertNoQueueUsageExplanations(t, usageText)
 }
 
 func TestPrintQueueNodeUsageHidesAcceleratorForCPUOnlyNodes(t *testing.T) {

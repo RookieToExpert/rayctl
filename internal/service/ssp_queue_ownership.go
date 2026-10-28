@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	queueUsageScopeOwned             = "queue_owned_nodes"
 	queueUsageScopeOwnedOrUnassigned = "queue_owned_or_unassigned"
 	queueNodeOwned                   = "owned"
 	queueNodeUnassigned              = "unassigned"
@@ -30,14 +31,26 @@ type SSPQueueOwnershipSummary struct {
 	EligibleNodes   int    `json:"eligible_nodes"`
 }
 
-// FilterQueueFreeNodes applies the queue boundary before the resource filter.
-// A successful full VC snapshot is required before a node can be unassigned.
 func (s *SSPResourceService) FilterQueueFreeNodes(ctx context.Context, result *SSPQueueNodeUsageResult) error {
+	return s.FilterQueueUsageNodes(ctx, result, true)
+}
+
+// FilterQueueUsageNodes limits the default view to queue-owned nodes. The free
+// view also admits unassigned nodes, then checks their remaining resources.
+func (s *SSPResourceService) FilterQueueUsageNodes(ctx context.Context, result *SSPQueueNodeUsageResult, freeOnly bool) error {
 	if result == nil {
 		return nil
 	}
+	filter := func() {
+		result.FreeOnly = freeOnly
+		if freeOnly {
+			result.FilterFreeNodes()
+		} else {
+			result.filterQueueOwnership(false)
+		}
+	}
 	if !result.SharedVCPool || result.NodeUsageError != "" || result.Ownership != nil {
-		result.FilterFreeNodes()
+		filter()
 		return nil
 	}
 	var err error
@@ -54,14 +67,45 @@ func (s *SSPResourceService) FilterQueueFreeNodes(ctx context.Context, result *S
 	if err != nil {
 		wrapped := &queueUsageSourceError{source: "节点归属查询", err: err}
 		result.OwnershipError = wrapped.Error()
-		result.FilterFreeNodes()
+		filter()
 		return wrapped
 	}
 	if result.Ownership.UnknownNodes > 0 {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("%d 个节点归属无法确认，已排除，未计入公共池", result.Ownership.UnknownNodes))
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d 个节点归属无法确认，已排除", result.Ownership.UnknownNodes))
 	}
-	result.FilterFreeNodes()
+	filter()
 	return nil
+}
+
+func (r *SSPQueueNodeUsageResult) filterQueueOwnership(includeUnassigned bool) {
+	if r.NodeCount == 0 {
+		r.NodeCount = len(r.Items)
+	}
+	if !r.SharedVCPool {
+		return
+	}
+	r.Scope = queueUsageScopeOwned
+	if includeUnassigned {
+		r.Scope = queueUsageScopeOwnedOrUnassigned
+	}
+	if r.Ownership == nil {
+		if r.OwnershipError == "" && r.NodeUsageError == "" {
+			r.OwnershipError = "节点归属尚未核实，不能将 VC 共享池直接当作本队列节点"
+		}
+		r.Items = nil
+		return
+	}
+	r.Ownership.EligibleNodes = r.Ownership.OwnedNodes
+	if includeUnassigned {
+		r.Ownership.EligibleNodes += r.Ownership.UnassignedNodes
+	}
+	eligible := r.Items[:0]
+	for _, item := range r.Items {
+		if item.Ownership == queueNodeOwned || (includeUnassigned && item.Ownership == queueNodeUnassigned) {
+			eligible = append(eligible, item)
+		}
+	}
+	r.Items = eligible
 }
 
 func (s *SSPResourceService) readQueueOwnership(ctx context.Context, queue SSPQueueItem) ([]corev1.Node, []corev1.Pod, error) {

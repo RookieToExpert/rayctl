@@ -17,45 +17,40 @@ func PrintSSPQueueNodeUsage(results []*service.SSPQueueNodeUsageResult) {
 		if result == nil {
 			continue
 		}
-		fmt.Fprintf(os.Stdout, "队列配额 [%s]（%s；平台资源页口径）\n", emptyDash(result.Queue.Name), emptyDash(result.Queue.Type))
+		fmt.Fprintf(os.Stdout, "队列配额 [%s]（%s）\n", emptyDash(result.Queue.Name), emptyDash(result.Queue.Type))
 		if result.Quota == nil {
-			fmt.Fprintln(os.Stdout, "队列配额未能读取，不能据此判断队列剩余额度。")
+			fmt.Fprintln(os.Stdout, "队列配额未能读取。")
 		} else {
 			printSSPQueueQuota(result.Quota)
 		}
 		fmt.Fprintln(os.Stdout)
 		if result.SharedVCPool && result.FreeOnly {
 			fmt.Fprintf(os.Stdout, "本队列候选节点 [%s] / VC [%s]\n", emptyDash(result.Queue.Name), emptyDash(result.Queue.VCluster))
-			fmt.Fprintln(os.Stdout, "仅保留本队列已占用和公共池未归属节点；排除其他队列和未知归属，不把其他队列节点上的碎片算作本队列候选。")
-			if ownership := result.Ownership; ownership != nil {
-				fmt.Fprintf(os.Stdout, "VC 共 %d 台：本队列占用 %d，公共池未归属 %d，其他队列 %d，归属未知 %d；按归属保留 %d 台。\n", result.NodeCount, ownership.OwnedNodes, ownership.UnassignedNodes, ownership.OtherNodes, ownership.UnknownNodes, ownership.EligibleNodes)
-			}
 		} else if result.SharedVCPool {
-			fmt.Fprintf(os.Stdout, "VC 共享候选池 [%s] / 队列 [%s]\n", emptyDash(result.Queue.VCluster), emptyDash(result.Queue.Name))
-			fmt.Fprintln(os.Stdout, "ELASTIC 按需使用共享池，已分配节点会被优先复用，非队列独占资源；候选池余量不等于队列剩余配额。")
+			fmt.Fprintf(os.Stdout, "本队列占用节点 [%s] / VC [%s]\n", emptyDash(result.Queue.Name), emptyDash(result.Queue.VCluster))
 		} else {
 			fmt.Fprintf(os.Stdout, "队列节点 [%s]\n", emptyDash(result.Queue.Name))
-		}
-		fmt.Fprintln(os.Stdout, "ALLOC/TOTAL = 已申请资源/节点可分配资源；CPU/内存优先采用 Kubernetes allocatable，与上方队列配额口径不同。")
-		if result.FreeOnly {
-			fmt.Fprintln(os.Stdout, "--free 再筛选 CPU、内存均有余量且加速卡未满（如有）的节点；节点筛选不校验队列配额，不保证可调度。队列剩余额度见上表 REMAINING，配额表不受筛选影响。")
 		}
 		for _, warning := range result.Warnings {
 			fmt.Fprintf(os.Stdout, "警告：%s\n", warning)
 		}
 		if result.NodeUsageError != "" {
-			fmt.Fprintln(os.Stdout, "节点用量未能读取，不能将其视为空池或没有空闲节点。")
+			fmt.Fprintln(os.Stdout, "节点用量未能读取。")
 		} else if result.OwnershipError != "" {
-			fmt.Fprintln(os.Stdout, "节点归属未能核实，未将未知节点计入公共池；保留上方队列配额，不能据此判断没有空闲节点。")
+			fmt.Fprintln(os.Stdout, "节点归属未能核实。")
 		} else {
-			count := result.NodeCount
-			if count == 0 {
-				count = len(result.Items)
-			}
 			if result.SharedVCPool && result.FreeOnly && result.Ownership != nil {
-				fmt.Fprintf(os.Stdout, "归属候选共 %d 台，本次显示 %d 台。\n", result.Ownership.EligibleNodes, len(result.Items))
+				owned, unassigned := 0, 0
+				for _, item := range result.Items {
+					if item.Ownership == "owned" {
+						owned++
+					} else if item.Ownership == "unassigned" {
+						unassigned++
+					}
+				}
+				fmt.Fprintf(os.Stdout, "共 %d 台：本队列 %d，公共池未归属 %d。\n", len(result.Items), owned, unassigned)
 			} else {
-				fmt.Fprintf(os.Stdout, "节点范围共 %d 台，本次显示 %d 台。\n", count, len(result.Items))
+				fmt.Fprintf(os.Stdout, "共 %d 台。\n", len(result.Items))
 			}
 			printSSPQueueUsageNodes(result)
 		}

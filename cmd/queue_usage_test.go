@@ -16,7 +16,7 @@ import (
 
 func TestQueueUsageHelpExplainsQuotaAndFreeScope(t *testing.T) {
 	cmd := newQueueNodeUsageCmd()
-	for _, text := range []string{"平台资源页", "VC 共享候选池", "--free", "不校验队列配额", "配额表不受筛选影响", "本队列已占用", "公共池未归属", "归属未知", "REMAINING"} {
+	for _, text := range []string{"平台资源页", "默认只显示本队列已占用", "vc node usage <vc>", "--free", "不校验队列配额", "配额表不受筛选影响", "公共池未归属", "归属未知", "REMAINING"} {
 		if !strings.Contains(cmd.Long, text) {
 			t.Fatalf("help missing %q", text)
 		}

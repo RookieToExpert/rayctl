@@ -39,6 +39,65 @@ func ownershipResult(items ...SSPQueueNodeUsageItem) *SSPQueueNodeUsageResult {
 		Quota: &platform.SSPQueueQuota{Resources: []platform.SSPResourceSummary{{ResourceType: "CPU", Total: "128", Allocated: "128", Unallocated: "0"}}}}
 }
 
+func TestQueueUsageDefaultShowsOwnedIncludingFullNodes(t *testing.T) {
+	for _, freeOnly := range []bool{false, true} {
+		t.Run(fmt.Sprint(freeOnly), func(t *testing.T) {
+			items := []SSPQueueNodeUsageItem{ownershipUsage("own-full"), ownershipUsage("own-free"), ownershipUsage("public"), ownershipUsage("other")}
+			items[0].CPUAllocated, items[0].AcceleratorFree = "16", 0
+			items[0].AcceleratorAllocated = "8"
+			items[1].CPUAllocated, items[1].AcceleratorAllocated, items[1].AcceleratorFree = "8", "4", 4
+			nodes := []corev1.Node{ownershipNode("own-full"), ownershipNode("own-free"), ownershipNode("public"), ownershipNode("other")}
+			pods := []corev1.Pod{ownershipPod("own-full", "self-uid"), ownershipPod("own-free", "self-uid"), ownershipPod("other", "other-uid")}
+			client := fake.NewClientset()
+			client.PrependReactor("list", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, &corev1.NodeList{Items: nodes}, nil
+			})
+			client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, &corev1.PodList{Items: pods}, nil
+			})
+			s := NewSSPResourceService(nil, nil)
+			s.SetQueueNodeClientResolver(func(SSPQueueItem) (kubernetes.Interface, error) { return client, nil })
+			r := ownershipResult(items...)
+			quota := r.Quota
+			if err := s.FilterQueueUsageNodes(t.Context(), r, freeOnly); err != nil {
+				t.Fatal(err)
+			}
+			want, scope, eligible := []string{"own-full", "own-free"}, queueUsageScopeOwned, 2
+			if freeOnly {
+				want, scope, eligible = []string{"own-free", "public"}, queueUsageScopeOwnedOrUnassigned, 3
+			}
+			got := make([]string, 0, len(r.Items))
+			for _, item := range r.Items {
+				got = append(got, item.HostName)
+			}
+			if !reflect.DeepEqual(got, want) || r.Scope != scope || r.FreeOnly != freeOnly || r.NodeCount != 4 || r.Ownership.EligibleNodes != eligible || r.Quota != quota || !r.IsQueryComplete() {
+				t.Fatalf("nodes=%v result=%+v", got, r)
+			}
+		})
+	}
+}
+
+func TestQueueUsageDefaultOwnershipFailureRetainsQuota(t *testing.T) {
+	for _, missingUID := range []bool{false, true} {
+		t.Run(fmt.Sprint(missingUID), func(t *testing.T) {
+			client := fake.NewClientset()
+			client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("denied"))
+			})
+			s := NewSSPResourceService(nil, nil)
+			s.SetQueueNodeClientResolver(func(SSPQueueItem) (kubernetes.Interface, error) { return client, nil })
+			r := ownershipResult(ownershipUsage("unverified"))
+			if missingUID {
+				r.Queue.UID = ""
+			}
+			err := s.FilterQueueUsageNodes(t.Context(), r, false)
+			if err == nil || r.Quota == nil || len(r.Items) != 0 || r.Scope != queueUsageScopeOwned || r.FreeOnly || r.OwnershipError == "" || r.IsQueryComplete() {
+				t.Fatalf("result=%+v err=%v", r, err)
+			}
+		})
+	}
+}
+
 func TestQueueOwnershipExcludesOtherFragmentsAndUnknownEvidence(t *testing.T) {
 	names := []string{"own", "public", "other", "reserved", "mixed", "unknown-workload", "unknown-allocation", "missing", "wrong-acn", "wrong-vc", "same-name-new-uid", "duplicate-acn"}
 	items := []SSPQueueNodeUsageItem{}
