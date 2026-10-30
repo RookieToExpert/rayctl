@@ -82,25 +82,26 @@ func PrintRBACGetResult(result *service.RBACGetResult, long bool) {
 		rows = append(rows, []string{
 			emptyDash(item.Kind),
 			emptyDash(item.Namespace),
+			emptyDash(item.Name),
 			emptyDash(item.Role),
 			emptyDash(item.Subjects),
 			rbacCreateDate(item.CreatedAt),
 		})
 	}
 	if len(rows) == 0 {
-		rows = append(rows, []string{"-", "-", "-", "-", "-"})
+		rows = append(rows, []string{"-", "-", "-", "-", "-", "-"})
 	}
-	noWrapCells := make([][2]int, 0, len(rows)*5)
-	for column := 0; column < 5; column++ {
+	noWrapCells := make([][2]int, 0, len(rows)*6)
+	for column := 0; column < 6; column++ {
 		noWrapCells = append(noWrapCells, noWrapCellsForSingleColumn(len(rows), column)...)
 	}
 	printBoxTableWithOptions(
-		[]string{"TYPE", "NAMESPACE", "ROLE", "SUBJECTS", "DATE"},
+		[]string{"TYPE", "NAMESPACE", "BINDING", "ROLE", "SUBJECTS", "DATE"},
 		rows,
-		[]int{4, 24, 13, 20, 10},
+		[]int{4, 24, 20, 13, 20, 10},
 		tableOptions{
 			noWrapCells: makeNoWrapCells(noWrapCells...),
-			minWidths:   []int{4, 12, 13, 10, 10},
+			minWidths:   []int{4, 12, 12, 13, 10, 10},
 			rowDividers: true,
 		},
 	)
@@ -121,28 +122,28 @@ func PrintRBACGetSummary(results []*service.RBACGetResult, includeVC bool, long 
 	rows := make([][]string, 0)
 	for _, result := range results {
 		for _, item := range result.Items {
-			row := []string{emptyDash(item.Namespace), emptyDash(item.Role), emptyDash(item.Subjects)}
+			row := []string{emptyDash(item.Namespace), emptyDash(item.Kind), emptyDash(item.Name), emptyDash(item.Role), emptyDash(item.Subjects)}
 			if includeVC {
 				row = append([]string{emptyDash(result.ClusterName)}, row...)
 			}
 			if long {
-				row = append(row, emptyDash(item.Kind), emptyDash(item.Name), emptyDash(item.CreatedAt))
+				row = append(row, emptyDash(item.CreatedAt))
 			}
 			rows = append(rows, row)
 		}
 	}
-	headers := []string{"NAMESPACE", "ROLE", "SUBJECTS"}
-	widths := []int{28, 16, 32}
-	minimums := []int{12, 10, 14}
+	headers := []string{"NAMESPACE", "TYPE", "BINDING", "ROLE", "SUBJECTS"}
+	widths := []int{28, 5, 32, 16, 32}
+	minimums := []int{12, 4, 14, 10, 14}
 	if includeVC {
 		headers = append([]string{"VC"}, headers...)
 		widths = append([]int{28}, widths...)
 		minimums = append([]int{14}, minimums...)
 	}
 	if long {
-		headers = append(headers, "TYPE", "BINDING", "CREATE TIME")
-		widths = append(widths, 5, 32, 19)
-		minimums = append(minimums, 4, 14, 19)
+		headers = append(headers, "CREATE TIME")
+		widths = append(widths, 19)
+		minimums = append(minimums, 19)
 	}
 	if len(rows) == 0 {
 		row := make([]string, len(headers))
