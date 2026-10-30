@@ -122,28 +122,28 @@ func PrintRBACGetSummary(results []*service.RBACGetResult, includeVC bool, long 
 	rows := make([][]string, 0)
 	for _, result := range results {
 		for _, item := range result.Items {
-			row := []string{emptyDash(item.Namespace), emptyDash(item.Name), emptyDash(item.Role), emptyDash(item.Subjects)}
+			row := []string{emptyDash(item.Namespace), emptyDash(item.Kind), emptyDash(item.Name), emptyDash(item.Role), emptyDash(item.Subjects)}
 			if includeVC {
 				row = append([]string{emptyDash(result.ClusterName)}, row...)
 			}
 			if long {
-				row = append(row, emptyDash(item.Kind), emptyDash(item.CreatedAt))
+				row = append(row, emptyDash(item.CreatedAt))
 			}
 			rows = append(rows, row)
 		}
 	}
-	headers := []string{"NAMESPACE", "BINDING", "ROLE", "SUBJECTS"}
-	widths := []int{28, 32, 16, 32}
-	minimums := []int{12, 14, 10, 14}
+	headers := []string{"NAMESPACE", "TYPE", "BINDING", "ROLE", "SUBJECTS"}
+	widths := []int{28, 5, 32, 16, 32}
+	minimums := []int{12, 4, 14, 10, 14}
 	if includeVC {
 		headers = append([]string{"VC"}, headers...)
 		widths = append([]int{28}, widths...)
 		minimums = append([]int{14}, minimums...)
 	}
 	if long {
-		headers = append(headers, "TYPE", "CREATE TIME")
-		widths = append(widths, 5, 19)
-		minimums = append(minimums, 4, 19)
+		headers = append(headers, "CREATE TIME")
+		widths = append(widths, 19)
+		minimums = append(minimums, 19)
 	}
 	if len(rows) == 0 {
 		row := make([]string, len(headers))

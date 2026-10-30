@@ -30,11 +30,11 @@ func TestRBACSummaryDefaultIncludesBinding(t *testing.T) {
 	out := captureTableOutput(t, func() { PrintRBACGetSummary([]*service.RBACGetResult{rbacSampleResult()}, false, false) })
 	t.Log("\n" + out)
 	h := headerLine(out, "NAMESPACE")
-	iN, iB, iR, iS := strings.Index(h, "NAMESPACE"), strings.Index(h, "BINDING"), strings.Index(h, "ROLE"), strings.Index(h, "SUBJECTS")
-	if !(iN >= 0 && iN < iB && iB < iR && iR < iS) {
+	iN, iT, iB, iR, iS := strings.Index(h, "NAMESPACE"), strings.Index(h, "TYPE"), strings.Index(h, "BINDING"), strings.Index(h, "ROLE"), strings.Index(h, "SUBJECTS")
+	if !(iN >= 0 && iN < iT && iT < iB && iB < iR && iR < iS) {
 		t.Fatalf("unexpected header order: %q", h)
 	}
-	for _, want := range []string{"cluster-admin-d4crd", "edit-2jh7g"} {
+	for _, want := range []string{"cluster-admin-d4crd", "edit-2jh7g", "CRB", "RB"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("default output missing binding %q:\n%s", want, out)
 		}
